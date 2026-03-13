@@ -1,0 +1,14 @@
+{
+  "project_name": "UNASSIGNED",
+  "global_status": "idle",
+  "current_actor": "optio-orchestrator",
+  "tasks": {
+    "backend": { "status": "pending", "assigned_to": "backend-architect", "description": "", "artifacts": [] },
+    "frontend": { "status": "pending", "assigned_to": "frontend-weaver", "description": "", "artifacts": [] },
+    "systems": { "status": "pending", "assigned_to": "systems-engineer", "description": "", "artifacts": [] },
+    "qa": { "status": "pending", "assigned_to": "qa-centurion", "description": "", "artifacts": [] },
+    "research": { "status": "pending", "assigned_to": "scout-researcher", "description": "", "artifacts": [] },
+    "brand": { "status": "pending", "assigned_to": "brand-architect", "description": "", "artifacts": [] },
+    "media": { "status": "pending", "assigned_to": "media-strategist", "description": "", "artifacts": [] }
+  }
+}
