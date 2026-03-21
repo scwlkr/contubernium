@@ -28,19 +28,21 @@ else
 {
   "project_name": "UNASSIGNED",
   "global_status": "idle",
-  "current_actor": "optio-orchestrator",
+  "current_actor": "decanus",
   "tasks": {
-    "backend": { "status": "pending", "assigned_to": "backend-architect", "description": "", "artifacts": [] },
-    "frontend": { "status": "pending", "assigned_to": "frontend-weaver", "description": "", "artifacts": [] },
-    "systems": { "status": "pending", "assigned_to": "systems-engineer", "description": "", "artifacts": [] },
-    "qa": { "status": "pending", "assigned_to": "qa-centurion", "description": "", "artifacts": [] },
-    "research": { "status": "pending", "assigned_to": "scout-researcher", "description": "", "artifacts": [] },
-    "brand": { "status": "pending", "assigned_to": "brand-architect", "description": "", "artifacts": [] },
-    "media": { "status": "pending", "assigned_to": "media-strategist", "description": "", "artifacts": [] }
+    "backend": { "status": "pending", "assigned_to": "faber", "description": "", "artifacts": [] },
+    "frontend": { "status": "pending", "assigned_to": "artifex", "description": "", "artifacts": [] },
+    "systems": { "status": "pending", "assigned_to": "architectus", "description": "", "artifacts": [] },
+    "qa": { "status": "pending", "assigned_to": "tesserarius", "description": "", "artifacts": [] },
+    "research": { "status": "pending", "assigned_to": "explorator", "description": "", "artifacts": [] },
+    "brand": { "status": "pending", "assigned_to": "signifer", "description": "", "artifacts": [] },
+    "media": { "status": "pending", "assigned_to": "praeco", "description": "", "artifacts": [] },
+    "docs": { "status": "pending", "assigned_to": "calo", "description": "", "artifacts": [] },
+    "bulk_ops": { "status": "pending", "assigned_to": "mulus", "description": "", "artifacts": [] }
   }
 }
 EOF
     echo "✅ Local contubernium_state.json initialized."
 fi
 
-echo "🚀 Swarm deployed! Awaiting Optio commands."
+echo "🚀 Contubernium deployed! Awaiting Decanus orders."

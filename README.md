@@ -1,26 +1,28 @@
 # Contubernium
 
-**Contubernium** is an 8-agent localized workspace scaffolding designed to orchestrate complex development tasks using a team of specialized AI agents. The project uses a central deployment script to provision state management and link agent skills to any target repository.
+**Contubernium** is a 10-agent localized workspace scaffolding designed to orchestrate complex development tasks using a disciplined Roman command structure. The project uses a central deployment script to provision state management and link agent skills to any target repository.
 
 ## 🚀 Current Status
 
-- **Project Scaffolding Complete**: The foundational directory structure for the 8-agent swarm is established under `.agents/`.
-- **Agent Personas Defined**: Skill definitions (`SKILL.md`) for all 8 agents have been created within their respective directories.
+- **Project Scaffolding Complete**: The foundational directory structure for the 10-agent contubernium is established under `.agents/`.
+- **Agent Personas Defined**: Skill definitions (`SKILL.md`) for all 10 agents are maintained within their respective directories.
 - **State Management Initiated**: The local JSON state manager (`contubernium_state.json`) logic and structure are successfully scaffolded.
-- **Deployment Script Standardized**: `init.sh` has been built and refined to handle the global `.agents` symlinking and state hydration without overwriting existing data.
+- **Deployment Script Standardized**: `init.sh` hydrates the Roman roster and protects existing project state from being overwritten.
 
-## 🤖 The Swarm
+## 🤖 The Roster
 
-The workspace is powered by an orchestrator and 7 specialized agents:
+The workspace is powered by 8 core legionaries and 2 auxiliaries.
 
-1. **optio-orchestrator**: The commander. Parses user requests, updates the state file, and delegates tasks.
-2. **backend-architect**: Builds databases, APIs, and server logic.
-3. **brand-architect**: Enforces visual identity, typography, and design rules.
-4. **frontend-weaver**: Builds the user interface and connects frontend logic to APIs.
-5. **media-strategist**: Handles marketing copy, release notes, and social strategy.
-6. **qa-centurion**: Ruthless code reviewer and tester.
-7. **scout-researcher**: Gathers technical docs, competitive analysis, and API specs.
-8. **systems-engineer**: Manages infrastructure, CI/CD, and environment scripts.
+1. **decanus**: The state commander who reads the mission, assigns work, and updates `contubernium_state.json`.
+2. **faber**: The backend blacksmith who builds databases, APIs, and server logic.
+3. **artifex**: The frontend artisan who builds the interface and connects client behavior to the backend.
+4. **architectus**: The systems siege-engineer who manages infrastructure, CI/CD, and deployment scripts.
+5. **tesserarius**: The QA gatekeeper who reviews work for security, logic, regressions, and performance issues.
+6. **explorator**: The research scout who gathers technical docs, API specs, and external intelligence.
+7. **signifer**: The brand standard-bearer who enforces visual identity and design discipline.
+8. **praeco**: The media herald who writes launch copy, release notes, and social strategy.
+9. **calo**: The documentation scribe who updates READMEs, markdown docs, and supporting comments after changes land.
+10. **mulus**: The pack mule who handles bulk formatting, asset conversion, and high-volume file operations.
 
 ## 🛠️ Usage
 
@@ -32,7 +34,7 @@ To initialize the swarm in a target directory (assuming Contubernium is your glo
 
 This script will:
 1. Safely symlink the `.agents` directory to your local working directory.
-2. Generate `contubernium_state.json` to keep track of tasks across the swarm.
+2. Generate `contubernium_state.json` to keep track of tasks across the contubernium, including documentation and bulk-ops helper lanes.
 
 ## 📄 State Tracking
 
@@ -40,4 +42,4 @@ Contubernium relies on `contubernium_state.json` to monitor the overarching proj
 - `project_name`
 - `global_status`
 - `current_actor`
-- Specific tasks assigned to various agents with corresponding statuses.
+- Task lanes for backend, frontend, systems, QA, research, brand, media, documentation, and bulk operations.
