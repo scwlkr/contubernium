@@ -3,6 +3,7 @@
 # Find the absolute path to the directory where this script lives
 GLOBAL_BARRACKS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AGENTS_DIR="$GLOBAL_BARRACKS/.agents"
+STATE_TEMPLATE="$GLOBAL_BARRACKS/templates/contubernium_state.template.json"
 
 echo "🏛️ Deploying Contubernium..."
 
@@ -12,7 +13,13 @@ if [ ! -d "$AGENTS_DIR" ]; then
     exit 1
 fi
 
-# 2. Create the symlink (safeguarded so it doesn't overwrite existing ones)
+# 2. Verify the state template exists
+if [ ! -f "$STATE_TEMPLATE" ]; then
+    echo "❌ Error: State template not found at $STATE_TEMPLATE"
+    exit 1
+fi
+
+# 3. Create the symlink (safeguarded so it doesn't overwrite existing ones)
 if [ -e ".agents" ]; then
     echo "⚠️ .agents symlink already exists in this directory."
 else
@@ -20,29 +27,12 @@ else
     echo "✅ Agents symlinked successfully."
 fi
 
-# 3. Generate the local state file (safeguarded to protect existing project memory)
+# 4. Generate the local state file (safeguarded to protect existing project memory)
 if [ -f "contubernium_state.json" ]; then
     echo "⚠️ contubernium_state.json already exists. Skipping to protect state."
 else
-    cat << 'EOF' > contubernium_state.json
-{
-  "project_name": "UNASSIGNED",
-  "global_status": "idle",
-  "current_actor": "decanus",
-  "tasks": {
-    "backend": { "status": "pending", "assigned_to": "faber", "description": "", "artifacts": [] },
-    "frontend": { "status": "pending", "assigned_to": "artifex", "description": "", "artifacts": [] },
-    "systems": { "status": "pending", "assigned_to": "architectus", "description": "", "artifacts": [] },
-    "qa": { "status": "pending", "assigned_to": "tesserarius", "description": "", "artifacts": [] },
-    "research": { "status": "pending", "assigned_to": "explorator", "description": "", "artifacts": [] },
-    "brand": { "status": "pending", "assigned_to": "signifer", "description": "", "artifacts": [] },
-    "media": { "status": "pending", "assigned_to": "praeco", "description": "", "artifacts": [] },
-    "docs": { "status": "pending", "assigned_to": "calo", "description": "", "artifacts": [] },
-    "bulk_ops": { "status": "pending", "assigned_to": "mulus", "description": "", "artifacts": [] }
-  }
-}
-EOF
+    cp "$STATE_TEMPLATE" contubernium_state.json
     echo "✅ Local contubernium_state.json initialized."
 fi
 
-echo "🚀 Contubernium deployed! Awaiting Decanus orders."
+echo "🚀 Contubernium deployed! Awaiting Decanus loop orders."
