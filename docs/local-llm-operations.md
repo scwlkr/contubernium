@@ -94,13 +94,25 @@ contubernium ui
 The TUI supports:
 
 - direct mission prompts
+- live state context for actor, lane, loop iteration, provider, model, and last error
+- streamed Ollama output in the mission log while the terminal remains interactive
 - `/doctor`
 - `/models`
 - `/model <n|name>`
 - `/status`
 - `/resume`
+- `/interrupt`
 - `/clear`
 - `/exit`
+
+Keyboard controls:
+
+- `Enter` submits the current input line
+- `Up` / `Down` scroll the mission log
+- `PageUp` / `PageDown` scroll faster
+- `Left` / `Right` move inside the input field
+- `Ctrl+C` interrupts the active loop or exits when idle
+- `y` / `n` responds to approval prompts for guarded actions
 
 ## Day-To-Day Commands
 
@@ -128,6 +140,8 @@ That means:
 - explicitly blocked commands never run
 
 If a command is denied, the runtime records the blocked condition in state and logs. Use `resume` after changing the situation.
+
+Inside the TUI, those confirmations appear inline in the command tent instead of as blocking terminal prompts from the worker thread.
 
 ## Log Locations
 
@@ -187,6 +201,8 @@ This is expected sometimes with local models. The runtime will try bounded repai
 - reduce prompt complexity
 - lower context pressure
 
+During TUI runs you will still see the streamed attempt in the ledger, followed by the repair retry.
+
 ### The context window is too small
 
 Symptoms:
@@ -208,6 +224,8 @@ This means the policy is working as designed. Either:
 - approve the action when prompted
 - change the policy in config
 - choose a less risky workflow
+
+If you need to stop a long-running inference or loop mid-flight, press `Ctrl+C` or run `/interrupt`.
 
 ### The backend is not Ollama
 

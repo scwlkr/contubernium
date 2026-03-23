@@ -56,7 +56,11 @@ Supported commands:
 `ui`
 - Starts the full-screen Roman-styled terminal UI in the current project.
 - Auto-scaffolds `.contubernium/` if it is missing.
+- Runs a raw ANSI renderer with a background worker thread so the screen remains interactive while a mission is executing.
+- Streams Ollama chat output chunk-by-chunk into the mission log.
+- Shows live mission context from `.contubernium/state.json` in the header or side panel.
 - Supports slash commands for model discovery and model switching.
+- Supports inline approval prompts for guarded writes and shell actions.
 
 `contubernium` with no args
 - Starts the same interactive UI as `contubernium ui`.
@@ -68,8 +72,18 @@ Supported commands:
 - `/model <n|name>`
 - `/status`
 - `/resume`
+- `/interrupt`
 - `/clear`
 - `/exit`
+
+### TUI Keyboard Controls
+
+- `Enter` submits the active input line.
+- `Up` / `Down` scroll the chat log.
+- `PageUp` / `PageDown` scroll the chat log faster.
+- `Left` / `Right` move within the input line.
+- `Ctrl+C` interrupts the active loop or exits when the UI is idle.
+- `y` / `n` answers approval prompts when the runtime is waiting on operator confirmation.
 
 ## File Layout
 
@@ -193,6 +207,12 @@ Output fields:
 - `model_name`
 - `latency_ms`
 
+### Streaming Behavior
+
+- `ollama-native` uses streaming mode for the interactive UI and forwards chunks to the TUI worker queue as they arrive.
+- The UI stores streamed chunks separately from the render loop so terminal input and repainting do not block on inference latency.
+- Non-interactive commands still use the same runtime loop and write the final provider payload to the per-turn log.
+
 ## Supported Providers
 
 ### `ollama-native`
@@ -201,6 +221,11 @@ Expected endpoints:
 
 - `GET /api/tags`
 - `POST /api/chat`
+
+Interactive expectation:
+
+- `POST /api/chat` is called with `stream=true` inside the TUI worker.
+- The runtime consumes newline-delimited JSON chunks, appends `message.content` to the live chat log, and interrupts the child request when the operator presses `Ctrl+C`.
 
 ### `openai-compatible`
 
@@ -307,6 +332,8 @@ Default policy:
 - shell commands require confirmation
 - blocked command patterns always fail
 
+In the TUI, confirmations are surfaced as inline approval prompts instead of blocking stdin reads in the worker thread.
+
 ## Retry And Repair
 
 When JSON parsing fails:
@@ -316,6 +343,17 @@ When JSON parsing fails:
 3. ask the model to repair into valid JSON
 4. retry up to `max_retries`
 5. fail with a clear blocked state if repair does not succeed
+
+## Runtime Status Values
+
+Common `runtime_session.status` values:
+
+- `idle`
+- `ready`
+- `running`
+- `complete`
+- `blocked`
+- `interrupted`
 
 ## Logging
 

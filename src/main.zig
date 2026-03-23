@@ -243,15 +243,253 @@ const ToolExecutionOutcome = struct {
     summary: []const u8,
 };
 
-const TuiEvent = struct {
-    tone: []const u8 = "info",
+const ChatTone = enum {
+    info,
+    success,
+    danger,
+    mission,
+    agent,
+    tool,
+    warning,
+};
+
+const HighlightKind = enum {
+    plain,
+    json,
+    command,
+};
+
+const MessageKind = enum {
+    user,
+    agent,
+    system,
+    tool,
+};
+
+const TuiMessage = struct {
+    kind: MessageKind = .system,
+    tone: ChatTone = .info,
+    actor: []const u8 = "",
+    title: []const u8 = "",
+    text: std.ArrayList(u8) = .empty,
+    highlight: HighlightKind = .plain,
+    streaming: bool = false,
+
+    fn deinit(self: *TuiMessage, allocator: std.mem.Allocator) void {
+        self.text.deinit(allocator);
+    }
+};
+
+const TuiSnapshot = struct {
+    project_name: []const u8 = "UNASSIGNED",
+    provider_type: []const u8 = "",
+    model: []const u8 = "",
+    approval_mode: []const u8 = "",
+    global_status: []const u8 = "idle",
+    runtime_status: []const u8 = "idle",
+    current_actor: []const u8 = "decanus",
+    active_tool: []const u8 = "",
+    active_lane: []const u8 = "",
+    current_goal: []const u8 = "",
+    last_error: []const u8 = "",
+    last_log_path: []const u8 = "",
+    iteration: usize = 0,
+};
+
+const ApprovalPrompt = struct {
+    tool_name: []const u8 = "",
+    detail: []const u8 = "",
+};
+
+const WorkerCommandKind = enum {
+    mission,
+    resume_run,
+    doctor,
+    models,
+};
+
+const RuntimeUiEventKind = enum {
+    log,
+    stream_start,
+    stream_chunk,
+    stream_finalize,
+    state_snapshot,
+    approval_request,
+    model_roster,
+};
+
+const RuntimeUiEvent = struct {
+    kind: RuntimeUiEventKind,
+    tone: ChatTone = .info,
+    actor: []const u8 = "",
+    title: []const u8 = "",
     text: []const u8 = "",
+    highlight: HighlightKind = .plain,
+    project_name: []const u8 = "",
+    provider_type: []const u8 = "",
+    model: []const u8 = "",
+    approval_mode: []const u8 = "",
+    global_status: []const u8 = "",
+    runtime_status: []const u8 = "",
+    current_actor: []const u8 = "",
+    active_tool: []const u8 = "",
+    active_lane: []const u8 = "",
+    current_goal: []const u8 = "",
+    last_error: []const u8 = "",
+    last_log_path: []const u8 = "",
+    iteration: usize = 0,
+};
+
+const RuntimeEventQueue = struct {
+    allocator: std.mem.Allocator,
+    mutex: std.Thread.Mutex = .{},
+    items: std.ArrayList(RuntimeUiEvent) = .empty,
+
+    fn deinit(self: *RuntimeEventQueue) void {
+        self.items.deinit(self.allocator);
+    }
+
+    fn push(self: *RuntimeEventQueue, event: RuntimeUiEvent) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const owned = self.cloneEvent(event) catch return;
+        self.items.append(self.allocator, owned) catch {};
+    }
+
+    fn drain(self: *RuntimeEventQueue, allocator: std.mem.Allocator) ![]RuntimeUiEvent {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const drained = try allocator.dupe(RuntimeUiEvent, self.items.items);
+        self.items.clearRetainingCapacity();
+        return drained;
+    }
+
+    fn cloneEvent(self: *RuntimeEventQueue, event: RuntimeUiEvent) !RuntimeUiEvent {
+        return .{
+            .kind = event.kind,
+            .tone = event.tone,
+            .actor = try self.allocator.dupe(u8, event.actor),
+            .title = try self.allocator.dupe(u8, event.title),
+            .text = try self.allocator.dupe(u8, event.text),
+            .highlight = event.highlight,
+            .project_name = try self.allocator.dupe(u8, event.project_name),
+            .provider_type = try self.allocator.dupe(u8, event.provider_type),
+            .model = try self.allocator.dupe(u8, event.model),
+            .approval_mode = try self.allocator.dupe(u8, event.approval_mode),
+            .global_status = try self.allocator.dupe(u8, event.global_status),
+            .runtime_status = try self.allocator.dupe(u8, event.runtime_status),
+            .current_actor = try self.allocator.dupe(u8, event.current_actor),
+            .active_tool = try self.allocator.dupe(u8, event.active_tool),
+            .active_lane = try self.allocator.dupe(u8, event.active_lane),
+            .current_goal = try self.allocator.dupe(u8, event.current_goal),
+            .last_error = try self.allocator.dupe(u8, event.last_error),
+            .last_log_path = try self.allocator.dupe(u8, event.last_log_path),
+            .iteration = event.iteration,
+        };
+    }
+};
+
+const RuntimeControl = struct {
+    interrupt_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    approval_mutex: std.Thread.Mutex = .{},
+    approval_cond: std.Thread.Condition = .{},
+    approval_pending: bool = false,
+    approval_response: ?bool = null,
+};
+
+const WorkerTask = struct {
+    allocator: std.mem.Allocator,
+    queue: *RuntimeEventQueue,
+    control: *RuntimeControl,
+    command: WorkerCommandKind,
+    mission_prompt: []const u8 = "",
+    thread: ?std.Thread = null,
+};
+
+const TerminalMode = struct {
+    original: std.posix.termios,
+    active: bool = false,
+
+    fn enter() !TerminalMode {
+        const original = try std.posix.tcgetattr(std.posix.STDIN_FILENO);
+        var raw = original;
+        raw.iflag.BRKINT = false;
+        raw.iflag.ICRNL = false;
+        raw.iflag.INPCK = false;
+        raw.iflag.ISTRIP = false;
+        raw.iflag.IXON = false;
+        raw.oflag.OPOST = true;
+        raw.cflag.CSIZE = .CS8;
+        raw.lflag.ECHO = false;
+        raw.lflag.ICANON = false;
+        raw.lflag.IEXTEN = false;
+        raw.lflag.ISIG = false;
+        raw.cc[@intFromEnum(std.c.V.MIN)] = 0;
+        raw.cc[@intFromEnum(std.c.V.TIME)] = 1;
+        try std.posix.tcsetattr(std.posix.STDIN_FILENO, .FLUSH, raw);
+        return .{
+            .original = original,
+            .active = true,
+        };
+    }
+
+    fn leave(self: *TerminalMode) !void {
+        if (!self.active) return;
+        try std.posix.tcsetattr(std.posix.STDIN_FILENO, .FLUSH, self.original);
+        self.active = false;
+    }
+};
+
+const RuntimeHooks = struct {
+    context: ?*anyopaque = null,
+    emit_fn: ?*const fn (?*anyopaque, RuntimeUiEvent) void = null,
+    interrupted_fn: ?*const fn (?*anyopaque) bool = null,
+    approval_fn: ?*const fn (?*anyopaque, []const u8, []const u8) bool = null,
+
+    fn emit(self: RuntimeHooks, event: RuntimeUiEvent) void {
+        if (self.emit_fn) |emit_fn| {
+            emit_fn(self.context, event);
+        }
+    }
+
+    fn isInterrupted(self: RuntimeHooks) bool {
+        if (self.interrupted_fn) |interrupted_fn| {
+            return interrupted_fn(self.context);
+        }
+        return false;
+    }
+
+    fn requestApproval(self: RuntimeHooks, tool_name: []const u8, detail: []const u8) ?bool {
+        if (self.approval_fn) |approval_fn| {
+            return approval_fn(self.context, tool_name, detail);
+        }
+        return null;
+    }
 };
 
 const TuiSession = struct {
-    events: std.ArrayList(TuiEvent) = .empty,
+    allocator: std.mem.Allocator,
+    messages: std.ArrayList(TuiMessage) = .empty,
+    input: std.ArrayList(u8) = .empty,
+    cursor: usize = 0,
+    scroll_offset: usize = 0,
+    snapshot: TuiSnapshot = .{},
     cached_models: []const []const u8 = &.{},
     last_model_error: []const u8 = "",
+    pending_approval: ?ApprovalPrompt = null,
+    active_stream_actor: []const u8 = "",
+    active_stream_index: ?usize = null,
+    running_command: ?WorkerCommandKind = null,
+    dirty: bool = true,
+
+    fn deinit(self: *TuiSession) void {
+        for (self.messages.items) |*message| {
+            message.deinit(self.allocator);
+        }
+        self.messages.deinit(self.allocator);
+        self.input.deinit(self.allocator);
+    }
 };
 
 const OllamaTagsResponse = struct {
@@ -265,6 +503,12 @@ const OllamaModel = struct {
 
 const OllamaChatResponse = struct {
     message: OllamaMessage = .{},
+    @"error": []const u8 = "",
+};
+
+const OllamaChatStreamChunk = struct {
+    message: OllamaMessage = .{},
+    done: bool = false,
     @"error": []const u8 = "",
 };
 
@@ -299,10 +543,7 @@ const OpenAIErrorEnvelope = struct {
 };
 
 pub fn main() !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
+    const allocator = std.heap.page_allocator;
     const args = try std.process.argsAlloc(allocator);
     runMain(allocator, args) catch |err| {
         try stderrPrint("{s}\n", .{try friendlyRuntimeError(allocator, err)});
@@ -410,7 +651,7 @@ fn cmdStep(allocator: std.mem.Allocator) !void {
     const config = try loadProjectConfig(allocator);
     var state = try loadState(allocator, config.paths.state_file);
     initializeRuntimeSession(allocator, &state, config);
-    _ = try executeStep(allocator, config, &state);
+    _ = try executeStep(allocator, config, &state, .{});
     try saveState(allocator, config.paths.state_file, state);
     try stdoutPrint("{s}\n", .{try missionOutcomeSummary(allocator, state)});
 }
@@ -419,7 +660,7 @@ fn cmdResume(allocator: std.mem.Allocator) !void {
     const config = try loadProjectConfig(allocator);
     var state = try loadState(allocator, config.paths.state_file);
     initializeRuntimeSession(allocator, &state, config);
-    try runLoop(allocator, config, &state);
+    try runLoop(allocator, config, &state, .{});
     try saveState(allocator, config.paths.state_file, state);
     try stdoutPrint("{s}\n", .{try missionOutcomeSummary(allocator, state)});
 }
@@ -430,31 +671,97 @@ fn cmdUi(allocator: std.mem.Allocator) !void {
 }
 
 fn interactiveUiLoop(allocator: std.mem.Allocator) !void {
-    var tui = TuiSession{};
-    defer tui.events.deinit(allocator);
+    const config = try loadProjectConfig(allocator);
+    const state = try loadState(allocator, config.paths.state_file);
+    const cwd = try std.process.getCwdAlloc(allocator);
 
-    try appendTuiEvent(
-        allocator,
+    var queue = RuntimeEventQueue{
+        .allocator = allocator,
+    };
+    defer queue.deinit();
+
+    var control = RuntimeControl{};
+    var tui = TuiSession{
+        .allocator = allocator,
+    };
+    defer tui.deinit();
+
+    tui.snapshot = snapshotFromState(config, state, std.fs.path.basename(cwd));
+    try appendChatMessage(
         &tui,
-        "info",
-        "Ave. Type a mission prompt to start work, or use /models and /model <n|name> to manage your local model.",
+        .system,
+        .info,
+        "contubernium",
+        "Command Tent",
+        "Type a mission or use /resume, /doctor, /models, /model <n|name>, /status, /clear, /interrupt, /exit. Ctrl+C interrupts the active loop.",
+        .plain,
     );
+
+    var terminal = try TerminalMode.enter();
+    defer terminal.leave() catch {};
 
     try enterTuiScreen();
     defer leaveTuiScreen() catch {};
 
+    var worker: ?*WorkerTask = null;
+    defer {
+        if (worker) |task| {
+            if (task.control.approval_pending) {
+                submitApprovalResponse(task.control, false);
+            }
+            if (task.control.running.load(.seq_cst)) {
+                task.control.interrupt_requested.store(true, .seq_cst);
+            }
+            if (task.thread) |thread| thread.join();
+            allocator.destroy(task);
+        }
+    }
+
+    var last_render_ms = std.time.milliTimestamp();
+
     while (true) {
-        try renderTui(allocator, &tui);
-        const line = try std.fs.File.stdin().deprecatedReader().readUntilDelimiterOrEofAlloc(allocator, '\n', 16 * 1024);
-        if (line == null) return;
-        const input = trimAscii(line.?);
-        if (input.len == 0) continue;
-        const keep_running = try handleTuiInput(allocator, &tui, input);
+        if (worker) |task| {
+            if (!task.control.running.load(.seq_cst)) {
+                if (task.thread) |thread| thread.join();
+                allocator.destroy(task);
+                worker = null;
+                tui.running_command = null;
+                tui.dirty = true;
+            }
+        }
+
+        try processRuntimeEvents(allocator, &tui, &queue);
+
+        const now_ms = std.time.milliTimestamp();
+        if (tui.dirty or now_ms - last_render_ms >= 250) {
+            try renderTui(allocator, &tui);
+            last_render_ms = now_ms;
+            tui.dirty = false;
+        }
+
+        if (!try pollInput(50)) continue;
+
+        var input_buf: [128]u8 = undefined;
+        const input_len = try std.posix.read(std.posix.STDIN_FILENO, &input_buf);
+        if (input_len == 0) return;
+
+        const keep_running = try handleInputBytes(
+            allocator,
+            &tui,
+            &control,
+            &queue,
+            &worker,
+            input_buf[0..input_len],
+        );
         if (!keep_running) return;
     }
 }
 
 fn runMission(allocator: std.mem.Allocator, mission_prompt: []const u8) !void {
+    try runMissionInternal(allocator, mission_prompt, .{});
+}
+
+fn runMissionInternal(allocator: std.mem.Allocator, mission_prompt: []const u8, hooks: RuntimeHooks) !void {
     try scaffoldProject(allocator);
 
     const config = try loadProjectConfig(allocator);
@@ -463,186 +770,19 @@ fn runMission(allocator: std.mem.Allocator, mission_prompt: []const u8) !void {
     resetStateForMission(&state, mission_prompt);
     initializeRuntimeSession(allocator, &state, config);
     try saveState(allocator, config.paths.state_file, state);
+    emitStateSnapshot(hooks, config, state);
 
-    try runLoop(allocator, config, &state);
+    try runLoop(allocator, config, &state, hooks);
     try saveState(allocator, config.paths.state_file, state);
-}
-
-fn handleTuiInput(allocator: std.mem.Allocator, tui: *TuiSession, input: []const u8) !bool {
-    if (input[0] != '/') {
-        try appendTuiEvent(allocator, tui, "mission", try std.fmt.allocPrint(allocator, "mission> {s}", .{input}));
-        runMission(allocator, input) catch |err| {
-            try appendTuiEvent(allocator, tui, "error", try friendlyRuntimeError(allocator, err));
-            return true;
-        };
-        const config = try loadProjectConfig(allocator);
-        const state = try loadState(allocator, config.paths.state_file);
-        try appendTuiEvent(allocator, tui, toneForState(state), try missionOutcomeSummary(allocator, state));
-        return true;
-    }
-
-    var parts = std.mem.tokenizeScalar(u8, input[1..], ' ');
-    const command = parts.next() orelse return true;
-
-    if (eql(command, "exit") or eql(command, "quit")) return false;
-
-    if (eql(command, "help")) {
-        try appendTuiEvent(
-            allocator,
-            tui,
-            "info",
-            "commands: /doctor, /resume, /models, /model <n|name>, /status, /clear, /exit",
-        );
-        return true;
-    }
-
-    if (eql(command, "clear")) {
-        tui.events.clearRetainingCapacity();
-        try appendTuiEvent(allocator, tui, "info", "ledger cleared");
-        return true;
-    }
-
-    if (eql(command, "doctor")) {
-        const report = runDoctorCheck(allocator) catch |err| {
-            try appendTuiEvent(allocator, tui, "error", try friendlyRuntimeError(allocator, err));
-            return true;
-        };
-        try appendTuiEvent(allocator, tui, "success", report);
-        return true;
-    }
-
-    if (eql(command, "resume")) {
-        const config = try loadProjectConfig(allocator);
-        var state = try loadState(allocator, config.paths.state_file);
-        initializeRuntimeSession(allocator, &state, config);
-        runLoop(allocator, config, &state) catch |err| {
-            try appendTuiEvent(allocator, tui, "error", try friendlyRuntimeError(allocator, err));
-            return true;
-        };
-        try saveState(allocator, config.paths.state_file, state);
-        try appendTuiEvent(allocator, tui, toneForState(state), try missionOutcomeSummary(allocator, state));
-        return true;
-    }
-
-    if (eql(command, "models")) {
-        const config = try loadProjectConfig(allocator);
-        const models = providerListModels(allocator, config.provider) catch |err| {
-            tui.last_model_error = try friendlyRuntimeError(allocator, err);
-            try appendTuiEvent(allocator, tui, "error", tui.last_model_error);
-            return true;
-        };
-        tui.cached_models = models;
-        tui.last_model_error = "";
-        try appendTuiEvent(allocator, tui, "success", try formatModelRoster(allocator, models, config.provider.model));
-        return true;
-    }
-
-    if (eql(command, "model")) {
-        const remainder = std.mem.trim(u8, input[1 + command.len ..], " ");
-        if (remainder.len == 0) {
-            try appendTuiEvent(allocator, tui, "info", "usage: /model <n|name>");
-            return true;
-        }
-        const saved = saveSelectedModel(allocator, tui, remainder) catch |err| {
-            try appendTuiEvent(allocator, tui, "error", try friendlyRuntimeError(allocator, err));
-            return true;
-        };
-        try appendTuiEvent(allocator, tui, "success", saved);
-        return true;
-    }
-
-    if (eql(command, "status")) {
-        const config = try loadProjectConfig(allocator);
-        const state = try loadState(allocator, config.paths.state_file);
-        try appendTuiEvent(allocator, tui, "info", try renderStatusBlock(allocator, config, state));
-        return true;
-    }
-
-    try appendTuiEvent(allocator, tui, "error", try std.fmt.allocPrint(allocator, "unknown command: /{s}", .{command}));
-    return true;
-}
-
-fn renderTui(allocator: std.mem.Allocator, tui: *const TuiSession) !void {
-    const config = try loadProjectConfig(allocator);
-    const state = try loadState(allocator, config.paths.state_file);
-    const cwd = try std.process.getCwdAlloc(allocator);
-    const project_name = std.fs.path.basename(cwd);
-
-    try stdoutPrint("\x1b[2J\x1b[H", .{});
-    try stdoutPrint("\x1b[38;5;180m+======================================================================================+\x1b[0m\n", .{});
-    try stdoutPrint("\x1b[1;38;5;220m| CONTUBERNIUM COMMAND TENT                                                            |\x1b[0m\n", .{});
-    try stdoutPrint(
-        "project: {s} | actor: {s} | status: {s} | turn: {d}\n",
-        .{ project_name, state.current_actor, state.global_status, state.agent_loop.iteration },
-    );
-    try stdoutPrint(
-        "provider: {s} | model: {s} | approval: {s}\n",
-        .{ config.provider.type, config.provider.model, config.policy.approval_mode },
-    );
-    try stdoutPrint("\x1b[38;5;180m+-------------------------------------- STATUS ----------------------------------------+\x1b[0m\n", .{});
-    try stdoutPrint("goal: {s}\n", .{if (state.mission.current_goal.len > 0) state.mission.current_goal else "idle"});
-    try stdoutPrint("last error: {s}\n", .{if (state.runtime_session.last_error.len > 0) state.runtime_session.last_error else "none"});
-    try stdoutPrint("last log: {s}\n", .{if (state.runtime_session.active_log_path.len > 0) state.runtime_session.active_log_path else "none"});
-    try stdoutPrint("\x1b[38;5;180m+----------------------------------- MODEL ROSTER -------------------------------------+\x1b[0m\n", .{});
-    if (tui.cached_models.len == 0) {
-        if (tui.last_model_error.len > 0) {
-            try stdoutPrint("{s}\n", .{tui.last_model_error});
-        } else {
-            try stdoutPrint("use /models to query the active local backend and /model <n|name> to switch.\n", .{});
-        }
-    } else {
-        var index: usize = 0;
-        while (index < tui.cached_models.len and index < 8) : (index += 1) {
-            const marker = if (eql(tui.cached_models[index], config.provider.model)) "current" else "";
-            try stdoutPrint("[{d}] {s} {s}\n", .{ index + 1, tui.cached_models[index], marker });
-        }
-    }
-    try stdoutPrint("\x1b[38;5;180m+---------------------------------- LEGION LEDGER -------------------------------------+\x1b[0m\n", .{});
-    try renderRecentTuiEvents(tui);
-    try stdoutPrint("\x1b[38;5;180m+------------------------------------ COMMANDS ----------------------------------------+\x1b[0m\n", .{});
-    try stdoutPrint("/doctor  /resume  /models  /model <n|name>  /status  /clear  /exit\n", .{});
-    try stdoutPrint("\x1b[38;5;180m+======================================================================================+\x1b[0m\n", .{});
-    try stdoutPrint("\x1b[1;38;5;220mPrompt>\x1b[0m ", .{});
-}
-
-fn renderRecentTuiEvents(tui: *const TuiSession) !void {
-    const start = if (tui.events.items.len > 8) tui.events.items.len - 8 else 0;
-    if (tui.events.items.len == 0) {
-        try stdoutPrint("no events yet\n", .{});
-        return;
-    }
-    for (tui.events.items[start..]) |event| {
-        const color = if (eql(event.tone, "error"))
-            "\x1b[38;5;203m"
-        else if (eql(event.tone, "success"))
-            "\x1b[38;5;114m"
-        else if (eql(event.tone, "mission"))
-            "\x1b[38;5;223m"
-        else
-            "\x1b[38;5;252m";
-        try stdoutPrint("{s}{s}\x1b[0m\n", .{ color, event.text });
-    }
-}
-
-fn appendTuiEvent(allocator: std.mem.Allocator, tui: *TuiSession, tone: []const u8, text: []const u8) !void {
-    try tui.events.append(allocator, .{
-        .tone = tone,
-        .text = try allocator.dupe(u8, text),
-    });
+    emitStateSnapshot(hooks, config, state);
 }
 
 fn enterTuiScreen() !void {
-    try stdoutPrint("\x1b[?1049h\x1b[2J\x1b[H", .{});
+    try stdoutPrint("\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l", .{});
 }
 
 fn leaveTuiScreen() !void {
-    try stdoutPrint("\x1b[0m\x1b[?1049l", .{});
-}
-
-fn toneForState(state: AppState) []const u8 {
-    if (eql(state.global_status, "complete")) return "success";
-    if (eql(state.runtime_session.status, "blocked")) return "error";
-    return "info";
+    try stdoutPrint("\x1b[0m\x1b[?25h\x1b[?1049l", .{});
 }
 
 fn formatModelRoster(allocator: std.mem.Allocator, models: []const []const u8, current_model: []const u8) ![]const u8 {
@@ -687,19 +827,990 @@ fn isUnsignedDecimal(text: []const u8) bool {
     return true;
 }
 
-fn renderStatusBlock(allocator: std.mem.Allocator, config: AppConfig, state: AppState) ![]const u8 {
+fn renderStatusBlock(allocator: std.mem.Allocator, snapshot: TuiSnapshot) ![]const u8 {
     return try std.fmt.allocPrint(
         allocator,
-        "project status\nprovider: {s}\nmodel: {s}\nactor: {s}\nglobal status: {s}\nturn: {d}\nlast error: {s}",
+        "project: {s}\nprovider: {s}\nmodel: {s}\nactor: {s}\nlane: {s}\nglobal status: {s}\nruntime status: {s}\nturn: {d}\nlast error: {s}",
         .{
-            config.provider.type,
-            config.provider.model,
-            state.current_actor,
-            state.global_status,
-            state.agent_loop.iteration,
-            if (state.runtime_session.last_error.len > 0) state.runtime_session.last_error else "none",
+            snapshot.project_name,
+            snapshot.provider_type,
+            snapshot.model,
+            snapshot.current_actor,
+            snapshot.active_lane,
+            snapshot.global_status,
+            snapshot.runtime_status,
+            snapshot.iteration,
+            if (snapshot.last_error.len > 0) snapshot.last_error else "none",
         },
     );
+}
+
+const RenderLine = struct {
+    text: []const u8 = "",
+    tone: ChatTone = .info,
+    highlight: HighlightKind = .plain,
+};
+
+const TerminalSize = struct {
+    rows: usize,
+    cols: usize,
+};
+
+fn snapshotFromState(config: AppConfig, state: AppState, project_name: []const u8) TuiSnapshot {
+    return .{
+        .project_name = project_name,
+        .provider_type = config.provider.type,
+        .model = if (state.runtime_session.model.len > 0) state.runtime_session.model else config.provider.model,
+        .approval_mode = config.policy.approval_mode,
+        .global_status = state.global_status,
+        .runtime_status = state.runtime_session.status,
+        .current_actor = state.current_actor,
+        .active_tool = state.agent_loop.active_tool,
+        .active_lane = currentLaneForState(state),
+        .current_goal = state.mission.current_goal,
+        .last_error = state.runtime_session.last_error,
+        .last_log_path = state.runtime_session.active_log_path,
+        .iteration = state.agent_loop.iteration,
+    };
+}
+
+fn processRuntimeEvents(allocator: std.mem.Allocator, tui: *TuiSession, queue: *RuntimeEventQueue) !void {
+    const events = try queue.drain(allocator);
+    for (events) |event| {
+        switch (event.kind) {
+            .log => try appendChatMessage(
+                tui,
+                if (event.tone == .mission) .user else if (event.tone == .tool) .tool else .system,
+                event.tone,
+                event.actor,
+                event.title,
+                event.text,
+                event.highlight,
+            ),
+            .stream_start => try beginStreamingMessage(tui, event.actor),
+            .stream_chunk => try appendStreamChunk(tui, event.actor, event.text),
+            .stream_finalize => try finalizeStreamingMessage(tui, event.actor, event.text, event.highlight),
+            .state_snapshot => {
+                tui.snapshot = .{
+                    .project_name = if (event.project_name.len > 0) event.project_name else tui.snapshot.project_name,
+                    .provider_type = if (event.provider_type.len > 0) event.provider_type else tui.snapshot.provider_type,
+                    .model = if (event.model.len > 0) event.model else tui.snapshot.model,
+                    .approval_mode = if (event.approval_mode.len > 0) event.approval_mode else tui.snapshot.approval_mode,
+                    .global_status = if (event.global_status.len > 0) event.global_status else tui.snapshot.global_status,
+                    .runtime_status = if (event.runtime_status.len > 0) event.runtime_status else tui.snapshot.runtime_status,
+                    .current_actor = if (event.current_actor.len > 0) event.current_actor else tui.snapshot.current_actor,
+                    .active_tool = event.active_tool,
+                    .active_lane = if (event.active_lane.len > 0) event.active_lane else tui.snapshot.active_lane,
+                    .current_goal = event.current_goal,
+                    .last_error = event.last_error,
+                    .last_log_path = event.last_log_path,
+                    .iteration = event.iteration,
+                };
+                tui.dirty = true;
+            },
+            .approval_request => {
+                tui.pending_approval = .{
+                    .tool_name = event.title,
+                    .detail = event.text,
+                };
+                try appendChatMessage(
+                    tui,
+                    .system,
+                    .warning,
+                    "approval",
+                    "Approval Required",
+                    try std.fmt.allocPrint(allocator, "{s}: {s}", .{ event.title, event.text }),
+                    .plain,
+                );
+            },
+            .model_roster => {
+                try updateCachedModels(allocator, tui, event.text);
+                tui.last_model_error = "";
+                try appendChatMessage(tui, .system, .success, "models", "Model Roster", event.text, .plain);
+            },
+        }
+    }
+}
+
+fn startWorker(
+    allocator: std.mem.Allocator,
+    queue: *RuntimeEventQueue,
+    control: *RuntimeControl,
+    command: WorkerCommandKind,
+    mission_prompt: []const u8,
+) !*WorkerTask {
+    const task = try allocator.create(WorkerTask);
+    task.* = .{
+        .allocator = allocator,
+        .queue = queue,
+        .control = control,
+        .command = command,
+        .mission_prompt = mission_prompt,
+    };
+    control.interrupt_requested.store(false, .seq_cst);
+    control.running.store(true, .seq_cst);
+    control.approval_mutex.lock();
+    control.approval_pending = false;
+    control.approval_response = null;
+    control.approval_mutex.unlock();
+    task.thread = try std.Thread.spawn(.{}, workerMain, .{task});
+    return task;
+}
+
+fn workerMain(task: *WorkerTask) void {
+    defer task.control.running.store(false, .seq_cst);
+
+    const hooks = RuntimeHooks{
+        .context = task,
+        .emit_fn = workerEmitEvent,
+        .interrupted_fn = workerIsInterrupted,
+        .approval_fn = workerRequestApproval,
+    };
+
+    switch (task.command) {
+        .mission => {
+            runMissionInternal(task.allocator, task.mission_prompt, hooks) catch |err| {
+                emitLog(hooks, .danger, "", "Runtime Error", friendlyRuntimeError(task.allocator, err) catch @errorName(err), .plain);
+            };
+        },
+        .resume_run => {
+            const config = loadProjectConfig(task.allocator) catch |err| {
+                emitLog(hooks, .danger, "", "Resume Failed", friendlyRuntimeError(task.allocator, err) catch @errorName(err), .plain);
+                return;
+            };
+            var state = loadState(task.allocator, config.paths.state_file) catch |err| {
+                emitLog(hooks, .danger, "", "Resume Failed", friendlyRuntimeError(task.allocator, err) catch @errorName(err), .plain);
+                return;
+            };
+            initializeRuntimeSession(task.allocator, &state, config);
+            runLoop(task.allocator, config, &state, hooks) catch |err| {
+                emitLog(hooks, .danger, "", "Resume Failed", friendlyRuntimeError(task.allocator, err) catch @errorName(err), .plain);
+                return;
+            };
+            saveState(task.allocator, config.paths.state_file, state) catch {};
+            emitStateSnapshot(hooks, config, state);
+            const summary = missionOutcomeSummary(task.allocator, state) catch "resume completed";
+            emitLog(hooks, toneForOutcome(state), "", "Loop Status", summary, .plain);
+        },
+        .doctor => {
+            const report = runDoctorCheck(task.allocator) catch |err| {
+                emitLog(hooks, .danger, "", "Doctor Failed", friendlyRuntimeError(task.allocator, err) catch @errorName(err), .plain);
+                return;
+            };
+            emitLog(hooks, .success, "", "Doctor", report, .plain);
+            const config = loadProjectConfig(task.allocator) catch return;
+            const state = loadState(task.allocator, config.paths.state_file) catch return;
+            emitStateSnapshot(hooks, config, state);
+        },
+        .models => {
+            const config = loadProjectConfig(task.allocator) catch |err| {
+                emitLog(hooks, .danger, "", "Model Query Failed", friendlyRuntimeError(task.allocator, err) catch @errorName(err), .plain);
+                return;
+            };
+            const models = providerListModels(task.allocator, config.provider) catch |err| {
+                emitLog(hooks, .danger, "", "Model Query Failed", friendlyRuntimeError(task.allocator, err) catch @errorName(err), .plain);
+                return;
+            };
+            const roster = formatModelRoster(task.allocator, models, config.provider.model) catch "unable to format models";
+            hooks.emit(.{
+                .kind = .model_roster,
+                .title = "models",
+                .text = roster,
+            });
+        },
+    }
+}
+
+fn workerEmitEvent(context: ?*anyopaque, event: RuntimeUiEvent) void {
+    const task: *WorkerTask = @ptrCast(@alignCast(context.?));
+    task.queue.push(event);
+}
+
+fn workerIsInterrupted(context: ?*anyopaque) bool {
+    const task: *WorkerTask = @ptrCast(@alignCast(context.?));
+    return task.control.interrupt_requested.load(.seq_cst);
+}
+
+fn workerRequestApproval(context: ?*anyopaque, tool_name: []const u8, detail: []const u8) bool {
+    const task: *WorkerTask = @ptrCast(@alignCast(context.?));
+    const control = task.control;
+
+    control.approval_mutex.lock();
+    defer control.approval_mutex.unlock();
+
+    control.approval_pending = true;
+    control.approval_response = null;
+
+    task.queue.push(.{
+        .kind = .approval_request,
+        .title = tool_name,
+        .text = detail,
+        .tone = .warning,
+    });
+
+    while (control.approval_response == null and !control.interrupt_requested.load(.seq_cst)) {
+        control.approval_cond.wait(&control.approval_mutex);
+    }
+
+    const decision = control.approval_response orelse false;
+    control.approval_pending = false;
+    control.approval_response = null;
+    return decision;
+}
+
+fn submitApprovalResponse(control: *RuntimeControl, approved: bool) void {
+    control.approval_mutex.lock();
+    defer control.approval_mutex.unlock();
+    if (!control.approval_pending) return;
+    control.approval_response = approved;
+    control.approval_cond.signal();
+}
+
+fn handleInputBytes(
+    allocator: std.mem.Allocator,
+    tui: *TuiSession,
+    control: *RuntimeControl,
+    queue: *RuntimeEventQueue,
+    worker: *?*WorkerTask,
+    bytes: []const u8,
+) !bool {
+    var index: usize = 0;
+    while (index < bytes.len) {
+        if (tui.pending_approval != null) {
+            const keep_running = handleApprovalInput(tui, control, bytes[index]);
+            tui.dirty = true;
+            return keep_running;
+        }
+
+        const byte = bytes[index];
+        switch (byte) {
+            3 => {
+                if (worker.* != null and control.running.load(.seq_cst)) {
+                    control.interrupt_requested.store(true, .seq_cst);
+                    submitApprovalResponse(control, false);
+                    try appendChatMessage(tui, .system, .warning, "runtime", "Interrupt", "interrupt requested", .plain);
+                    tui.dirty = true;
+                    return true;
+                }
+                return false;
+            },
+            12 => {
+                clearTuiMessages(tui);
+                try appendChatMessage(tui, .system, .info, "contubernium", "Command Tent", "ledger cleared", .plain);
+            },
+            13, 10 => {
+                const trimmed = trimAscii(tui.input.items);
+                if (trimmed.len > 0) {
+                    const keep_running = try handleSubmittedInput(allocator, tui, queue, control, worker, trimmed);
+                    tui.input.clearRetainingCapacity();
+                    tui.cursor = 0;
+                    tui.dirty = true;
+                    if (!keep_running) return false;
+                }
+            },
+            127 => {
+                if (tui.cursor > 0) {
+                    _ = tui.input.orderedRemove(tui.cursor - 1);
+                    tui.cursor -= 1;
+                    tui.dirty = true;
+                }
+            },
+            27 => {
+                if (index + 1 < bytes.len and bytes[index + 1] == '[' and index + 2 < bytes.len) {
+                    const final = bytes[index + 2];
+                    switch (final) {
+                        'A' => {
+                            tui.scroll_offset +|= 3;
+                            tui.dirty = true;
+                            index += 2;
+                        },
+                        'B' => {
+                            tui.scroll_offset = if (tui.scroll_offset > 3) tui.scroll_offset - 3 else 0;
+                            tui.dirty = true;
+                            index += 2;
+                        },
+                        'C' => {
+                            if (tui.cursor < tui.input.items.len) tui.cursor += 1;
+                            tui.dirty = true;
+                            index += 2;
+                        },
+                        'D' => {
+                            if (tui.cursor > 0) tui.cursor -= 1;
+                            tui.dirty = true;
+                            index += 2;
+                        },
+                        '5', '6' => {
+                            if (index + 3 < bytes.len and bytes[index + 3] == '~') {
+                                if (final == '5') {
+                                    tui.scroll_offset +|= 12;
+                                } else {
+                                    tui.scroll_offset = if (tui.scroll_offset > 12) tui.scroll_offset - 12 else 0;
+                                }
+                                tui.dirty = true;
+                                index += 3;
+                            }
+                        },
+                        'H' => {
+                            tui.cursor = 0;
+                            tui.dirty = true;
+                            index += 2;
+                        },
+                        'F' => {
+                            tui.cursor = tui.input.items.len;
+                            tui.dirty = true;
+                            index += 2;
+                        },
+                        else => {},
+                    }
+                }
+            },
+            else => {
+                if (byte >= 32 and byte != 127) {
+                    try tui.input.insert(tui.allocator, tui.cursor, byte);
+                    tui.cursor += 1;
+                    tui.dirty = true;
+                }
+            },
+        }
+        index += 1;
+    }
+    return true;
+}
+
+fn handleApprovalInput(tui: *TuiSession, control: *RuntimeControl, byte: u8) bool {
+    switch (byte) {
+        3, 27, 'n', 'N' => submitApprovalResponse(control, false),
+        'y', 'Y' => submitApprovalResponse(control, true),
+        else => return true,
+    }
+    tui.pending_approval = null;
+    return true;
+}
+
+fn handleSubmittedInput(
+    allocator: std.mem.Allocator,
+    tui: *TuiSession,
+    queue: *RuntimeEventQueue,
+    control: *RuntimeControl,
+    worker: *?*WorkerTask,
+    input: []const u8,
+) !bool {
+    if (input[0] != '/') {
+        if (worker.* != null and control.running.load(.seq_cst)) {
+            try appendChatMessage(tui, .system, .danger, "runtime", "Busy", "the runtime is already executing a command", .plain);
+            return true;
+        }
+        try appendChatMessage(tui, .user, .mission, "user", "Mission", input, .plain);
+        worker.* = try startWorker(allocator, queue, control, .mission, try allocator.dupe(u8, input));
+        tui.running_command = .mission;
+        return true;
+    }
+
+    var parts = std.mem.tokenizeScalar(u8, input[1..], ' ');
+    const command = parts.next() orelse return true;
+
+    if (eql(command, "exit") or eql(command, "quit")) return false;
+
+    if (eql(command, "help")) {
+        try appendChatMessage(tui, .system, .info, "help", "Commands", "/doctor /resume /models /model <n|name> /status /clear /interrupt /exit", .plain);
+        return true;
+    }
+
+    if (eql(command, "interrupt")) {
+        if (worker.* != null and control.running.load(.seq_cst)) {
+            control.interrupt_requested.store(true, .seq_cst);
+            submitApprovalResponse(control, false);
+            try appendChatMessage(tui, .system, .warning, "runtime", "Interrupt", "interrupt requested", .plain);
+        } else {
+            try appendChatMessage(tui, .system, .info, "runtime", "Interrupt", "no active command", .plain);
+        }
+        return true;
+    }
+
+    if (eql(command, "clear")) {
+        clearTuiMessages(tui);
+        try appendChatMessage(tui, .system, .info, "contubernium", "Command Tent", "ledger cleared", .plain);
+        return true;
+    }
+
+    if (eql(command, "status")) {
+        try appendChatMessage(tui, .system, .info, "status", "Snapshot", try renderStatusBlock(allocator, tui.snapshot), .plain);
+        return true;
+    }
+
+    if (eql(command, "model")) {
+        if (worker.* != null and control.running.load(.seq_cst)) {
+            try appendChatMessage(tui, .system, .danger, "runtime", "Busy", "change the model after the active command finishes", .plain);
+            return true;
+        }
+        const remainder = std.mem.trim(u8, input[1 + command.len ..], " ");
+        if (remainder.len == 0) {
+            try appendChatMessage(tui, .system, .info, "models", "Usage", "usage: /model <n|name>", .plain);
+            return true;
+        }
+        const saved = saveSelectedModel(allocator, tui, remainder) catch |err| {
+            try appendChatMessage(tui, .system, .danger, "models", "Model Change Failed", try friendlyRuntimeError(allocator, err), .plain);
+            return true;
+        };
+        tui.snapshot.model = try resolveModelSelection(allocator, tui, remainder);
+        try appendChatMessage(tui, .system, .success, "models", "Model Changed", saved, .plain);
+        return true;
+    }
+
+    if (worker.* != null and control.running.load(.seq_cst)) {
+        try appendChatMessage(tui, .system, .danger, "runtime", "Busy", "wait for the active command to finish or press Ctrl+C", .plain);
+        return true;
+    }
+
+    if (eql(command, "doctor")) {
+        worker.* = try startWorker(allocator, queue, control, .doctor, "");
+        tui.running_command = .doctor;
+        return true;
+    }
+
+    if (eql(command, "resume")) {
+        worker.* = try startWorker(allocator, queue, control, .resume_run, "");
+        tui.running_command = .resume_run;
+        return true;
+    }
+
+    if (eql(command, "models")) {
+        worker.* = try startWorker(allocator, queue, control, .models, "");
+        tui.running_command = .models;
+        return true;
+    }
+
+    try appendChatMessage(tui, .system, .danger, "help", "Unknown Command", try std.fmt.allocPrint(allocator, "unknown command: /{s}", .{command}), .plain);
+    return true;
+}
+
+fn appendChatMessage(
+    tui: *TuiSession,
+    kind: MessageKind,
+    tone: ChatTone,
+    actor: []const u8,
+    title: []const u8,
+    text: []const u8,
+    highlight: HighlightKind,
+) !void {
+    var message = TuiMessage{
+        .kind = kind,
+        .tone = tone,
+        .actor = actor,
+        .title = title,
+        .highlight = highlight,
+    };
+    try message.text.appendSlice(tui.allocator, text);
+    try tui.messages.append(tui.allocator, message);
+    tui.scroll_offset = 0;
+    tui.dirty = true;
+}
+
+fn clearTuiMessages(tui: *TuiSession) void {
+    for (tui.messages.items) |*message| {
+        message.deinit(tui.allocator);
+    }
+    tui.messages.clearRetainingCapacity();
+    tui.active_stream_actor = "";
+    tui.active_stream_index = null;
+    tui.scroll_offset = 0;
+    tui.dirty = true;
+}
+
+fn beginStreamingMessage(tui: *TuiSession, actor: []const u8) !void {
+    const message = TuiMessage{
+        .kind = .agent,
+        .tone = .agent,
+        .actor = actor,
+        .title = actor,
+        .highlight = .json,
+        .streaming = true,
+    };
+    try tui.messages.append(tui.allocator, message);
+    tui.active_stream_actor = actor;
+    tui.active_stream_index = tui.messages.items.len - 1;
+    tui.scroll_offset = 0;
+    tui.dirty = true;
+}
+
+fn appendStreamChunk(tui: *TuiSession, actor: []const u8, text: []const u8) !void {
+    if (tui.active_stream_index) |stream_index| {
+        if (eql(tui.active_stream_actor, actor) and stream_index < tui.messages.items.len) {
+            try tui.messages.items[stream_index].text.appendSlice(tui.allocator, text);
+            tui.scroll_offset = 0;
+            tui.dirty = true;
+            return;
+        }
+    }
+    try beginStreamingMessage(tui, actor);
+    if (tui.active_stream_index) |stream_index| {
+        try tui.messages.items[stream_index].text.appendSlice(tui.allocator, text);
+    }
+    tui.dirty = true;
+}
+
+fn finalizeStreamingMessage(tui: *TuiSession, actor: []const u8, text: []const u8, highlight: HighlightKind) !void {
+    if (tui.active_stream_index) |stream_index| {
+        if (eql(tui.active_stream_actor, actor) and stream_index < tui.messages.items.len) {
+            var message = &tui.messages.items[stream_index];
+            message.text.clearRetainingCapacity();
+            try message.text.appendSlice(tui.allocator, text);
+            message.highlight = highlight;
+            message.streaming = false;
+            tui.active_stream_index = null;
+            tui.active_stream_actor = "";
+            tui.scroll_offset = 0;
+            tui.dirty = true;
+            return;
+        }
+    }
+    try appendChatMessage(tui, .agent, .agent, actor, actor, text, highlight);
+}
+
+fn updateCachedModels(allocator: std.mem.Allocator, tui: *TuiSession, text: []const u8) !void {
+    var items: std.ArrayList([]const u8) = .empty;
+    var lines = std.mem.tokenizeScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        const trimmed = trimAscii(line);
+        if (trimmed.len == 0) continue;
+        if (trimmed[0] == '[') {
+            if (std.mem.indexOfScalar(u8, trimmed, ']')) |close_index| {
+                const remainder = trimAscii(trimmed[close_index + 1 ..]);
+                if (remainder.len == 0) continue;
+                const current_index = std.mem.indexOf(u8, remainder, " (current)") orelse remainder.len;
+                try items.append(allocator, try allocator.dupe(u8, trimAscii(remainder[0..current_index])));
+                continue;
+            }
+        }
+        try items.append(allocator, try allocator.dupe(u8, trimmed));
+    }
+    tui.cached_models = try items.toOwnedSlice(allocator);
+    tui.dirty = true;
+}
+
+fn renderTui(allocator: std.mem.Allocator, tui: *const TuiSession) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const temp_allocator = arena.allocator();
+
+    const size = terminalSize();
+    const sidebar_width: usize = if (size.cols >= 118) 36 else 0;
+    const gutter_width: usize = if (sidebar_width > 0) 3 else 0;
+    const body_width = if (sidebar_width > 0 and size.cols > sidebar_width + gutter_width + 2) size.cols - sidebar_width - gutter_width else size.cols;
+    const header_height: usize = 3;
+    const footer_height: usize = 4;
+    const chat_height: usize = if (size.rows > header_height + footer_height) size.rows - header_height - footer_height else 1;
+
+    var chat_lines = std.ArrayList(RenderLine).empty;
+    try buildChatLines(temp_allocator, tui, &chat_lines, if (body_width > 2) body_width - 2 else body_width);
+
+    const total_chat_lines = chat_lines.items.len;
+    const hidden_bottom = @min(tui.scroll_offset, if (total_chat_lines > 0) total_chat_lines - 1 else 0);
+    const visible_end = total_chat_lines - hidden_bottom;
+    const visible_start = if (visible_end > chat_height) visible_end - chat_height else 0;
+
+    var side_lines = std.ArrayList(RenderLine).empty;
+    if (sidebar_width > 0) {
+        try buildSidebarLines(temp_allocator, tui, &side_lines, sidebar_width);
+    }
+
+    var screen = std.ArrayList(u8).empty;
+    defer screen.deinit(allocator);
+
+    const writer = screen.writer(allocator);
+    try writer.writeAll("\x1b[H");
+
+    try writeHeaderLine(writer, size.cols, " CONTUBERNIUM COMMAND TENT ", .info);
+    try writeHeaderLine(
+        writer,
+        size.cols,
+        try std.fmt.allocPrint(
+            temp_allocator,
+            " project {s} | actor {s} | lane {s} | global {s} | runtime {s} | turn {d} ",
+            .{
+                tui.snapshot.project_name,
+                tui.snapshot.current_actor,
+                tui.snapshot.active_lane,
+                tui.snapshot.global_status,
+                tui.snapshot.runtime_status,
+                tui.snapshot.iteration,
+            },
+        ),
+        .agent,
+    );
+    try writeHeaderLine(
+        writer,
+        size.cols,
+        try std.fmt.allocPrint(
+            temp_allocator,
+            " provider {s} | model {s} | approval {s} | scroll {d} ",
+            .{
+                tui.snapshot.provider_type,
+                tui.snapshot.model,
+                tui.snapshot.approval_mode,
+                tui.scroll_offset,
+            },
+        ),
+        .info,
+    );
+
+    var body_row: usize = 0;
+    while (body_row < chat_height) : (body_row += 1) {
+        const chat_line = if (visible_start + body_row < visible_end) chat_lines.items[visible_start + body_row] else RenderLine{};
+        if (sidebar_width > 0) {
+            const side_line = if (body_row < side_lines.items.len) side_lines.items[body_row] else RenderLine{};
+            try writePaddedLine(writer, chat_line, body_width);
+            try writer.writeAll("\x1b[38;5;240m │ \x1b[0m");
+            try writePaddedLine(writer, side_line, sidebar_width);
+            try writer.writeByte('\n');
+        } else {
+            try writePaddedLine(writer, chat_line, body_width);
+            try writer.writeByte('\n');
+        }
+    }
+
+    try writeHeaderLine(writer, size.cols, " INPUT ", .warning);
+    try writeFooterLine(writer, size.cols, " Enter submit | Up/Down scroll | PgUp/PgDn fast scroll | Ctrl+C interrupt/exit ");
+    const prompt_width = if (size.cols > 10) size.cols - 10 else size.cols;
+    const input_view = visibleInputWindow(tui.input.items, tui.cursor, prompt_width);
+    try writer.writeAll("\x1b[38;5;220m mission>\x1b[0m ");
+    try writePlain(writer, input_view.text, .mission, .plain);
+    if (visibleLen(input_view.text) < prompt_width) {
+        try writer.writeByteNTimes(' ', prompt_width - visibleLen(input_view.text));
+    }
+    try writer.writeAll("\n");
+    const approval_text = if (tui.pending_approval) |approval|
+        try std.fmt.allocPrint(temp_allocator, "approval pending: y/n for {s}", .{approval.tool_name})
+    else if (tui.running_command) |command|
+        try std.fmt.allocPrint(temp_allocator, "running: {s}", .{@tagName(command)})
+    else
+        "ready";
+    try writeFooterLine(writer, size.cols, approval_text);
+
+    const cursor_row = header_height + chat_height + 2;
+    const cursor_col = 9 + input_view.cursor_col;
+    try writer.print("\x1b[{d};{d}H\x1b[?25h", .{ cursor_row, cursor_col });
+    try std.fs.File.stdout().writeAll(screen.items);
+}
+
+fn buildChatLines(
+    allocator: std.mem.Allocator,
+    tui: *const TuiSession,
+    lines: *std.ArrayList(RenderLine),
+    width: usize,
+) !void {
+    if (tui.messages.items.len == 0) {
+        try lines.append(allocator, .{ .text = "no events yet", .tone = .info });
+        return;
+    }
+    for (tui.messages.items) |message| {
+        const header = switch (message.kind) {
+            .user => try std.fmt.allocPrint(allocator, "USER | {s}", .{message.title}),
+            .agent => try std.fmt.allocPrint(allocator, "{s} | streaming {s}", .{ toUpperAscii(allocator, message.actor) catch message.actor, if (message.streaming) "..." else "done" }),
+            .tool => try std.fmt.allocPrint(allocator, "TOOL | {s}", .{message.title}),
+            .system => try std.fmt.allocPrint(allocator, "SYSTEM | {s}", .{message.title}),
+        };
+        try lines.append(allocator, .{ .text = header, .tone = message.tone });
+        try appendWrappedLines(allocator, lines, message.text.items, width, message.tone, message.highlight);
+        try lines.append(allocator, .{});
+    }
+}
+
+fn buildSidebarLines(
+    allocator: std.mem.Allocator,
+    tui: *const TuiSession,
+    lines: *std.ArrayList(RenderLine),
+    width: usize,
+) !void {
+    try lines.append(allocator, .{ .text = "LIVE CONTEXT", .tone = .warning });
+    try lines.append(allocator, .{ .text = try std.fmt.allocPrint(allocator, "actor   {s}", .{tui.snapshot.current_actor}), .tone = .info });
+    try lines.append(allocator, .{ .text = try std.fmt.allocPrint(allocator, "lane    {s}", .{tui.snapshot.active_lane}), .tone = .info });
+    try lines.append(allocator, .{ .text = try std.fmt.allocPrint(allocator, "global  {s}", .{tui.snapshot.global_status}), .tone = .info });
+    try lines.append(allocator, .{ .text = try std.fmt.allocPrint(allocator, "runtime {s}", .{tui.snapshot.runtime_status}), .tone = .info });
+    try lines.append(allocator, .{ .text = try std.fmt.allocPrint(allocator, "turn    {d}", .{tui.snapshot.iteration}), .tone = .info });
+    try lines.append(allocator, .{ .text = try std.fmt.allocPrint(allocator, "tool    {s}", .{if (tui.snapshot.active_tool.len > 0) tui.snapshot.active_tool else "none"}), .tone = .info });
+    try lines.append(allocator, .{});
+    try lines.append(allocator, .{ .text = "GOAL", .tone = .warning });
+    try appendWrappedLines(allocator, lines, if (tui.snapshot.current_goal.len > 0) tui.snapshot.current_goal else "idle", width, .info, .plain);
+    try lines.append(allocator, .{});
+    try lines.append(allocator, .{ .text = "ERROR", .tone = .warning });
+    try appendWrappedLines(allocator, lines, if (tui.snapshot.last_error.len > 0) tui.snapshot.last_error else "none", width, .danger, .plain);
+    try lines.append(allocator, .{});
+    try lines.append(allocator, .{ .text = "MODELS", .tone = .warning });
+    if (tui.cached_models.len == 0) {
+        try appendWrappedLines(allocator, lines, if (tui.last_model_error.len > 0) tui.last_model_error else "run /models", width, .info, .plain);
+    } else {
+        var model_index: usize = 0;
+        while (model_index < tui.cached_models.len and model_index < 6) : (model_index += 1) {
+            const marker = if (eql(tui.cached_models[model_index], tui.snapshot.model)) "*" else " ";
+            try lines.append(allocator, .{ .text = try std.fmt.allocPrint(allocator, "{s} {d}. {s}", .{ marker, model_index + 1, tui.cached_models[model_index] }), .tone = .info });
+        }
+    }
+}
+
+fn appendWrappedLines(
+    allocator: std.mem.Allocator,
+    lines: *std.ArrayList(RenderLine),
+    text: []const u8,
+    width: usize,
+    tone: ChatTone,
+    highlight: HighlightKind,
+) !void {
+    if (width == 0) return;
+    var source_lines = std.mem.splitScalar(u8, text, '\n');
+    while (source_lines.next()) |source_line| {
+        if (source_line.len == 0) {
+            try lines.append(allocator, .{ .text = "", .tone = tone, .highlight = highlight });
+            continue;
+        }
+        var remainder = source_line;
+        while (remainder.len > width) {
+            var split_at = width;
+            if (std.mem.lastIndexOfScalar(u8, remainder[0..width], ' ')) |space_index| {
+                if (space_index > 0) split_at = space_index;
+            }
+            try lines.append(allocator, .{
+                .text = trimAscii(remainder[0..split_at]),
+                .tone = tone,
+                .highlight = highlight,
+            });
+            remainder = trimAscii(remainder[split_at..]);
+        }
+        try lines.append(allocator, .{
+            .text = remainder,
+            .tone = tone,
+            .highlight = highlight,
+        });
+    }
+}
+
+fn terminalSize() TerminalSize {
+    var winsize: std.posix.winsize = .{
+        .row = 0,
+        .col = 0,
+        .xpixel = 0,
+        .ypixel = 0,
+    };
+    const err = std.posix.system.ioctl(std.posix.STDOUT_FILENO, std.posix.T.IOCGWINSZ, @intFromPtr(&winsize));
+    if (std.posix.errno(err) == .SUCCESS and winsize.col > 0 and winsize.row > 0) {
+        return .{
+            .rows = winsize.row,
+            .cols = winsize.col,
+        };
+    }
+    return .{ .rows = 32, .cols = 120 };
+}
+
+fn pollInput(timeout_ms: i32) !bool {
+    var fds = [_]std.posix.pollfd{
+        .{
+            .fd = std.posix.STDIN_FILENO,
+            .events = std.posix.POLL.IN,
+            .revents = 0,
+        },
+    };
+    _ = try std.posix.poll(&fds, timeout_ms);
+    return (fds[0].revents & std.posix.POLL.IN) != 0;
+}
+
+fn writeHeaderLine(writer: anytype, width: usize, text: []const u8, tone: ChatTone) !void {
+    try writePaddedTone(writer, text, width, tone, true, .plain);
+    try writer.writeByte('\n');
+}
+
+fn writeFooterLine(writer: anytype, width: usize, text: []const u8) !void {
+    try writePaddedTone(writer, text, width, .info, false, .plain);
+    try writer.writeByte('\n');
+}
+
+fn writePaddedLine(writer: anytype, line: RenderLine, width: usize) !void {
+    try writePaddedTone(writer, line.text, width, line.tone, false, line.highlight);
+}
+
+fn writePaddedTone(writer: anytype, text: []const u8, width: usize, tone: ChatTone, bold: bool, highlight: HighlightKind) !void {
+    const clipped = clipText(text, width);
+    if (bold) {
+        try writer.writeAll("\x1b[1m");
+    }
+    try writePlain(writer, clipped, tone, highlight);
+    if (bold) {
+        try writer.writeAll("\x1b[0m");
+    }
+    const fill = if (visibleLen(clipped) < width) width - visibleLen(clipped) else 0;
+    if (fill > 0) try writer.writeByteNTimes(' ', fill);
+}
+
+fn writePlain(writer: anytype, text: []const u8, tone: ChatTone, highlight: HighlightKind) !void {
+    switch (highlight) {
+        .json => try writeJsonHighlighted(writer, text),
+        else => {
+            try writer.writeAll(colorForTone(tone));
+            try writer.writeAll(text);
+            try writer.writeAll("\x1b[0m");
+        },
+    }
+}
+
+fn writeJsonHighlighted(writer: anytype, text: []const u8) !void {
+    var in_string = false;
+    var escape = false;
+    for (text) |char| {
+        if (in_string) {
+            try writer.writeAll("\x1b[38;5;114m");
+            try writer.writeByte(char);
+            try writer.writeAll("\x1b[0m");
+            if (escape) {
+                escape = false;
+                continue;
+            }
+            if (char == '\\') {
+                escape = true;
+                continue;
+            }
+            if (char == '"') in_string = false;
+            continue;
+        }
+
+        switch (char) {
+            '"' => {
+                in_string = true;
+                try writer.writeAll("\x1b[38;5;114m\"");
+                try writer.writeAll("\x1b[0m");
+            },
+            '{', '}', '[', ']', ':', ',' => {
+                try writer.writeAll("\x1b[38;5;180m");
+                try writer.writeByte(char);
+                try writer.writeAll("\x1b[0m");
+            },
+            '0'...'9', '-', '.' => {
+                try writer.writeAll("\x1b[38;5;81m");
+                try writer.writeByte(char);
+                try writer.writeAll("\x1b[0m");
+            },
+            else => {
+                if (std.ascii.isAlphabetic(char)) {
+                    try writer.writeAll("\x1b[38;5;223m");
+                    try writer.writeByte(char);
+                    try writer.writeAll("\x1b[0m");
+                } else {
+                    try writer.writeByte(char);
+                }
+            },
+        }
+    }
+}
+
+fn visibleInputWindow(text: []const u8, cursor: usize, width: usize) struct { text: []const u8, cursor_col: usize } {
+    if (text.len <= width) return .{ .text = text, .cursor_col = cursor };
+    const safe_cursor = @min(cursor, text.len);
+    var start = if (safe_cursor > width - 1) safe_cursor - (width - 1) else 0;
+    if (start + width > text.len) start = text.len - width;
+    return .{
+        .text = text[start .. start + width],
+        .cursor_col = safe_cursor - start,
+    };
+}
+
+fn visibleLen(text: []const u8) usize {
+    return text.len;
+}
+
+fn clipText(text: []const u8, width: usize) []const u8 {
+    if (text.len <= width) return text;
+    return text[0..width];
+}
+
+fn colorForTone(tone: ChatTone) []const u8 {
+    return switch (tone) {
+        .danger => "\x1b[38;5;203m",
+        .success => "\x1b[38;5;114m",
+        .mission => "\x1b[38;5;223m",
+        .agent => "\x1b[38;5;81m",
+        .tool => "\x1b[38;5;179m",
+        .warning => "\x1b[38;5;214m",
+        else => "\x1b[38;5;252m",
+    };
+}
+
+fn toUpperAscii(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+    const buffer = try allocator.dupe(u8, text);
+    for (buffer) |*char| {
+        char.* = std.ascii.toUpper(char.*);
+    }
+    return buffer;
+}
+
+fn currentLaneForState(state: AppState) []const u8 {
+    if (state.agent_loop.active_tool.len > 0) return laneForActor(state.agent_loop.active_tool);
+    if (eql(state.current_actor, "decanus")) return "command";
+    return laneForActor(state.current_actor);
+}
+
+fn toneForOutcome(state: AppState) ChatTone {
+    if (eql(state.global_status, "complete")) return .success;
+    if (eql(state.runtime_session.status, "blocked") or eql(state.runtime_session.status, "interrupted")) return .danger;
+    return .info;
+}
+
+fn emitLog(hooks: RuntimeHooks, tone: ChatTone, actor: []const u8, title: []const u8, text: []const u8, highlight: HighlightKind) void {
+    hooks.emit(.{
+        .kind = .log,
+        .tone = tone,
+        .actor = actor,
+        .title = title,
+        .text = text,
+        .highlight = highlight,
+    });
+}
+
+fn emitStreamStart(hooks: RuntimeHooks, actor: []const u8) void {
+    hooks.emit(.{
+        .kind = .stream_start,
+        .actor = actor,
+    });
+}
+
+fn emitStreamChunk(hooks: RuntimeHooks, actor: []const u8, text: []const u8) void {
+    hooks.emit(.{
+        .kind = .stream_chunk,
+        .actor = actor,
+        .text = text,
+    });
+}
+
+fn emitStreamFinalize(hooks: RuntimeHooks, actor: []const u8, text: []const u8) void {
+    hooks.emit(.{
+        .kind = .stream_finalize,
+        .actor = actor,
+        .text = text,
+        .highlight = .json,
+    });
+}
+
+fn emitStateSnapshot(hooks: RuntimeHooks, config: AppConfig, state: AppState) void {
+    hooks.emit(.{
+        .kind = .state_snapshot,
+        .project_name = if (!eql(state.project_name, "UNASSIGNED")) state.project_name else "",
+        .provider_type = config.provider.type,
+        .model = if (state.runtime_session.model.len > 0) state.runtime_session.model else config.provider.model,
+        .approval_mode = config.policy.approval_mode,
+        .global_status = state.global_status,
+        .runtime_status = state.runtime_session.status,
+        .current_actor = state.current_actor,
+        .active_tool = state.agent_loop.active_tool,
+        .active_lane = currentLaneForState(state),
+        .current_goal = state.mission.current_goal,
+        .last_error = state.runtime_session.last_error,
+        .last_log_path = state.runtime_session.active_log_path,
+        .iteration = state.agent_loop.iteration,
+    });
+}
+
+fn markInterrupted(state: *AppState) void {
+    state.global_status = "interrupted";
+    state.agent_loop.status = "interrupted";
+    state.runtime_session.status = "interrupted";
+    state.runtime_session.last_error = "operator interrupted the active loop";
 }
 
 fn friendlyRuntimeError(allocator: std.mem.Allocator, err: anyerror) ![]const u8 {
@@ -721,13 +1832,23 @@ fn friendlyRuntimeError(allocator: std.mem.Allocator, err: anyerror) ![]const u8
     if (err == error.ModelSelectionOutOfRange) {
         return try allocator.dupe(u8, "that model number is outside the current roster. Run /models and choose one of the listed entries.");
     }
+    if (err == error.Interrupted) {
+        return try allocator.dupe(u8, "the active loop was interrupted by the operator.");
+    }
     return try std.fmt.allocPrint(allocator, "runtime error: {s}", .{@errorName(err)});
 }
 
-fn runLoop(allocator: std.mem.Allocator, config: AppConfig, state: *AppState) !void {
+fn runLoop(allocator: std.mem.Allocator, config: AppConfig, state: *AppState, hooks: RuntimeHooks) !void {
     while (state.agent_loop.iteration < state.agent_loop.max_iterations) {
-        const outcome = try executeStep(allocator, config, state);
+        if (hooks.isInterrupted()) {
+            markInterrupted(state);
+            emitStateSnapshot(hooks, config, state.*);
+            return;
+        }
+
+        const outcome = try executeStep(allocator, config, state, hooks);
         try saveState(allocator, config.paths.state_file, state.*);
+        emitStateSnapshot(hooks, config, state.*);
         switch (outcome) {
             .advanced => {},
             .complete => return,
@@ -739,12 +1860,19 @@ fn runLoop(allocator: std.mem.Allocator, config: AppConfig, state: *AppState) !v
     state.agent_loop.status = "complete";
     state.runtime_session.status = "blocked";
     state.runtime_session.last_error = "maximum iteration count reached";
+    emitStateSnapshot(hooks, config, state.*);
 }
 
-fn executeStep(allocator: std.mem.Allocator, config: AppConfig, state: *AppState) !StepOutcome {
+fn executeStep(allocator: std.mem.Allocator, config: AppConfig, state: *AppState, hooks: RuntimeHooks) !StepOutcome {
     if (state.mission.initial_prompt.len == 0) {
         try stderrPrint("mission prompt is empty; use `contubernium run`\n", .{});
         return error.MissionNotInitialized;
+    }
+
+    if (hooks.isInterrupted()) {
+        markInterrupted(state);
+        emitStateSnapshot(hooks, config, state.*);
+        return .blocked;
     }
 
     state.agent_loop.iteration += 1;
@@ -756,16 +1884,18 @@ fn executeStep(allocator: std.mem.Allocator, config: AppConfig, state: *AppState
     state.runtime_session.last_actor = state.current_actor;
     state.runtime_session.current_turn_id = try makeTurnId(allocator, state.current_actor, state.agent_loop.iteration);
     state.runtime_session.active_log_path = try logPathForTurn(allocator, config.paths.logs_dir, state.runtime_session.current_turn_id);
+    emitStateSnapshot(hooks, config, state.*);
 
     if (eql(state.current_actor, "decanus")) {
-        return try executeDecanusTurn(allocator, config, state);
+        return try executeDecanusTurn(allocator, config, state, hooks);
     }
-    return try executeSpecialistTurn(allocator, config, state);
+    return try executeSpecialistTurn(allocator, config, state, hooks);
 }
 
-fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *AppState) !StepOutcome {
+fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *AppState, hooks: RuntimeHooks) !StepOutcome {
     state.global_status = "planning";
     state.agent_loop.status = "thinking";
+    emitStateSnapshot(hooks, config, state.*);
 
     const system_prompt = try assembleSystemPrompt(
         allocator,
@@ -786,24 +1916,34 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
         config.provider.max_retries,
         DecanusDecision,
         state,
+        hooks,
     ) catch |err| {
+        if (err == error.Interrupted) {
+            markInterrupted(state);
+            emitStateSnapshot(hooks, config, state.*);
+            return .blocked;
+        }
         const message = try std.fmt.allocPrint(allocator, "decanus turn failed: {s}", .{@errorName(err)});
         state.global_status = "waiting_on_tool";
         state.runtime_session.status = "blocked";
         state.runtime_session.last_error = message;
         try writeTurnLog(state.runtime_session.active_log_path, "error", message);
+        emitLog(hooks, .danger, "decanus", "Commander Failed", message, .plain);
         return .blocked;
     };
     const decision = response.value;
     try writeTurnLog(state.runtime_session.active_log_path, "model_output", response.raw_text);
+    emitStreamFinalize(hooks, "decanus", prettyPrintJson(allocator, response.raw_text) catch response.raw_text);
 
     if (decision.current_goal.len > 0) {
         state.mission.current_goal = decision.current_goal;
     }
     state.agent_loop.last_decision = decision.action;
+    emitStateSnapshot(hooks, config, state.*);
 
     if (decision.tool_requests.len > 0 or eql(decision.action, "tool_request")) {
-        const tool_result = try executeToolRequests(allocator, config, state, "decanus", "", decision.tool_requests);
+        emitLog(hooks, .tool, "decanus", "Runtime Tool", "decanus requested runtime tools", .plain);
+        const tool_result = try executeToolRequests(allocator, config, state, "decanus", "", decision.tool_requests, hooks);
         state.agent_loop.last_tool_result = tool_result.summary;
         try appendHistory(
             allocator,
@@ -821,8 +1961,10 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
         if (tool_result.blocked) {
             state.global_status = "waiting_on_tool";
             state.runtime_session.status = "blocked";
+            emitStateSnapshot(hooks, config, state.*);
             return .blocked;
         }
+        emitLog(hooks, .tool, "decanus", "Tool Result", tool_result.summary, .plain);
         return .advanced;
     }
 
@@ -844,6 +1986,8 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
                 .timestamp = try unixTimestampString(allocator),
             },
         );
+        emitLog(hooks, .success, "decanus", "Final Response", decision.final_response, .plain);
+        emitStateSnapshot(hooks, config, state.*);
         return .complete;
     }
 
@@ -879,6 +2023,15 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
                 .timestamp = try unixTimestampString(allocator),
             },
         );
+        emitLog(
+            hooks,
+            .warning,
+            "decanus",
+            "Handoff",
+            try std.fmt.allocPrint(allocator, "{s} -> {s} on {s}: {s}", .{ "decanus", actor, lane, decision.objective }),
+            .plain,
+        );
+        emitStateSnapshot(hooks, config, state.*);
         return .advanced;
     }
 
@@ -886,22 +2039,27 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
         state.global_status = "waiting_on_tool";
         state.runtime_session.status = "blocked";
         state.runtime_session.last_error = decision.question;
+        emitLog(hooks, .warning, "decanus", "Question", decision.question, .plain);
+        emitStateSnapshot(hooks, config, state.*);
         return .blocked;
     }
 
     state.global_status = "waiting_on_tool";
     state.runtime_session.status = "blocked";
     state.runtime_session.last_error = if (decision.blocked_reason.len > 0) decision.blocked_reason else "decanus returned a blocked state";
+    emitLog(hooks, .danger, "decanus", "Blocked", state.runtime_session.last_error, .plain);
+    emitStateSnapshot(hooks, config, state.*);
     return .blocked;
 }
 
-fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state: *AppState) !StepOutcome {
+fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state: *AppState, hooks: RuntimeHooks) !StepOutcome {
     const actor = state.current_actor;
     const lane = laneForActor(actor);
     var task = taskForLane(state, lane);
     task.invocation.status = "running";
     state.global_status = "waiting_on_tool";
     state.agent_loop.status = "running_tool";
+    emitStateSnapshot(hooks, config, state.*);
 
     const schema_path = "shared/specialist-schema.json";
     const system_prompt = try assembleSystemPrompt(allocator, config.paths.prompts_dir, actor, schema_path);
@@ -918,26 +2076,38 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
         config.provider.max_retries,
         SpecialistResult,
         state,
+        hooks,
     ) catch |err| {
+        if (err == error.Interrupted) {
+            markInterrupted(state);
+            task.invocation.status = "blocked";
+            emitStateSnapshot(hooks, config, state.*);
+            return .blocked;
+        }
         const message = try std.fmt.allocPrint(allocator, "{s} turn failed: {s}", .{ actor, @errorName(err) });
         task.invocation.status = "blocked";
         state.runtime_session.status = "blocked";
         state.runtime_session.last_error = message;
         try writeTurnLog(state.runtime_session.active_log_path, "error", message);
+        emitLog(hooks, .danger, actor, "Specialist Failed", message, .plain);
         return .blocked;
     };
     const result = response.value;
     try writeTurnLog(state.runtime_session.active_log_path, "model_output", response.raw_text);
+    emitStreamFinalize(hooks, actor, prettyPrintJson(allocator, response.raw_text) catch response.raw_text);
 
     if (result.tool_requests.len > 0 or eql(result.action, "tool_request")) {
-        const tool_result = try executeToolRequests(allocator, config, state, actor, lane, result.tool_requests);
+        emitLog(hooks, .tool, actor, "Runtime Tool", "specialist requested runtime tools", .plain);
+        const tool_result = try executeToolRequests(allocator, config, state, actor, lane, result.tool_requests, hooks);
         state.agent_loop.last_tool_result = tool_result.summary;
         if (tool_result.blocked) {
             task.invocation.status = "blocked";
             state.runtime_session.status = "blocked";
+            emitStateSnapshot(hooks, config, state.*);
             return .blocked;
         }
         task.invocation.status = "running";
+        emitLog(hooks, .tool, actor, "Tool Result", tool_result.summary, .plain);
         return .advanced;
     }
 
@@ -966,6 +2136,8 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
                 .timestamp = try unixTimestampString(allocator),
             },
         );
+        emitLog(hooks, .success, actor, "Lane Complete", result.result_summary, .plain);
+        emitStateSnapshot(hooks, config, state.*);
         return .advanced;
     }
 
@@ -973,12 +2145,16 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
         task.invocation.status = "blocked";
         state.runtime_session.status = "blocked";
         state.runtime_session.last_error = result.question;
+        emitLog(hooks, .warning, actor, "Question", result.question, .plain);
+        emitStateSnapshot(hooks, config, state.*);
         return .blocked;
     }
 
     task.invocation.status = "blocked";
     state.runtime_session.status = "blocked";
     state.runtime_session.last_error = if (result.blocked_reason.len > 0) result.blocked_reason else "specialist returned a blocked state";
+    emitLog(hooks, .danger, actor, "Blocked", state.runtime_session.last_error, .plain);
+    emitStateSnapshot(hooks, config, state.*);
     return .blocked;
 }
 
@@ -989,6 +2165,7 @@ fn executeToolRequests(
     actor: []const u8,
     lane: []const u8,
     requests: []const ToolRequest,
+    hooks: RuntimeHooks,
 ) !ToolExecutionOutcome {
     if (requests.len == 0) {
         return .{ .blocked = false, .summary = "no tool requests" };
@@ -998,9 +2175,10 @@ fn executeToolRequests(
     for (requests) |request| {
         const tool_name = request.tool;
         if (tool_name.len == 0) continue;
+        emitLog(hooks, .tool, actor, tool_name, toolRequestDisplay(allocator, request) catch tool_name, .plain);
 
         if (eql(tool_name, "list_files")) {
-            if (!config.policy.allow_read_tools_without_confirmation and !try confirmTool(allocator, tool_name, request.description)) {
+            if (!config.policy.allow_read_tools_without_confirmation and !try confirmTool(allocator, hooks, tool_name, request.description)) {
                 return try blockedToolOutcome(allocator, state, "list_files denied by operator");
             }
             const output = try runCommandCapture(allocator, &.{ "find", if (request.path.len > 0) request.path else ".", "-maxdepth", "3" });
@@ -1009,7 +2187,7 @@ fn executeToolRequests(
         }
 
         if (eql(tool_name, "read_file")) {
-            if (!config.policy.allow_read_tools_without_confirmation and !try confirmTool(allocator, tool_name, request.description)) {
+            if (!config.policy.allow_read_tools_without_confirmation and !try confirmTool(allocator, hooks, tool_name, request.description)) {
                 return try blockedToolOutcome(allocator, state, "read_file denied by operator");
             }
             const path = if (request.path.len > 0) request.path else return error.MissingPath;
@@ -1019,7 +2197,7 @@ fn executeToolRequests(
         }
 
         if (eql(tool_name, "search_text")) {
-            if (!config.policy.allow_read_tools_without_confirmation and !try confirmTool(allocator, tool_name, request.description)) {
+            if (!config.policy.allow_read_tools_without_confirmation and !try confirmTool(allocator, hooks, tool_name, request.description)) {
                 return try blockedToolOutcome(allocator, state, "search_text denied by operator");
             }
             const path = if (request.path.len > 0) request.path else ".";
@@ -1033,7 +2211,7 @@ fn executeToolRequests(
             if (commandIsBlocked(config.policy.blocked_command_patterns, request.command)) {
                 return try blockedToolOutcome(allocator, state, "run_command blocked by policy");
             }
-            if (!config.policy.allow_shell_without_confirmation and !try confirmTool(allocator, tool_name, request.command)) {
+            if (!config.policy.allow_shell_without_confirmation and !try confirmTool(allocator, hooks, tool_name, request.command)) {
                 return try blockedToolOutcome(allocator, state, "run_command denied by operator");
             }
             const output = try runShellCommand(allocator, request.command);
@@ -1046,7 +2224,7 @@ fn executeToolRequests(
             if (!pathIsSafeForWrite(path)) {
                 return try blockedToolOutcome(allocator, state, "write_file path outside workspace policy");
             }
-            if (!config.policy.allow_workspace_writes_without_confirmation and !try confirmTool(allocator, tool_name, path)) {
+            if (!config.policy.allow_workspace_writes_without_confirmation and !try confirmTool(allocator, hooks, tool_name, path)) {
                 return try blockedToolOutcome(allocator, state, "write_file denied by operator");
             }
             try writeFile(path, request.content);
@@ -1059,6 +2237,7 @@ fn executeToolRequests(
             state.runtime_session.status = "blocked";
             state.runtime_session.last_error = question;
             try summaries.append(allocator, try std.fmt.allocPrint(allocator, "ask_user {s}", .{question}));
+            emitLog(hooks, .warning, actor, "Question", question, .plain);
             return .{
                 .blocked = true,
                 .summary = try joinStrings(allocator, summaries.items, "\n"),
@@ -1083,19 +2262,24 @@ fn structuredChatWithRepair(
     max_retries: usize,
     comptime T: type,
     state: *AppState,
+    hooks: RuntimeHooks,
 ) !struct { value: T, raw_text: []const u8 } {
     var attempt: usize = 0;
     var repair_user_prompt = user_prompt;
 
     while (true) {
-        const response = try providerStructuredChat(allocator, provider, system_prompt, repair_user_prompt, actor);
+        if (hooks.isInterrupted()) return error.Interrupted;
+        emitStreamStart(hooks, actor);
+        const response = try providerStructuredChat(allocator, provider, system_prompt, repair_user_prompt, actor, hooks);
         try writeTurnLog(state.runtime_session.active_log_path, "provider_transport", response.transport_text);
         const parsed = parseModelJson(T, allocator, response.raw_text) catch |err| {
             try writeTurnLog(state.runtime_session.active_log_path, "invalid_model_output", response.raw_text);
+            emitStreamFinalize(hooks, actor, response.raw_text);
             if (attempt >= max_retries) return err;
             attempt += 1;
             state.runtime_session.repair_attempts = attempt;
             state.runtime_session.last_error = if (response.raw_text.len == 0) "model returned an empty response" else "model returned invalid JSON";
+            emitLog(hooks, .warning, actor, "Repair Retry", state.runtime_session.last_error, .plain);
             repair_user_prompt = try std.fmt.allocPrint(
                 allocator,
                 "{s}\n\nYour previous response was invalid JSON. Return valid JSON only. Do not use markdown fences. Preserve the intended structure.",
@@ -1288,6 +2472,7 @@ fn runDoctorCheck(allocator: std.mem.Allocator) ![]const u8 {
         "Return valid JSON only.",
         "Return exactly this JSON object and nothing else: {\"status\":\"ok\"}",
         "doctor",
+        .{},
     );
     const parsed = try parseModelJson(SmokeResponse, allocator, smoke_response.raw_text);
     if (!eql(parsed.status, "ok")) return error.StructuredOutputFailed;
@@ -1398,6 +2583,7 @@ fn providerStructuredChat(
     system_prompt: []const u8,
     user_prompt: []const u8,
     schema_kind: []const u8,
+    hooks: RuntimeHooks,
 ) !ProviderResponse {
     const started = std.time.milliTimestamp();
 
@@ -1410,12 +2596,17 @@ fn providerStructuredChat(
             allocator,
             OllamaChatRequest{
                 .model = provider.model,
-                .stream = false,
+                .stream = hooks.emit_fn != null,
                 .format = provider.structured_output,
                 .messages = &messages,
             },
         );
         const url = try std.fmt.allocPrint(allocator, "{s}/api/chat", .{provider.base_url});
+
+        if (hooks.emit_fn != null) {
+            return try providerStructuredChatOllamaStreaming(allocator, provider, schema_kind, body, url, started, hooks);
+        }
+
         const result = try runCommandCapture(
             allocator,
             &.{
@@ -1488,7 +2679,6 @@ fn providerStructuredChat(
         };
     }
 
-    _ = schema_kind;
     return error.UnsupportedProvider;
 }
 
@@ -1511,6 +2701,138 @@ const OpenAIChatRequest = struct {
 
 fn stringifyJsonToString(allocator: std.mem.Allocator, value: anytype) ![]const u8 {
     return try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(value, .{})});
+}
+
+fn providerStructuredChatOllamaStreaming(
+    allocator: std.mem.Allocator,
+    provider: ProviderConfig,
+    actor: []const u8,
+    body: []const u8,
+    url: []const u8,
+    started: i64,
+    hooks: RuntimeHooks,
+) !ProviderResponse {
+    var child = std.process.Child.init(
+        &.{
+            "curl",
+            "-fsS",
+            "--no-buffer",
+            "--max-time",
+            try timeoutSeconds(allocator, provider.timeout_ms),
+            "-H",
+            "Content-Type: application/json",
+            "-X",
+            "POST",
+            "-d",
+            body,
+            url,
+        },
+        allocator,
+    );
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+    try child.spawn();
+
+    var stdout_open = true;
+    var stderr_open = true;
+    var pending = std.ArrayList(u8).empty;
+    var full_text = std.ArrayList(u8).empty;
+    var transport = std.ArrayList(u8).empty;
+    var stderr_text = std.ArrayList(u8).empty;
+
+    while (stdout_open or stderr_open) {
+        if (hooks.isInterrupted()) {
+            _ = child.kill() catch {};
+            _ = child.wait() catch {};
+            return error.Interrupted;
+        }
+
+        var poll_items = [_]std.posix.pollfd{
+            .{ .fd = child.stdout.?.handle, .events = std.posix.POLL.IN, .revents = 0 },
+            .{ .fd = child.stderr.?.handle, .events = std.posix.POLL.IN, .revents = 0 },
+        };
+        _ = try std.posix.poll(&poll_items, 100);
+
+        if (stdout_open and (poll_items[0].revents & (std.posix.POLL.IN | std.posix.POLL.HUP)) != 0) {
+            var buffer: [4096]u8 = undefined;
+            const read_len = try child.stdout.?.read(&buffer);
+            if (read_len == 0) {
+                stdout_open = false;
+            } else {
+                try transport.appendSlice(allocator, buffer[0..read_len]);
+                try pending.appendSlice(allocator, buffer[0..read_len]);
+                try processOllamaPendingLines(allocator, &pending, &full_text, actor, hooks);
+            }
+        }
+
+        if (stderr_open and (poll_items[1].revents & (std.posix.POLL.IN | std.posix.POLL.HUP)) != 0) {
+            var buffer: [1024]u8 = undefined;
+            const read_len = try child.stderr.?.read(&buffer);
+            if (read_len == 0) {
+                stderr_open = false;
+            } else {
+                try stderr_text.appendSlice(allocator, buffer[0..read_len]);
+            }
+        }
+    }
+
+    if (pending.items.len > 0) {
+        try processOllamaPendingLine(allocator, trimAscii(pending.items), &full_text, actor, hooks);
+    }
+
+    const term = try child.wait();
+    if (exitCode(term) != 0) return error.BackendUnavailable;
+    if (trimAscii(stderr_text.items).len > 0 and full_text.items.len == 0) return error.BackendUnavailable;
+    if (trimAscii(full_text.items).len == 0) return error.EmptyModelOutput;
+
+    return .{
+        .raw_text = try full_text.toOwnedSlice(allocator),
+        .transport_text = try transport.toOwnedSlice(allocator),
+        .provider_name = provider.type,
+        .model_name = provider.model,
+        .latency_ms = std.time.milliTimestamp() - started,
+    };
+}
+
+fn processOllamaPendingLines(
+    allocator: std.mem.Allocator,
+    pending: *std.ArrayList(u8),
+    full_text: *std.ArrayList(u8),
+    actor: []const u8,
+    hooks: RuntimeHooks,
+) !void {
+    var consumed: usize = 0;
+    while (std.mem.indexOfScalar(u8, pending.items[consumed..], '\n')) |line_end_rel| {
+        const line_end = consumed + line_end_rel;
+        const line = trimAscii(pending.items[consumed..line_end]);
+        if (line.len > 0) {
+            try processOllamaPendingLine(allocator, line, full_text, actor, hooks);
+        }
+        consumed = line_end + 1;
+        if (consumed >= pending.items.len) break;
+    }
+
+    if (consumed > 0 and consumed <= pending.items.len) {
+        const remaining = pending.items.len - consumed;
+        std.mem.copyForwards(u8, pending.items[0..remaining], pending.items[consumed..]);
+        pending.items.len = remaining;
+    }
+}
+
+fn processOllamaPendingLine(
+    allocator: std.mem.Allocator,
+    line: []const u8,
+    full_text: *std.ArrayList(u8),
+    actor: []const u8,
+    hooks: RuntimeHooks,
+) !void {
+    if (line.len == 0) return;
+    const chunk = try parseJson(OllamaChatStreamChunk, allocator, line);
+    if (chunk.@"error".len > 0) return error.ProviderRejectedRequest;
+    if (chunk.message.content.len > 0) {
+        try full_text.appendSlice(allocator, chunk.message.content);
+        emitStreamChunk(hooks, actor, chunk.message.content);
+    }
 }
 
 fn runCommandCapture(allocator: std.mem.Allocator, argv: []const []const u8) !CommandResult {
@@ -1686,7 +3008,26 @@ fn blockedToolOutcome(allocator: std.mem.Allocator, state: *AppState, reason: []
     };
 }
 
-fn confirmTool(allocator: std.mem.Allocator, tool_name: []const u8, detail: []const u8) !bool {
+fn toolRequestDisplay(allocator: std.mem.Allocator, request: ToolRequest) ![]const u8 {
+    if (request.path.len > 0) {
+        return try std.fmt.allocPrint(allocator, "{s} {s}", .{ request.tool, request.path });
+    }
+    if (request.pattern.len > 0) {
+        return try std.fmt.allocPrint(allocator, "{s} pattern={s}", .{ request.tool, request.pattern });
+    }
+    if (request.command.len > 0) {
+        return try std.fmt.allocPrint(allocator, "{s} {s}", .{ request.tool, request.command });
+    }
+    if (request.description.len > 0) {
+        return try std.fmt.allocPrint(allocator, "{s} {s}", .{ request.tool, request.description });
+    }
+    return request.tool;
+}
+
+fn confirmTool(allocator: std.mem.Allocator, hooks: RuntimeHooks, tool_name: []const u8, detail: []const u8) !bool {
+    if (hooks.requestApproval(tool_name, detail)) |decision| {
+        return decision;
+    }
     try stdoutPrint("allow {s}? {s} [y/N]: ", .{ tool_name, detail });
     const input = try std.fs.File.stdin().deprecatedReader().readUntilDelimiterOrEofAlloc(allocator, '\n', 1024);
     if (input == null) return false;
@@ -1812,6 +3153,18 @@ fn parseJson(comptime T: type, allocator: std.mem.Allocator, text: []const u8) !
 fn parseModelJson(comptime T: type, allocator: std.mem.Allocator, text: []const u8) !T {
     const normalized = try normalizeModelJson(text);
     return try parseJson(T, allocator, normalized);
+}
+
+fn prettyPrintJson(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+    const normalized = try normalizeModelJson(text);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, normalized, .{
+        .ignore_unknown_fields = true,
+    });
+    return try std.fmt.allocPrint(
+        allocator,
+        "{f}",
+        .{std.json.fmt(parsed.value, .{ .whitespace = .indent_2 })},
+    );
 }
 
 fn normalizeModelJson(text: []const u8) ![]const u8 {

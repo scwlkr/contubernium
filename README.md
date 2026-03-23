@@ -117,10 +117,25 @@ Running `contubernium` with no arguments starts the same full-screen Roman-style
 Inside the TUI you can:
 
 - enter a mission prompt directly
+- watch the active agent stream JSON output into the mission log while the UI stays responsive
+- see live state context for `global_status`, `current_actor`, loop iteration, lane, model, and last error in the header/sidebar
 - run `/doctor` to verify the local backend
 - run `/models` to query the active local model roster
 - run `/model <n|name>` to switch the active local model without leaving the UI
-- run `/status`, `/resume`, `/clear`, or `/exit`
+- run `/status`, `/resume`, `/interrupt`, `/clear`, or `/exit`
+- approve guarded writes or shell actions with `y` / `n` when the runtime asks for confirmation
+
+Keyboard controls:
+
+- `Enter` submits the current prompt or slash command
+- `Up` / `Down` scroll the mission log
+- `PageUp` / `PageDown` scroll faster
+- `Left` / `Right` move within the input field
+- `Ctrl+C` interrupts the active loop or exits when idle
+
+Implementation note:
+
+- The MVP ships as a raw ANSI Zig TUI with a background worker thread and Ollama chunk streaming. It keeps dependencies at zero for now while leaving room for a future move to a richer library such as `vaxis` if the widget surface grows.
 
 The first implementation target is Ollama. The runtime also includes an OpenAI-compatible adapter layer so it can be extended to other local servers without changing the Contubernium protocol.
 
