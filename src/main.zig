@@ -220,6 +220,7 @@ const SmokeResponse = struct {
 
 const ProviderResponse = struct {
     raw_text: []const u8,
+    transport_text: []const u8,
     provider_name: []const u8,
     model_name: []const u8,
     latency_ms: i64,
@@ -242,8 +243,20 @@ const ToolExecutionOutcome = struct {
     summary: []const u8,
 };
 
+const TuiEvent = struct {
+    tone: []const u8 = "info",
+    text: []const u8 = "",
+};
+
+const TuiSession = struct {
+    events: std.ArrayList(TuiEvent) = .empty,
+    cached_models: []const []const u8 = &.{},
+    last_model_error: []const u8 = "",
+};
+
 const OllamaTagsResponse = struct {
     models: []const OllamaModel = &.{},
+    @"error": []const u8 = "",
 };
 
 const OllamaModel = struct {
@@ -252,6 +265,7 @@ const OllamaModel = struct {
 
 const OllamaChatResponse = struct {
     message: OllamaMessage = .{},
+    @"error": []const u8 = "",
 };
 
 const OllamaMessage = struct {
@@ -260,6 +274,7 @@ const OllamaMessage = struct {
 
 const OpenAIModelsResponse = struct {
     data: []const OpenAIModel = &.{},
+    @"error": OpenAIErrorEnvelope = .{},
 };
 
 const OpenAIModel = struct {
@@ -268,6 +283,7 @@ const OpenAIModel = struct {
 
 const OpenAIChatResponse = struct {
     choices: []const OpenAIChoice = &.{},
+    @"error": OpenAIErrorEnvelope = .{},
 };
 
 const OpenAIChoice = struct {
@@ -278,12 +294,23 @@ const OpenAIMessage = struct {
     content: []const u8 = "",
 };
 
+const OpenAIErrorEnvelope = struct {
+    message: []const u8 = "",
+};
+
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
     const args = try std.process.argsAlloc(allocator);
+    runMain(allocator, args) catch |err| {
+        try stderrPrint("{s}\n", .{try friendlyRuntimeError(allocator, err)});
+        std.process.exit(1);
+    };
+}
+
+fn runMain(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len < 2) {
         try cmdUi(allocator);
         return;
@@ -354,42 +381,8 @@ fn cmdInit(allocator: std.mem.Allocator) !void {
 }
 
 fn cmdDoctor(allocator: std.mem.Allocator) !void {
-    const config = try loadProjectConfig(allocator);
-    var state = try loadState(allocator, config.paths.state_file);
-
-    try ensurePromptFiles(config.paths.prompts_dir);
-    try stdoutPrint("prompt assets: ok\n", .{});
-
-    const models = try providerListModels(allocator, config.provider);
-    try stdoutPrint("backend reachable: ok ({s})\n", .{config.provider.type});
-
-    if (!containsString(models, config.provider.model)) {
-        try stderrPrint("configured model missing: {s}\n", .{config.provider.model});
-        return error.ModelNotFound;
-    }
-    try stdoutPrint("configured model: ok ({s})\n", .{config.provider.model});
-
-    const smoke_response = try providerStructuredChat(
-        allocator,
-        config.provider,
-        "Return valid JSON only.",
-        "Return exactly this JSON object and nothing else: {\"status\":\"ok\"}",
-        "doctor",
-    );
-    const parsed = try parseJson(SmokeResponse, allocator, smoke_response.raw_text);
-    if (!eql(parsed.status, "ok")) {
-        try stderrPrint("structured output smoke test failed\n", .{});
-        return error.StructuredOutputFailed;
-    }
-    try stdoutPrint("structured output smoke test: ok\n", .{});
-
-    const now = try unixTimestampString(allocator);
-    state.runtime_session.last_health_check = now;
-    state.runtime_session.provider = config.provider.type;
-    state.runtime_session.model = config.provider.model;
-    state.runtime_session.endpoint = config.provider.base_url;
-    state.runtime_session.approval_mode = config.policy.approval_mode;
-    try saveState(allocator, config.paths.state_file, state);
+    const report = try runDoctorCheck(allocator);
+    try stdoutPrint("{s}\n", .{report});
 }
 
 fn cmdModelsList(allocator: std.mem.Allocator) !void {
@@ -408,6 +401,9 @@ fn cmdRun(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     const mission_prompt = try joinArgs(allocator, args[2..]);
     try runMission(allocator, mission_prompt);
+    const config = try loadProjectConfig(allocator);
+    const state = try loadState(allocator, config.paths.state_file);
+    try stdoutPrint("{s}\n", .{try missionOutcomeSummary(allocator, state)});
 }
 
 fn cmdStep(allocator: std.mem.Allocator) !void {
@@ -416,6 +412,7 @@ fn cmdStep(allocator: std.mem.Allocator) !void {
     initializeRuntimeSession(allocator, &state, config);
     _ = try executeStep(allocator, config, &state);
     try saveState(allocator, config.paths.state_file, state);
+    try stdoutPrint("{s}\n", .{try missionOutcomeSummary(allocator, state)});
 }
 
 fn cmdResume(allocator: std.mem.Allocator) !void {
@@ -424,6 +421,7 @@ fn cmdResume(allocator: std.mem.Allocator) !void {
     initializeRuntimeSession(allocator, &state, config);
     try runLoop(allocator, config, &state);
     try saveState(allocator, config.paths.state_file, state);
+    try stdoutPrint("{s}\n", .{try missionOutcomeSummary(allocator, state)});
 }
 
 fn cmdUi(allocator: std.mem.Allocator) !void {
@@ -432,30 +430,27 @@ fn cmdUi(allocator: std.mem.Allocator) !void {
 }
 
 fn interactiveUiLoop(allocator: std.mem.Allocator) !void {
-    try stdoutPrint(
-        \\Contubernium interactive mode
-        \\Type a mission prompt and press enter.
-        \\Commands: /exit, /doctor, /resume
-        \\
-    , .{});
+    var tui = TuiSession{};
+    defer tui.events.deinit(allocator);
+
+    try appendTuiEvent(
+        allocator,
+        &tui,
+        "info",
+        "Ave. Type a mission prompt to start work, or use /models and /model <n|name> to manage your local model.",
+    );
+
+    try enterTuiScreen();
+    defer leaveTuiScreen() catch {};
 
     while (true) {
-        try stdoutPrint("Mission> ", .{});
+        try renderTui(allocator, &tui);
         const line = try std.fs.File.stdin().deprecatedReader().readUntilDelimiterOrEofAlloc(allocator, '\n', 16 * 1024);
         if (line == null) return;
         const input = trimAscii(line.?);
         if (input.len == 0) continue;
-        if (eql(input, "/exit")) return;
-        if (eql(input, "/doctor")) {
-            try cmdDoctor(allocator);
-            continue;
-        }
-        if (eql(input, "/resume")) {
-            try cmdResume(allocator);
-            continue;
-        }
-
-        try runMission(allocator, input);
+        const keep_running = try handleTuiInput(allocator, &tui, input);
+        if (!keep_running) return;
     }
 }
 
@@ -473,18 +468,269 @@ fn runMission(allocator: std.mem.Allocator, mission_prompt: []const u8) !void {
     try saveState(allocator, config.paths.state_file, state);
 }
 
+fn handleTuiInput(allocator: std.mem.Allocator, tui: *TuiSession, input: []const u8) !bool {
+    if (input[0] != '/') {
+        try appendTuiEvent(allocator, tui, "mission", try std.fmt.allocPrint(allocator, "mission> {s}", .{input}));
+        runMission(allocator, input) catch |err| {
+            try appendTuiEvent(allocator, tui, "error", try friendlyRuntimeError(allocator, err));
+            return true;
+        };
+        const config = try loadProjectConfig(allocator);
+        const state = try loadState(allocator, config.paths.state_file);
+        try appendTuiEvent(allocator, tui, toneForState(state), try missionOutcomeSummary(allocator, state));
+        return true;
+    }
+
+    var parts = std.mem.tokenizeScalar(u8, input[1..], ' ');
+    const command = parts.next() orelse return true;
+
+    if (eql(command, "exit") or eql(command, "quit")) return false;
+
+    if (eql(command, "help")) {
+        try appendTuiEvent(
+            allocator,
+            tui,
+            "info",
+            "commands: /doctor, /resume, /models, /model <n|name>, /status, /clear, /exit",
+        );
+        return true;
+    }
+
+    if (eql(command, "clear")) {
+        tui.events.clearRetainingCapacity();
+        try appendTuiEvent(allocator, tui, "info", "ledger cleared");
+        return true;
+    }
+
+    if (eql(command, "doctor")) {
+        const report = runDoctorCheck(allocator) catch |err| {
+            try appendTuiEvent(allocator, tui, "error", try friendlyRuntimeError(allocator, err));
+            return true;
+        };
+        try appendTuiEvent(allocator, tui, "success", report);
+        return true;
+    }
+
+    if (eql(command, "resume")) {
+        const config = try loadProjectConfig(allocator);
+        var state = try loadState(allocator, config.paths.state_file);
+        initializeRuntimeSession(allocator, &state, config);
+        runLoop(allocator, config, &state) catch |err| {
+            try appendTuiEvent(allocator, tui, "error", try friendlyRuntimeError(allocator, err));
+            return true;
+        };
+        try saveState(allocator, config.paths.state_file, state);
+        try appendTuiEvent(allocator, tui, toneForState(state), try missionOutcomeSummary(allocator, state));
+        return true;
+    }
+
+    if (eql(command, "models")) {
+        const config = try loadProjectConfig(allocator);
+        const models = providerListModels(allocator, config.provider) catch |err| {
+            tui.last_model_error = try friendlyRuntimeError(allocator, err);
+            try appendTuiEvent(allocator, tui, "error", tui.last_model_error);
+            return true;
+        };
+        tui.cached_models = models;
+        tui.last_model_error = "";
+        try appendTuiEvent(allocator, tui, "success", try formatModelRoster(allocator, models, config.provider.model));
+        return true;
+    }
+
+    if (eql(command, "model")) {
+        const remainder = std.mem.trim(u8, input[1 + command.len ..], " ");
+        if (remainder.len == 0) {
+            try appendTuiEvent(allocator, tui, "info", "usage: /model <n|name>");
+            return true;
+        }
+        const saved = saveSelectedModel(allocator, tui, remainder) catch |err| {
+            try appendTuiEvent(allocator, tui, "error", try friendlyRuntimeError(allocator, err));
+            return true;
+        };
+        try appendTuiEvent(allocator, tui, "success", saved);
+        return true;
+    }
+
+    if (eql(command, "status")) {
+        const config = try loadProjectConfig(allocator);
+        const state = try loadState(allocator, config.paths.state_file);
+        try appendTuiEvent(allocator, tui, "info", try renderStatusBlock(allocator, config, state));
+        return true;
+    }
+
+    try appendTuiEvent(allocator, tui, "error", try std.fmt.allocPrint(allocator, "unknown command: /{s}", .{command}));
+    return true;
+}
+
+fn renderTui(allocator: std.mem.Allocator, tui: *const TuiSession) !void {
+    const config = try loadProjectConfig(allocator);
+    const state = try loadState(allocator, config.paths.state_file);
+    const cwd = try std.process.getCwdAlloc(allocator);
+    const project_name = std.fs.path.basename(cwd);
+
+    try stdoutPrint("\x1b[2J\x1b[H", .{});
+    try stdoutPrint("\x1b[38;5;180m+======================================================================================+\x1b[0m\n", .{});
+    try stdoutPrint("\x1b[1;38;5;220m| CONTUBERNIUM COMMAND TENT                                                            |\x1b[0m\n", .{});
+    try stdoutPrint(
+        "project: {s} | actor: {s} | status: {s} | turn: {d}\n",
+        .{ project_name, state.current_actor, state.global_status, state.agent_loop.iteration },
+    );
+    try stdoutPrint(
+        "provider: {s} | model: {s} | approval: {s}\n",
+        .{ config.provider.type, config.provider.model, config.policy.approval_mode },
+    );
+    try stdoutPrint("\x1b[38;5;180m+-------------------------------------- STATUS ----------------------------------------+\x1b[0m\n", .{});
+    try stdoutPrint("goal: {s}\n", .{if (state.mission.current_goal.len > 0) state.mission.current_goal else "idle"});
+    try stdoutPrint("last error: {s}\n", .{if (state.runtime_session.last_error.len > 0) state.runtime_session.last_error else "none"});
+    try stdoutPrint("last log: {s}\n", .{if (state.runtime_session.active_log_path.len > 0) state.runtime_session.active_log_path else "none"});
+    try stdoutPrint("\x1b[38;5;180m+----------------------------------- MODEL ROSTER -------------------------------------+\x1b[0m\n", .{});
+    if (tui.cached_models.len == 0) {
+        if (tui.last_model_error.len > 0) {
+            try stdoutPrint("{s}\n", .{tui.last_model_error});
+        } else {
+            try stdoutPrint("use /models to query the active local backend and /model <n|name> to switch.\n", .{});
+        }
+    } else {
+        var index: usize = 0;
+        while (index < tui.cached_models.len and index < 8) : (index += 1) {
+            const marker = if (eql(tui.cached_models[index], config.provider.model)) "current" else "";
+            try stdoutPrint("[{d}] {s} {s}\n", .{ index + 1, tui.cached_models[index], marker });
+        }
+    }
+    try stdoutPrint("\x1b[38;5;180m+---------------------------------- LEGION LEDGER -------------------------------------+\x1b[0m\n", .{});
+    try renderRecentTuiEvents(tui);
+    try stdoutPrint("\x1b[38;5;180m+------------------------------------ COMMANDS ----------------------------------------+\x1b[0m\n", .{});
+    try stdoutPrint("/doctor  /resume  /models  /model <n|name>  /status  /clear  /exit\n", .{});
+    try stdoutPrint("\x1b[38;5;180m+======================================================================================+\x1b[0m\n", .{});
+    try stdoutPrint("\x1b[1;38;5;220mPrompt>\x1b[0m ", .{});
+}
+
+fn renderRecentTuiEvents(tui: *const TuiSession) !void {
+    const start = if (tui.events.items.len > 8) tui.events.items.len - 8 else 0;
+    if (tui.events.items.len == 0) {
+        try stdoutPrint("no events yet\n", .{});
+        return;
+    }
+    for (tui.events.items[start..]) |event| {
+        const color = if (eql(event.tone, "error"))
+            "\x1b[38;5;203m"
+        else if (eql(event.tone, "success"))
+            "\x1b[38;5;114m"
+        else if (eql(event.tone, "mission"))
+            "\x1b[38;5;223m"
+        else
+            "\x1b[38;5;252m";
+        try stdoutPrint("{s}{s}\x1b[0m\n", .{ color, event.text });
+    }
+}
+
+fn appendTuiEvent(allocator: std.mem.Allocator, tui: *TuiSession, tone: []const u8, text: []const u8) !void {
+    try tui.events.append(allocator, .{
+        .tone = tone,
+        .text = try allocator.dupe(u8, text),
+    });
+}
+
+fn enterTuiScreen() !void {
+    try stdoutPrint("\x1b[?1049h\x1b[2J\x1b[H", .{});
+}
+
+fn leaveTuiScreen() !void {
+    try stdoutPrint("\x1b[0m\x1b[?1049l", .{});
+}
+
+fn toneForState(state: AppState) []const u8 {
+    if (eql(state.global_status, "complete")) return "success";
+    if (eql(state.runtime_session.status, "blocked")) return "error";
+    return "info";
+}
+
+fn formatModelRoster(allocator: std.mem.Allocator, models: []const []const u8, current_model: []const u8) ![]const u8 {
+    if (models.len == 0) return "no models reported by backend";
+    var lines: std.ArrayList([]const u8) = .empty;
+    for (models, 0..) |model, index| {
+        const suffix = if (eql(model, current_model)) " (current)" else "";
+        try lines.append(allocator, try std.fmt.allocPrint(allocator, "[{d}] {s}{s}", .{ index + 1, model, suffix }));
+    }
+    return try joinStrings(allocator, lines.items, "\n");
+}
+
+fn saveSelectedModel(allocator: std.mem.Allocator, tui: *TuiSession, selector: []const u8) ![]const u8 {
+    const config_path = try resolveConfigPath(allocator);
+    var config = try loadConfig(allocator, config_path);
+    const model_name = try resolveModelSelection(allocator, tui, selector);
+    config.provider.model = model_name;
+    try saveConfig(allocator, config_path, config);
+
+    var state = try loadState(allocator, config.paths.state_file);
+    state.runtime_session.model = model_name;
+    try saveState(allocator, config.paths.state_file, state);
+
+    return try std.fmt.allocPrint(allocator, "active model set to {s}", .{model_name});
+}
+
+fn resolveModelSelection(allocator: std.mem.Allocator, tui: *TuiSession, selector: []const u8) ![]const u8 {
+    if (isUnsignedDecimal(selector)) {
+        if (tui.cached_models.len == 0) return error.ModelListUnavailable;
+        const index = try std.fmt.parseUnsigned(usize, selector, 10);
+        if (index == 0 or index > tui.cached_models.len) return error.ModelSelectionOutOfRange;
+        return try allocator.dupe(u8, tui.cached_models[index - 1]);
+    }
+    return try allocator.dupe(u8, selector);
+}
+
+fn isUnsignedDecimal(text: []const u8) bool {
+    if (text.len == 0) return false;
+    for (text) |char| {
+        if (char < '0' or char > '9') return false;
+    }
+    return true;
+}
+
+fn renderStatusBlock(allocator: std.mem.Allocator, config: AppConfig, state: AppState) ![]const u8 {
+    return try std.fmt.allocPrint(
+        allocator,
+        "project status\nprovider: {s}\nmodel: {s}\nactor: {s}\nglobal status: {s}\nturn: {d}\nlast error: {s}",
+        .{
+            config.provider.type,
+            config.provider.model,
+            state.current_actor,
+            state.global_status,
+            state.agent_loop.iteration,
+            if (state.runtime_session.last_error.len > 0) state.runtime_session.last_error else "none",
+        },
+    );
+}
+
+fn friendlyRuntimeError(allocator: std.mem.Allocator, err: anyerror) ![]const u8 {
+    if (err == error.BackendUnavailable) {
+        return try allocator.dupe(u8, "backend unavailable. Start your local model server, then run /doctor or /models again.");
+    }
+    if (err == error.ModelNotFound) {
+        return try allocator.dupe(u8, "configured model was not found on the active backend. Use /models to list options, then /model <n|name>.");
+    }
+    if (err == error.EmptyModelOutput) {
+        return try allocator.dupe(u8, "the model returned an empty response. Check the active model and inspect the latest turn log.");
+    }
+    if (err == error.ProviderRejectedRequest) {
+        return try allocator.dupe(u8, "the provider rejected the request. Check the current model, endpoint, and backend logs.");
+    }
+    if (err == error.ModelListUnavailable) {
+        return try allocator.dupe(u8, "no cached model roster is loaded. Run /models first or set /model <name> manually.");
+    }
+    if (err == error.ModelSelectionOutOfRange) {
+        return try allocator.dupe(u8, "that model number is outside the current roster. Run /models and choose one of the listed entries.");
+    }
+    return try std.fmt.allocPrint(allocator, "runtime error: {s}", .{@errorName(err)});
+}
+
 fn runLoop(allocator: std.mem.Allocator, config: AppConfig, state: *AppState) !void {
     while (state.agent_loop.iteration < state.agent_loop.max_iterations) {
         const outcome = try executeStep(allocator, config, state);
         try saveState(allocator, config.paths.state_file, state.*);
         switch (outcome) {
             .advanced => {},
-            .complete => {
-                if (state.mission.final_response.len > 0) {
-                    try stdoutPrint("{s}\n", .{state.mission.final_response});
-                }
-                return;
-            },
+            .complete => return,
             .blocked => return,
         }
     }
@@ -546,7 +792,6 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
         state.runtime_session.status = "blocked";
         state.runtime_session.last_error = message;
         try writeTurnLog(state.runtime_session.active_log_path, "error", message);
-        try stdoutPrint("blocked: {s}\n", .{message});
         return .blocked;
     };
     const decision = response.value;
@@ -641,14 +886,12 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
         state.global_status = "waiting_on_tool";
         state.runtime_session.status = "blocked";
         state.runtime_session.last_error = decision.question;
-        try stdoutPrint("user input required: {s}\n", .{decision.question});
         return .blocked;
     }
 
     state.global_status = "waiting_on_tool";
     state.runtime_session.status = "blocked";
     state.runtime_session.last_error = if (decision.blocked_reason.len > 0) decision.blocked_reason else "decanus returned a blocked state";
-    try stdoutPrint("blocked: {s}\n", .{state.runtime_session.last_error});
     return .blocked;
 }
 
@@ -681,7 +924,6 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
         state.runtime_session.status = "blocked";
         state.runtime_session.last_error = message;
         try writeTurnLog(state.runtime_session.active_log_path, "error", message);
-        try stdoutPrint("blocked: {s}\n", .{message});
         return .blocked;
     };
     const result = response.value;
@@ -731,14 +973,12 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
         task.invocation.status = "blocked";
         state.runtime_session.status = "blocked";
         state.runtime_session.last_error = result.question;
-        try stdoutPrint("user input required: {s}\n", .{result.question});
         return .blocked;
     }
 
     task.invocation.status = "blocked";
     state.runtime_session.status = "blocked";
     state.runtime_session.last_error = if (result.blocked_reason.len > 0) result.blocked_reason else "specialist returned a blocked state";
-    try stdoutPrint("blocked: {s}\n", .{state.runtime_session.last_error});
     return .blocked;
 }
 
@@ -819,7 +1059,6 @@ fn executeToolRequests(
             state.runtime_session.status = "blocked";
             state.runtime_session.last_error = question;
             try summaries.append(allocator, try std.fmt.allocPrint(allocator, "ask_user {s}", .{question}));
-            try stdoutPrint("user input required: {s}\n", .{question});
             return .{
                 .blocked = true,
                 .summary = try joinStrings(allocator, summaries.items, "\n"),
@@ -850,11 +1089,13 @@ fn structuredChatWithRepair(
 
     while (true) {
         const response = try providerStructuredChat(allocator, provider, system_prompt, repair_user_prompt, actor);
-        const parsed = parseJson(T, allocator, response.raw_text) catch |err| {
+        try writeTurnLog(state.runtime_session.active_log_path, "provider_transport", response.transport_text);
+        const parsed = parseModelJson(T, allocator, response.raw_text) catch |err| {
+            try writeTurnLog(state.runtime_session.active_log_path, "invalid_model_output", response.raw_text);
             if (attempt >= max_retries) return err;
             attempt += 1;
             state.runtime_session.repair_attempts = attempt;
-            state.runtime_session.last_error = "model returned invalid JSON";
+            state.runtime_session.last_error = if (response.raw_text.len == 0) "model returned an empty response" else "model returned invalid JSON";
             repair_user_prompt = try std.fmt.allocPrint(
                 allocator,
                 "{s}\n\nYour previous response was invalid JSON. Return valid JSON only. Do not use markdown fences. Preserve the intended structure.",
@@ -1021,6 +1262,73 @@ fn saveState(allocator: std.mem.Allocator, path: []const u8, state: AppState) !v
     try file.writeAll(rendered);
 }
 
+fn saveConfig(allocator: std.mem.Allocator, path: []const u8, config: AppConfig) !void {
+    const rendered = try std.fmt.allocPrint(
+        allocator,
+        "{f}",
+        .{std.json.fmt(config, .{ .whitespace = .indent_2 })},
+    );
+    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(rendered);
+}
+
+fn runDoctorCheck(allocator: std.mem.Allocator) ![]const u8 {
+    const config = try loadProjectConfig(allocator);
+    var state = try loadState(allocator, config.paths.state_file);
+
+    try ensurePromptFiles(config.paths.prompts_dir);
+
+    const models = try providerListModels(allocator, config.provider);
+    if (!containsString(models, config.provider.model)) return error.ModelNotFound;
+
+    const smoke_response = try providerStructuredChat(
+        allocator,
+        config.provider,
+        "Return valid JSON only.",
+        "Return exactly this JSON object and nothing else: {\"status\":\"ok\"}",
+        "doctor",
+    );
+    const parsed = try parseModelJson(SmokeResponse, allocator, smoke_response.raw_text);
+    if (!eql(parsed.status, "ok")) return error.StructuredOutputFailed;
+
+    const now = try unixTimestampString(allocator);
+    state.runtime_session.last_health_check = now;
+    state.runtime_session.provider = config.provider.type;
+    state.runtime_session.model = config.provider.model;
+    state.runtime_session.endpoint = config.provider.base_url;
+    state.runtime_session.approval_mode = config.policy.approval_mode;
+    state.runtime_session.last_error = "";
+    try saveState(allocator, config.paths.state_file, state);
+
+    return try std.fmt.allocPrint(
+        allocator,
+        "prompt assets: ok\nbackend reachable: ok ({s})\nconfigured model: ok ({s})\nstructured output smoke test: ok",
+        .{ config.provider.type, config.provider.model },
+    );
+}
+
+fn missionOutcomeSummary(allocator: std.mem.Allocator, state: AppState) ![]const u8 {
+    if (state.mission.final_response.len > 0 and eql(state.global_status, "complete")) {
+        return try std.fmt.allocPrint(allocator, "complete\n\n{s}", .{state.mission.final_response});
+    }
+    if (state.runtime_session.last_error.len > 0 and eql(state.runtime_session.status, "blocked")) {
+        return try std.fmt.allocPrint(allocator, "blocked\n\n{s}", .{state.runtime_session.last_error});
+    }
+    if (state.agent_loop.active_tool.len > 0) {
+        return try std.fmt.allocPrint(
+            allocator,
+            "in progress\n\ncurrent actor: {s}\nactive tool: {s}\niteration: {d}",
+            .{ state.current_actor, state.agent_loop.active_tool, state.agent_loop.iteration },
+        );
+    }
+    return try std.fmt.allocPrint(
+        allocator,
+        "status: {s}\ncurrent actor: {s}\niteration: {d}",
+        .{ state.global_status, state.current_actor, state.agent_loop.iteration },
+    );
+}
+
 fn ensurePromptFiles(prompts_dir: []const u8) !void {
     const required = [_][]const u8{
         "shared/base.md",
@@ -1057,9 +1365,10 @@ fn readPrompt(allocator: std.mem.Allocator, prompts_dir: []const u8, relative_pa
 fn providerListModels(allocator: std.mem.Allocator, provider: ProviderConfig) ![][]const u8 {
     if (eql(provider.type, "ollama-native")) {
         const url = try std.fmt.allocPrint(allocator, "{s}/api/tags", .{provider.base_url});
-        const result = try runCommandCapture(allocator, &.{ "curl", "-sS", "--max-time", try timeoutSeconds(allocator, provider.timeout_ms), url });
+        const result = try runCommandCapture(allocator, &.{ "curl", "-fsS", "--max-time", try timeoutSeconds(allocator, provider.timeout_ms), url });
         if (result.exit_code != 0) return error.BackendUnavailable;
         const parsed = try parseJson(OllamaTagsResponse, allocator, result.stdout);
+        if (parsed.@"error".len > 0) return error.BackendUnavailable;
         var models: std.ArrayList([]const u8) = .empty;
         for (parsed.models) |model| {
             try models.append(allocator, model.name);
@@ -1069,9 +1378,10 @@ fn providerListModels(allocator: std.mem.Allocator, provider: ProviderConfig) ![
 
     if (eql(provider.type, "openai-compatible")) {
         const url = try std.fmt.allocPrint(allocator, "{s}/v1/models", .{provider.base_url});
-        const result = try runCommandCapture(allocator, &.{ "curl", "-sS", "--max-time", try timeoutSeconds(allocator, provider.timeout_ms), url });
+        const result = try runCommandCapture(allocator, &.{ "curl", "-fsS", "--max-time", try timeoutSeconds(allocator, provider.timeout_ms), url });
         if (result.exit_code != 0) return error.BackendUnavailable;
         const parsed = try parseJson(OpenAIModelsResponse, allocator, result.stdout);
+        if (parsed.@"error".message.len > 0) return error.BackendUnavailable;
         var models: std.ArrayList([]const u8) = .empty;
         for (parsed.data) |model| {
             try models.append(allocator, model.id);
@@ -1110,7 +1420,7 @@ fn providerStructuredChat(
             allocator,
             &.{
                 "curl",
-                "-sS",
+                "-fsS",
                 "--max-time",
                 try timeoutSeconds(allocator, provider.timeout_ms),
                 "-H",
@@ -1124,8 +1434,11 @@ fn providerStructuredChat(
         );
         if (result.exit_code != 0) return error.BackendUnavailable;
         const parsed = try parseJson(OllamaChatResponse, allocator, result.stdout);
+        if (parsed.@"error".len > 0) return error.ProviderRejectedRequest;
+        if (trimAscii(parsed.message.content).len == 0) return error.EmptyModelOutput;
         return .{
             .raw_text = parsed.message.content,
+            .transport_text = result.stdout,
             .provider_name = provider.type,
             .model_name = provider.model,
             .latency_ms = std.time.milliTimestamp() - started,
@@ -1149,7 +1462,7 @@ fn providerStructuredChat(
             allocator,
             &.{
                 "curl",
-                "-sS",
+                "-fsS",
                 "--max-time",
                 try timeoutSeconds(allocator, provider.timeout_ms),
                 "-H",
@@ -1163,9 +1476,12 @@ fn providerStructuredChat(
         );
         if (result.exit_code != 0) return error.BackendUnavailable;
         const parsed = try parseJson(OpenAIChatResponse, allocator, result.stdout);
+        if (parsed.@"error".message.len > 0) return error.ProviderRejectedRequest;
         if (parsed.choices.len == 0) return error.EmptyProviderResponse;
+        if (trimAscii(parsed.choices[0].message.content).len == 0) return error.EmptyModelOutput;
         return .{
             .raw_text = parsed.choices[0].message.content,
+            .transport_text = result.stdout,
             .provider_name = provider.type,
             .model_name = provider.model,
             .latency_ms = std.time.milliTimestamp() - started,
@@ -1364,7 +1680,6 @@ fn recentHistoryText(allocator: std.mem.Allocator, history: []const HistoryEntry
 fn blockedToolOutcome(allocator: std.mem.Allocator, state: *AppState, reason: []const u8) !ToolExecutionOutcome {
     state.runtime_session.status = "blocked";
     state.runtime_session.last_error = reason;
-    try stdoutPrint("blocked: {s}\n", .{reason});
     return .{
         .blocked = true,
         .summary = try std.fmt.allocPrint(allocator, "blocked: {s}", .{reason}),
@@ -1492,6 +1807,42 @@ fn parseJson(comptime T: type, allocator: std.mem.Allocator, text: []const u8) !
         .ignore_unknown_fields = true,
     });
     return parsed.value;
+}
+
+fn parseModelJson(comptime T: type, allocator: std.mem.Allocator, text: []const u8) !T {
+    const normalized = try normalizeModelJson(text);
+    return try parseJson(T, allocator, normalized);
+}
+
+fn normalizeModelJson(text: []const u8) ![]const u8 {
+    var normalized = trimAscii(text);
+    if (normalized.len == 0) return error.EmptyModelOutput;
+
+    if (std.mem.startsWith(u8, normalized, "```")) {
+        if (std.mem.indexOfScalar(u8, normalized, '\n')) |first_newline| {
+            normalized = trimAscii(normalized[first_newline + 1 ..]);
+            if (std.mem.lastIndexOf(u8, normalized, "```")) |last_fence| {
+                normalized = trimAscii(normalized[0..last_fence]);
+            }
+        }
+    }
+
+    if (normalized.len == 0) return error.EmptyModelOutput;
+    if (normalized[0] == '{' or normalized[0] == '[') return normalized;
+
+    if (std.mem.indexOfScalar(u8, normalized, '{')) |start| {
+        if (std.mem.lastIndexOfScalar(u8, normalized, '}')) |finish| {
+            if (finish > start) return trimAscii(normalized[start .. finish + 1]);
+        }
+    }
+
+    if (std.mem.indexOfScalar(u8, normalized, '[')) |start| {
+        if (std.mem.lastIndexOfScalar(u8, normalized, ']')) |finish| {
+            if (finish > start) return trimAscii(normalized[start .. finish + 1]);
+        }
+    }
+
+    return normalized;
 }
 
 fn containsString(items: []const []const u8, needle: []const u8) bool {

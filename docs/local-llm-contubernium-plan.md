@@ -81,7 +81,7 @@ The runtime config tells Contubernium:
 
 ### 6. Start a mission
 
-Run `contubernium run "your prompt here"` or start the prompt-first interface with `contubernium`.
+Run `contubernium run "your prompt here"` or start the full-screen terminal interface with `contubernium`.
 
 The runtime writes the mission to `.contubernium/state.json`, sets `current_actor` to `decanus`, and starts the loop.
 
@@ -280,6 +280,7 @@ After that, an OpenAI-compatible adapter can cover a wider set of local runners 
 - The same protocol works with Ollama and with an OpenAI-compatible local server.
 - Invalid JSON is handled with repair retries and clear failure reporting.
 - Guarded actions can be approved, denied, logged, and resumed.
-- `contubernium init` can create a full `.contubernium/` scaffold in any project directory and launch the prompt-first UI in an interactive terminal.
-- `contubernium` with no args launches an interactive prompt-first interface.
+- `contubernium init` can create a full `.contubernium/` scaffold in any project directory and launch the full-screen terminal UI in an interactive terminal.
+- `contubernium` with no args launches the same full-screen interface.
+- The terminal UI can list locally available models and switch the active model without leaving the interface.
 - The documentation is enough for a future engineer to continue the work without reconstructing the design.

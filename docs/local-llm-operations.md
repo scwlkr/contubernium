@@ -29,7 +29,7 @@ This prepares:
 - `.contubernium/prompts/`
 - `.contubernium/logs/`
 
-If you run it in a normal terminal session, it immediately opens the interactive prompt UI after scaffolding.
+If you run it in a normal terminal session, it immediately opens the full-screen Contubernium command tent after scaffolding.
 
 ### 3. Start Ollama
 
@@ -91,6 +91,17 @@ or
 contubernium ui
 ```
 
+The TUI supports:
+
+- direct mission prompts
+- `/doctor`
+- `/models`
+- `/model <n|name>`
+- `/status`
+- `/resume`
+- `/clear`
+- `/exit`
+
 ## Day-To-Day Commands
 
 List models:
@@ -143,6 +154,8 @@ Check:
 - the configured `base_url` is correct
 - local firewall or process issues are not blocking the port
 
+The TUI will show this as a backend-unavailable status in the model roster area. Use `/models` or `/doctor` after starting the service.
+
 ### The configured model is missing
 
 Run:
@@ -155,6 +168,14 @@ Then rerun:
 
 ```bash
 contubernium doctor
+```
+
+Or from the TUI:
+
+```text
+/models
+/model <n|name>
+/doctor
 ```
 
 ### The model returns invalid JSON

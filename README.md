@@ -66,7 +66,7 @@ Then, from any project directory:
 contubernium init
 ```
 
-When you run `contubernium init` in a normal terminal session, it scaffolds `.contubernium/` and immediately drops you into the interactive prompt UI.
+When you run `contubernium init` in a normal terminal session, it scaffolds `.contubernium/` and immediately opens the full-screen Contubernium command tent.
 
 If you still want the older bootstrap script that symlinks shared assets into a workspace, you can also run:
 
@@ -112,7 +112,15 @@ What `contubernium init` creates in the current project:
 - `.contubernium/prompts/`
 - `.contubernium/logs/`
 
-Running `contubernium` with no arguments starts the same interactive prompt-first UI. Running `contubernium ui` does the same thing explicitly.
+Running `contubernium` with no arguments starts the same full-screen Roman-styled TUI. Running `contubernium ui` does the same thing explicitly.
+
+Inside the TUI you can:
+
+- enter a mission prompt directly
+- run `/doctor` to verify the local backend
+- run `/models` to query the active local model roster
+- run `/model <n|name>` to switch the active local model without leaving the UI
+- run `/status`, `/resume`, `/clear`, or `/exit`
 
 The first implementation target is Ollama. The runtime also includes an OpenAI-compatible adapter layer so it can be extended to other local servers without changing the Contubernium protocol.
 

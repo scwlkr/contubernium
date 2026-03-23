@@ -26,7 +26,7 @@ Supported commands:
 - Creates `.contubernium/state.json` if missing.
 - Creates `.contubernium/prompts/` from embedded assets if missing.
 - Creates `.contubernium/logs/` if missing.
-- Starts the interactive prompt UI when stdin and stdout are attached to a terminal.
+- Starts the full-screen terminal UI when stdin and stdout are attached to a terminal.
 
 `doctor`
 - Auto-scaffolds `.contubernium/` if it is missing.
@@ -54,11 +54,22 @@ Supported commands:
 - Continues execution from the current state and runtime session.
 
 `ui`
-- Starts the interactive prompt-first interface in the current project.
+- Starts the full-screen Roman-styled terminal UI in the current project.
 - Auto-scaffolds `.contubernium/` if it is missing.
+- Supports slash commands for model discovery and model switching.
 
 `contubernium` with no args
 - Starts the same interactive UI as `contubernium ui`.
+
+### TUI Commands
+
+- `/doctor`
+- `/models`
+- `/model <n|name>`
+- `/status`
+- `/resume`
+- `/clear`
+- `/exit`
 
 ## File Layout
 
