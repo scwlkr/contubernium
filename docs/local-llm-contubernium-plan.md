@@ -17,13 +17,13 @@ That separation is what keeps the system understandable and recoverable.
 
 - `decanus` still receives the mission first.
 - Specialist agents still work as narrow tools inside the commander loop.
-- `contubernium_state.json` stays the mission memory and workflow record.
+- `.contubernium/state.json` stays the mission memory and workflow record.
 - The loop is still `Think -> Tool -> Result -> Think -> Finish`.
 
 ## What Changes
 
 - A standalone Zig CLI runner becomes the execution engine.
-- A new `contubernium.config.json` file stores runtime settings such as provider, model, endpoint, timeouts, and safety policy.
+- A new project-local `.contubernium/config.json` file stores runtime settings such as provider, model, endpoint, timeouts, and safety policy.
 - Prompt files for `decanus` and each specialist are packaged in the repo instead of relying on Codex-only behavior.
 - A backend adapter layer lets the same protocol talk to Ollama first and OpenAI-compatible local servers next.
 - A guarded tool executor sits between the model and the machine.
@@ -81,9 +81,9 @@ The runtime config tells Contubernium:
 
 ### 6. Start a mission
 
-Run `contubernium run "your prompt here"`.
+Run `contubernium run "your prompt here"` or start the prompt-first interface with `contubernium`.
 
-The runtime writes the mission to `contubernium_state.json`, sets `current_actor` to `decanus`, and starts the loop.
+The runtime writes the mission to `.contubernium/state.json`, sets `current_actor` to `decanus`, and starts the loop.
 
 ### 7. Approve guarded actions when asked
 
@@ -113,13 +113,13 @@ These documents become the long-term reference for future work.
 
 ### Step 2. Add runtime configuration
 
-Introduce `contubernium.config.json` and the template file under `templates/`.
+Introduce `.contubernium/config.json` and the template file under `templates/`.
 
 This file is separate from mission state because config changes much less often than mission memory.
 
 ### Step 3. Extend mission state
 
-Add `runtime_session` to `contubernium_state.json` so the runtime can record:
+Add `runtime_session` to `.contubernium/state.json` so the runtime can record:
 
 - provider
 - model
@@ -151,6 +151,8 @@ Implement commands:
 - `contubernium run`
 - `contubernium step`
 - `contubernium resume`
+- `contubernium ui`
+- `contubernium`
 
 ### Step 6. Add provider adapters
 
@@ -239,9 +241,9 @@ The README should link the new runtime docs directly.
 
 ### Runtime Ownership
 
-- `contubernium_state.json`: mission memory and loop state
-- `contubernium.config.json`: runtime/operator configuration
-- `prompts/`: role prompts and shared contracts
+- `.contubernium/state.json`: mission memory and loop state
+- `.contubernium/config.json`: runtime/operator configuration
+- `.contubernium/prompts/`: role prompts and shared contracts
 - `.contubernium/logs/`: per-turn runtime logs
 
 ### Phase 1 Backend Contract
@@ -278,4 +280,6 @@ After that, an OpenAI-compatible adapter can cover a wider set of local runners 
 - The same protocol works with Ollama and with an OpenAI-compatible local server.
 - Invalid JSON is handled with repair retries and clear failure reporting.
 - Guarded actions can be approved, denied, logged, and resumed.
+- `contubernium init` can create a full `.contubernium/` scaffold in any project directory and launch the prompt-first UI in an interactive terminal.
+- `contubernium` with no args launches an interactive prompt-first interface.
 - The documentation is enough for a future engineer to continue the work without reconstructing the design.

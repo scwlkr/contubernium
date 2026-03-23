@@ -16,15 +16,20 @@ Supported commands:
 - `contubernium run "<mission>"`
 - `contubernium step`
 - `contubernium resume`
+- `contubernium ui`
+- `contubernium`
 
 ### Command Behavior
 
 `init`
-- Creates `contubernium.config.json` from the template if missing.
+- Creates `.contubernium/config.json` if missing.
+- Creates `.contubernium/state.json` if missing.
+- Creates `.contubernium/prompts/` from embedded assets if missing.
 - Creates `.contubernium/logs/` if missing.
-- Verifies that the state file and prompt directory exist.
+- Starts the interactive prompt UI when stdin and stdout are attached to a terminal.
 
 `doctor`
+- Auto-scaffolds `.contubernium/` if it is missing.
 - Loads config and state.
 - Verifies prompt assets.
 - Verifies backend reachability.
@@ -32,6 +37,7 @@ Supported commands:
 - Runs a structured-output smoke test.
 
 `models list`
+- Auto-scaffolds `.contubernium/` if it is missing.
 - Queries the active provider and prints the model identifiers it can serve.
 
 `run`
@@ -40,16 +46,25 @@ Supported commands:
 - Executes turns until the run finishes or blocks.
 
 `step`
+- Auto-scaffolds `.contubernium/` if it is missing.
 - Executes exactly one actor turn.
 
 `resume`
+- Auto-scaffolds `.contubernium/` if it is missing.
 - Continues execution from the current state and runtime session.
+
+`ui`
+- Starts the interactive prompt-first interface in the current project.
+- Auto-scaffolds `.contubernium/` if it is missing.
+
+`contubernium` with no args
+- Starts the same interactive UI as `contubernium ui`.
 
 ## File Layout
 
-- `contubernium_state.json`
-- `contubernium.config.json`
-- `prompts/`
+- `.contubernium/state.json`
+- `.contubernium/config.json`
+- `.contubernium/prompts/`
 - `.contubernium/logs/`
 - `docs/`
 
@@ -74,8 +89,8 @@ Supported commands:
     "timeout_ms": 120000
   },
   "paths": {
-    "state_file": "contubernium_state.json",
-    "prompts_dir": "prompts",
+    "state_file": ".contubernium/state.json",
+    "prompts_dir": ".contubernium/prompts",
     "logs_dir": ".contubernium/logs"
   },
   "policy": {
@@ -100,7 +115,7 @@ Supported commands:
 
 ## State Extension
 
-Add `runtime_session` to the state file:
+Add `runtime_session` to `.contubernium/state.json`:
 
 ```json
 {
@@ -124,11 +139,11 @@ Add `runtime_session` to the state file:
 
 Required files:
 
-- `prompts/shared/base.md`
-- `prompts/shared/tool-policy.md`
-- `prompts/shared/decanus-schema.json`
-- `prompts/shared/specialist-schema.json`
-- `prompts/decanus.md`
+- `.contubernium/prompts/shared/base.md`
+- `.contubernium/prompts/shared/tool-policy.md`
+- `.contubernium/prompts/shared/decanus-schema.json`
+- `.contubernium/prompts/shared/specialist-schema.json`
+- `.contubernium/prompts/decanus.md`
 - one prompt file per specialist agent
 
 Prompt assembly order:

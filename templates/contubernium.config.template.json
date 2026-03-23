@@ -16,8 +16,8 @@
     "timeout_ms": 120000
   },
   "paths": {
-    "state_file": "contubernium_state.json",
-    "prompts_dir": "prompts",
+    "state_file": ".contubernium/state.json",
+    "prompts_dir": ".contubernium/prompts",
     "logs_dir": ".contubernium/logs"
   },
   "policy": {

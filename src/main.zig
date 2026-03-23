@@ -1,6 +1,36 @@
 const std = @import("std");
+const embedded = @import("embedded_assets.zig");
 
 const max_file_bytes = 16 * 1024 * 1024;
+const runtime_dir_name = ".contubernium";
+const default_state_path = ".contubernium/state.json";
+const default_config_path = ".contubernium/config.json";
+const default_prompts_dir = ".contubernium/prompts";
+const default_logs_dir = ".contubernium/logs";
+
+const EmbeddedAsset = struct {
+    relative_path: []const u8,
+    content: []const u8,
+};
+
+const embedded_assets = [_]EmbeddedAsset{
+    .{ .relative_path = "state.json", .content = embedded.state_json },
+    .{ .relative_path = "config.json", .content = embedded.config_json },
+    .{ .relative_path = "prompts/shared/base.md", .content = embedded.base_prompt },
+    .{ .relative_path = "prompts/shared/tool-policy.md", .content = embedded.tool_policy_prompt },
+    .{ .relative_path = "prompts/shared/decanus-schema.json", .content = embedded.decanus_schema },
+    .{ .relative_path = "prompts/shared/specialist-schema.json", .content = embedded.specialist_schema },
+    .{ .relative_path = "prompts/decanus.md", .content = embedded.decanus_prompt },
+    .{ .relative_path = "prompts/faber.md", .content = embedded.faber_prompt },
+    .{ .relative_path = "prompts/artifex.md", .content = embedded.artifex_prompt },
+    .{ .relative_path = "prompts/architectus.md", .content = embedded.architectus_prompt },
+    .{ .relative_path = "prompts/tesserarius.md", .content = embedded.tesserarius_prompt },
+    .{ .relative_path = "prompts/explorator.md", .content = embedded.explorator_prompt },
+    .{ .relative_path = "prompts/signifer.md", .content = embedded.signifer_prompt },
+    .{ .relative_path = "prompts/praeco.md", .content = embedded.praeco_prompt },
+    .{ .relative_path = "prompts/calo.md", .content = embedded.calo_prompt },
+    .{ .relative_path = "prompts/mulus.md", .content = embedded.mulus_prompt },
+};
 
 const AppConfig = struct {
     runtime_version: usize = 1,
@@ -22,9 +52,9 @@ const ProviderConfig = struct {
 };
 
 const PathsConfig = struct {
-    state_file: []const u8 = "contubernium_state.json",
-    prompts_dir: []const u8 = "prompts",
-    logs_dir: []const u8 = ".contubernium/logs",
+    state_file: []const u8 = default_state_path,
+    prompts_dir: []const u8 = default_prompts_dir,
+    logs_dir: []const u8 = default_logs_dir,
 };
 
 const PolicyConfig = struct {
@@ -32,7 +62,7 @@ const PolicyConfig = struct {
     allow_read_tools_without_confirmation: bool = true,
     allow_workspace_writes_without_confirmation: bool = false,
     allow_shell_without_confirmation: bool = false,
-    blocked_command_patterns: [][]const u8 = &.{
+    blocked_command_patterns: []const []const u8 = &.{
         "rm -rf",
         "git reset --hard",
     },
@@ -60,8 +90,8 @@ const AppState = struct {
 const Mission = struct {
     initial_prompt: []const u8 = "",
     current_goal: []const u8 = "",
-    success_criteria: [][]const u8 = &.{},
-    constraints: [][]const u8 = &.{},
+    success_criteria: []const []const u8 = &.{},
+    constraints: []const []const u8 = &.{},
     final_response: []const u8 = "",
 };
 
@@ -72,7 +102,7 @@ const AgentLoop = struct {
     active_tool: []const u8 = "",
     last_decision: []const u8 = "",
     last_tool_result: []const u8 = "",
-    history: []HistoryEntry = &.{},
+    history: []const HistoryEntry = &.{},
 };
 
 const RuntimeSession = struct {
@@ -95,14 +125,14 @@ const HistoryEntry = struct {
     actor: []const u8 = "",
     lane: []const u8 = "",
     summary: []const u8 = "",
-    artifacts: [][]const u8 = &.{},
+    artifacts: []const []const u8 = &.{},
     timestamp: []const u8 = "",
 };
 
 const AgentTool = struct {
     lane: []const u8 = "",
     purpose: []const u8 = "",
-    use_when: [][]const u8 = &.{},
+    use_when: []const []const u8 = &.{},
 };
 
 const AgentTools = struct {
@@ -123,7 +153,7 @@ const Invocation = struct {
     iteration: usize = 0,
     objective: []const u8 = "",
     completion_signal: []const u8 = "",
-    dependencies: [][]const u8 = &.{},
+    dependencies: []const []const u8 = &.{},
     result_summary: []const u8 = "",
     return_to: []const u8 = "decanus",
 };
@@ -132,7 +162,7 @@ const TaskLane = struct {
     status: []const u8 = "pending",
     assigned_to: []const u8 = "",
     description: []const u8 = "",
-    artifacts: [][]const u8 = &.{},
+    artifacts: []const []const u8 = &.{},
     invocation: Invocation = .{},
 };
 
@@ -165,11 +195,11 @@ const DecanusDecision = struct {
     actor: []const u8 = "",
     objective: []const u8 = "",
     completion_signal: []const u8 = "",
-    dependencies: [][]const u8 = &.{},
+    dependencies: []const []const u8 = &.{},
     final_response: []const u8 = "",
     question: []const u8 = "",
     blocked_reason: []const u8 = "",
-    tool_requests: []ToolRequest = &.{},
+    tool_requests: []const ToolRequest = &.{},
 };
 
 const SpecialistResult = struct {
@@ -177,11 +207,11 @@ const SpecialistResult = struct {
     reasoning: []const u8 = "",
     description: []const u8 = "",
     result_summary: []const u8 = "",
-    artifacts: [][]const u8 = &.{},
+    artifacts: []const []const u8 = &.{},
     follow_up_needed: []const u8 = "",
     question: []const u8 = "",
     blocked_reason: []const u8 = "",
-    tool_requests: []ToolRequest = &.{},
+    tool_requests: []const ToolRequest = &.{},
 };
 
 const SmokeResponse = struct {
@@ -213,7 +243,7 @@ const ToolExecutionOutcome = struct {
 };
 
 const OllamaTagsResponse = struct {
-    models: []OllamaModel = &.{},
+    models: []const OllamaModel = &.{},
 };
 
 const OllamaModel = struct {
@@ -229,7 +259,7 @@ const OllamaMessage = struct {
 };
 
 const OpenAIModelsResponse = struct {
-    data: []OpenAIModel = &.{},
+    data: []const OpenAIModel = &.{},
 };
 
 const OpenAIModel = struct {
@@ -237,7 +267,7 @@ const OpenAIModel = struct {
 };
 
 const OpenAIChatResponse = struct {
-    choices: []OpenAIChoice = &.{},
+    choices: []const OpenAIChoice = &.{},
 };
 
 const OpenAIChoice = struct {
@@ -255,7 +285,7 @@ pub fn main() !void {
 
     const args = try std.process.argsAlloc(allocator);
     if (args.len < 2) {
-        try printUsage();
+        try cmdUi(allocator);
         return;
     }
 
@@ -288,6 +318,10 @@ pub fn main() !void {
         try cmdResume(allocator);
         return;
     }
+    if (eql(command, "ui") or eql(command, "chat")) {
+        try cmdUi(allocator);
+        return;
+    }
 
     try stderrPrint("unknown command: {s}\n", .{command});
     try printUsage();
@@ -305,20 +339,22 @@ fn printUsage() !void {
         \\  contubernium run "mission prompt"
         \\  contubernium step
         \\  contubernium resume
+        \\  contubernium ui
         \\
     , .{});
 }
 
 fn cmdInit(allocator: std.mem.Allocator) !void {
-    try copyFileIfMissing(allocator, "templates/contubernium_state.template.json", "contubernium_state.json");
-    try copyFileIfMissing(allocator, "templates/contubernium.config.template.json", "contubernium.config.json");
-    try std.fs.cwd().makePath(".contubernium/logs");
-    try ensurePromptFiles("prompts");
-    try stdoutPrint("initialized runtime scaffolding\n", .{});
+    try scaffoldProject(allocator);
+    try stdoutPrint("initialized project runtime in {s}\n", .{runtime_dir_name});
+    if (shouldLaunchInteractiveUi()) {
+        try stdoutPrint("starting interactive mode\n", .{});
+        try interactiveUiLoop(allocator);
+    }
 }
 
 fn cmdDoctor(allocator: std.mem.Allocator) !void {
-    const config = try loadConfig(allocator, "contubernium.config.json");
+    const config = try loadProjectConfig(allocator);
     var state = try loadState(allocator, config.paths.state_file);
 
     try ensurePromptFiles(config.paths.prompts_dir);
@@ -353,11 +389,11 @@ fn cmdDoctor(allocator: std.mem.Allocator) !void {
     state.runtime_session.model = config.provider.model;
     state.runtime_session.endpoint = config.provider.base_url;
     state.runtime_session.approval_mode = config.policy.approval_mode;
-    try saveState(config.paths.state_file, state);
+    try saveState(allocator, config.paths.state_file, state);
 }
 
 fn cmdModelsList(allocator: std.mem.Allocator) !void {
-    const config = try loadConfig(allocator, "contubernium.config.json");
+    const config = try loadProjectConfig(allocator);
     const models = try providerListModels(allocator, config.provider);
     for (models) |model| {
         try stdoutPrint("{s}\n", .{model});
@@ -371,37 +407,76 @@ fn cmdRun(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     const mission_prompt = try joinArgs(allocator, args[2..]);
-    const config = try loadConfig(allocator, "contubernium.config.json");
+    try runMission(allocator, mission_prompt);
+}
+
+fn cmdStep(allocator: std.mem.Allocator) !void {
+    const config = try loadProjectConfig(allocator);
+    var state = try loadState(allocator, config.paths.state_file);
+    initializeRuntimeSession(allocator, &state, config);
+    _ = try executeStep(allocator, config, &state);
+    try saveState(allocator, config.paths.state_file, state);
+}
+
+fn cmdResume(allocator: std.mem.Allocator) !void {
+    const config = try loadProjectConfig(allocator);
+    var state = try loadState(allocator, config.paths.state_file);
+    initializeRuntimeSession(allocator, &state, config);
+    try runLoop(allocator, config, &state);
+    try saveState(allocator, config.paths.state_file, state);
+}
+
+fn cmdUi(allocator: std.mem.Allocator) !void {
+    try scaffoldProject(allocator);
+    try interactiveUiLoop(allocator);
+}
+
+fn interactiveUiLoop(allocator: std.mem.Allocator) !void {
+    try stdoutPrint(
+        \\Contubernium interactive mode
+        \\Type a mission prompt and press enter.
+        \\Commands: /exit, /doctor, /resume
+        \\
+    , .{});
+
+    while (true) {
+        try stdoutPrint("Mission> ", .{});
+        const line = try std.fs.File.stdin().deprecatedReader().readUntilDelimiterOrEofAlloc(allocator, '\n', 16 * 1024);
+        if (line == null) return;
+        const input = trimAscii(line.?);
+        if (input.len == 0) continue;
+        if (eql(input, "/exit")) return;
+        if (eql(input, "/doctor")) {
+            try cmdDoctor(allocator);
+            continue;
+        }
+        if (eql(input, "/resume")) {
+            try cmdResume(allocator);
+            continue;
+        }
+
+        try runMission(allocator, input);
+    }
+}
+
+fn runMission(allocator: std.mem.Allocator, mission_prompt: []const u8) !void {
+    try scaffoldProject(allocator);
+
+    const config = try loadProjectConfig(allocator);
     var state = try loadState(allocator, config.paths.state_file);
 
     resetStateForMission(&state, mission_prompt);
     initializeRuntimeSession(allocator, &state, config);
-    try saveState(config.paths.state_file, state);
+    try saveState(allocator, config.paths.state_file, state);
 
     try runLoop(allocator, config, &state);
-    try saveState(config.paths.state_file, state);
-}
-
-fn cmdStep(allocator: std.mem.Allocator) !void {
-    const config = try loadConfig(allocator, "contubernium.config.json");
-    var state = try loadState(allocator, config.paths.state_file);
-    initializeRuntimeSession(allocator, &state, config);
-    _ = try executeStep(allocator, config, &state);
-    try saveState(config.paths.state_file, state);
-}
-
-fn cmdResume(allocator: std.mem.Allocator) !void {
-    const config = try loadConfig(allocator, "contubernium.config.json");
-    var state = try loadState(allocator, config.paths.state_file);
-    initializeRuntimeSession(allocator, &state, config);
-    try runLoop(allocator, config, &state);
-    try saveState(config.paths.state_file, state);
+    try saveState(allocator, config.paths.state_file, state);
 }
 
 fn runLoop(allocator: std.mem.Allocator, config: AppConfig, state: *AppState) !void {
     while (state.agent_loop.iteration < state.agent_loop.max_iterations) {
         const outcome = try executeStep(allocator, config, state);
-        try saveState(config.paths.state_file, state.*);
+        try saveState(allocator, config.paths.state_file, state.*);
         switch (outcome) {
             .advanced => {},
             .complete => {
@@ -673,13 +748,13 @@ fn executeToolRequests(
     state: *AppState,
     actor: []const u8,
     lane: []const u8,
-    requests: []ToolRequest,
+    requests: []const ToolRequest,
 ) !ToolExecutionOutcome {
     if (requests.len == 0) {
         return .{ .blocked = false, .summary = "no tool requests" };
     }
 
-    var summaries = std.ArrayList([]const u8).init(allocator);
+    var summaries: std.ArrayList([]const u8) = .empty;
     for (requests) |request| {
         const tool_name = request.tool;
         if (tool_name.len == 0) continue;
@@ -689,7 +764,7 @@ fn executeToolRequests(
                 return try blockedToolOutcome(allocator, state, "list_files denied by operator");
             }
             const output = try runCommandCapture(allocator, &.{ "find", if (request.path.len > 0) request.path else ".", "-maxdepth", "3" });
-            try summaries.append(try summarizeCommandResult(allocator, "list_files", output, config.context.max_tool_result_chars));
+            try summaries.append(allocator, try summarizeCommandResult(allocator, "list_files", output, config.context.max_tool_result_chars));
             continue;
         }
 
@@ -699,7 +774,7 @@ fn executeToolRequests(
             }
             const path = if (request.path.len > 0) request.path else return error.MissingPath;
             const content = try readFileLimited(allocator, path, config.context.max_file_read_bytes);
-            try summaries.append(try truncateText(allocator, try std.fmt.allocPrint(allocator, "read_file {s}\n{s}", .{ path, content }), config.context.max_tool_result_chars));
+            try summaries.append(allocator, try truncateText(allocator, try std.fmt.allocPrint(allocator, "read_file {s}\n{s}", .{ path, content }), config.context.max_tool_result_chars));
             continue;
         }
 
@@ -710,7 +785,7 @@ fn executeToolRequests(
             const path = if (request.path.len > 0) request.path else ".";
             const pattern = if (request.pattern.len > 0) request.pattern else return error.MissingPattern;
             const output = try searchText(allocator, pattern, path, config.context.max_search_hits);
-            try summaries.append(try truncateText(allocator, try std.fmt.allocPrint(allocator, "search_text {s} in {s}\n{s}", .{ pattern, path, output }), config.context.max_tool_result_chars));
+            try summaries.append(allocator, try truncateText(allocator, try std.fmt.allocPrint(allocator, "search_text {s} in {s}\n{s}", .{ pattern, path, output }), config.context.max_tool_result_chars));
             continue;
         }
 
@@ -722,7 +797,7 @@ fn executeToolRequests(
                 return try blockedToolOutcome(allocator, state, "run_command denied by operator");
             }
             const output = try runShellCommand(allocator, request.command);
-            try summaries.append(try summarizeCommandResult(allocator, "run_command", output, config.context.max_tool_result_chars));
+            try summaries.append(allocator, try summarizeCommandResult(allocator, "run_command", output, config.context.max_tool_result_chars));
             continue;
         }
 
@@ -735,7 +810,7 @@ fn executeToolRequests(
                 return try blockedToolOutcome(allocator, state, "write_file denied by operator");
             }
             try writeFile(path, request.content);
-            try summaries.append(try std.fmt.allocPrint(allocator, "write_file {s} ({d} bytes)", .{ path, request.content.len }));
+            try summaries.append(allocator, try std.fmt.allocPrint(allocator, "write_file {s} ({d} bytes)", .{ path, request.content.len }));
             continue;
         }
 
@@ -743,7 +818,7 @@ fn executeToolRequests(
             const question = if (request.description.len > 0) request.description else "tool requested user input";
             state.runtime_session.status = "blocked";
             state.runtime_session.last_error = question;
-            try summaries.append(try std.fmt.allocPrint(allocator, "ask_user {s}", .{question}));
+            try summaries.append(allocator, try std.fmt.allocPrint(allocator, "ask_user {s}", .{question}));
             try stdoutPrint("user input required: {s}\n", .{question});
             return .{
                 .blocked = true,
@@ -751,7 +826,7 @@ fn executeToolRequests(
             };
         }
 
-        try summaries.append(try std.fmt.allocPrint(allocator, "unknown tool `{s}` requested by {s} on lane {s}", .{ tool_name, actor, lane }));
+        try summaries.append(allocator, try std.fmt.allocPrint(allocator, "unknown tool `{s}` requested by {s} on lane {s}", .{ tool_name, actor, lane }));
     }
 
     return .{
@@ -795,8 +870,8 @@ fn structuredChatWithRepair(
 fn buildDecanusUserPrompt(allocator: std.mem.Allocator, config: AppConfig, state: *const AppState) ![]const u8 {
     const history = try recentHistoryText(allocator, state.agent_loop.history, config.context.max_history_events);
     const task_summary = try taskSummaryText(allocator, state.tasks);
-    var buffer = std.ArrayList(u8).init(allocator);
-    const writer = buffer.writer();
+    var buffer: std.ArrayList(u8) = .empty;
+    const writer = buffer.writer(allocator);
 
     try writer.print(
         \\Mission
@@ -847,14 +922,14 @@ fn buildDecanusUserPrompt(allocator: std.mem.Allocator, config: AppConfig, state
         },
     );
 
-    return try truncateText(allocator, try buffer.toOwnedSlice(), config.context.max_prompt_chars);
+    return try truncateText(allocator, try buffer.toOwnedSlice(allocator), config.context.max_prompt_chars);
 }
 
 fn buildSpecialistUserPrompt(allocator: std.mem.Allocator, config: AppConfig, state: *const AppState, lane: []const u8) ![]const u8 {
     const task = taskForLaneConst(state, lane);
     const history = try recentHistoryText(allocator, state.agent_loop.history, config.context.max_history_events);
-    var buffer = std.ArrayList(u8).init(allocator);
-    const writer = buffer.writer();
+    var buffer: std.ArrayList(u8) = .empty;
+    const writer = buffer.writer(allocator);
 
     try writer.print(
         \\Mission
@@ -898,7 +973,7 @@ fn buildSpecialistUserPrompt(allocator: std.mem.Allocator, config: AppConfig, st
         },
     );
 
-    return try truncateText(allocator, try buffer.toOwnedSlice(), config.context.max_prompt_chars);
+    return try truncateText(allocator, try buffer.toOwnedSlice(allocator), config.context.max_prompt_chars);
 }
 
 fn assembleSystemPrompt(
@@ -924,15 +999,26 @@ fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !AppConfig {
     return try parseJson(AppConfig, allocator, data);
 }
 
+fn loadProjectConfig(allocator: std.mem.Allocator) !AppConfig {
+    try scaffoldProject(allocator);
+    const config_path = try resolveConfigPath(allocator);
+    return try loadConfig(allocator, config_path);
+}
+
 fn loadState(allocator: std.mem.Allocator, path: []const u8) !AppState {
     const data = try std.fs.cwd().readFileAlloc(allocator, path, max_file_bytes);
     return try parseJson(AppState, allocator, data);
 }
 
-fn saveState(path: []const u8, state: AppState) !void {
+fn saveState(allocator: std.mem.Allocator, path: []const u8, state: AppState) !void {
+    const rendered = try std.fmt.allocPrint(
+        allocator,
+        "{f}",
+        .{std.json.fmt(state, .{ .whitespace = .indent_2 })},
+    );
     var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
     defer file.close();
-    try std.json.stringify(state, .{ .whitespace = .indent_2 }, file.writer());
+    try file.writeAll(rendered);
 }
 
 fn ensurePromptFiles(prompts_dir: []const u8) !void {
@@ -974,11 +1060,11 @@ fn providerListModels(allocator: std.mem.Allocator, provider: ProviderConfig) ![
         const result = try runCommandCapture(allocator, &.{ "curl", "-sS", "--max-time", try timeoutSeconds(allocator, provider.timeout_ms), url });
         if (result.exit_code != 0) return error.BackendUnavailable;
         const parsed = try parseJson(OllamaTagsResponse, allocator, result.stdout);
-        var models = std.ArrayList([]const u8).init(allocator);
+        var models: std.ArrayList([]const u8) = .empty;
         for (parsed.models) |model| {
-            try models.append(model.name);
+            try models.append(allocator, model.name);
         }
-        return try models.toOwnedSlice();
+        return try models.toOwnedSlice(allocator);
     }
 
     if (eql(provider.type, "openai-compatible")) {
@@ -986,11 +1072,11 @@ fn providerListModels(allocator: std.mem.Allocator, provider: ProviderConfig) ![
         const result = try runCommandCapture(allocator, &.{ "curl", "-sS", "--max-time", try timeoutSeconds(allocator, provider.timeout_ms), url });
         if (result.exit_code != 0) return error.BackendUnavailable;
         const parsed = try parseJson(OpenAIModelsResponse, allocator, result.stdout);
-        var models = std.ArrayList([]const u8).init(allocator);
+        var models: std.ArrayList([]const u8) = .empty;
         for (parsed.data) |model| {
-            try models.append(model.id);
+            try models.append(allocator, model.id);
         }
-        return try models.toOwnedSlice();
+        return try models.toOwnedSlice(allocator);
     }
 
     return error.UnsupportedProvider;
@@ -1108,9 +1194,7 @@ const OpenAIChatRequest = struct {
 };
 
 fn stringifyJsonToString(allocator: std.mem.Allocator, value: anytype) ![]const u8 {
-    var list = std.ArrayList(u8).init(allocator);
-    try std.json.stringify(value, .{}, list.writer());
-    return try list.toOwnedSlice();
+    return try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(value, .{})});
 }
 
 fn runCommandCapture(allocator: std.mem.Allocator, argv: []const []const u8) !CommandResult {
@@ -1191,10 +1275,10 @@ fn initializeRuntimeSession(allocator: std.mem.Allocator, state: *AppState, conf
 }
 
 fn appendHistory(allocator: std.mem.Allocator, state: *AppState, entry: HistoryEntry) !void {
-    var history = std.ArrayList(HistoryEntry).init(allocator);
-    try history.appendSlice(state.agent_loop.history);
-    try history.append(entry);
-    state.agent_loop.history = try history.toOwnedSlice();
+    var history: std.ArrayList(HistoryEntry) = .empty;
+    try history.appendSlice(allocator, state.agent_loop.history);
+    try history.append(allocator, entry);
+    state.agent_loop.history = try history.toOwnedSlice(allocator);
 }
 
 fn taskForLane(state: *AppState, lane: []const u8) *TaskLane {
@@ -1266,9 +1350,9 @@ fn taskSummaryText(allocator: std.mem.Allocator, tasks: Tasks) ![]const u8 {
 fn recentHistoryText(allocator: std.mem.Allocator, history: []const HistoryEntry, max_events: usize) ![]const u8 {
     if (history.len == 0) return "none";
     const start = if (history.len > max_events) history.len - max_events else 0;
-    var lines = std.ArrayList([]const u8).init(allocator);
+    var lines: std.ArrayList([]const u8) = .empty;
     for (history[start..]) |entry| {
-        try lines.append(try std.fmt.allocPrint(
+        try lines.append(allocator, try std.fmt.allocPrint(
             allocator,
             "#{d} {s} actor={s} lane={s} summary={s}",
             .{ entry.iteration, entry.type, entry.actor, entry.lane, entry.summary },
@@ -1289,7 +1373,7 @@ fn blockedToolOutcome(allocator: std.mem.Allocator, state: *AppState, reason: []
 
 fn confirmTool(allocator: std.mem.Allocator, tool_name: []const u8, detail: []const u8) !bool {
     try stdoutPrint("allow {s}? {s} [y/N]: ", .{ tool_name, detail });
-    const input = try std.io.getStdIn().reader().readUntilDelimiterOrEofAlloc(allocator, '\n', 1024);
+    const input = try std.fs.File.stdin().deprecatedReader().readUntilDelimiterOrEofAlloc(allocator, '\n', 1024);
     if (input == null) return false;
     return eql(trimAscii(input.?), "y") or eql(trimAscii(input.?), "yes");
 }
@@ -1307,6 +1391,46 @@ fn copyFileIfMissing(allocator: std.mem.Allocator, source_path: []const u8, targ
         try file.writeAll(content);
         return;
     };
+}
+
+fn scaffoldProject(allocator: std.mem.Allocator) !void {
+    try std.fs.cwd().makePath(default_logs_dir);
+    for (embedded_assets) |asset| {
+        const destination = try runtimePath(allocator, asset.relative_path);
+        try writeFileIfMissing(destination, asset.content);
+    }
+}
+
+fn runtimePath(allocator: std.mem.Allocator, relative_path: []const u8) ![]const u8 {
+    return try std.fs.path.join(allocator, &.{ runtime_dir_name, relative_path });
+}
+
+fn writeFileIfMissing(path: []const u8, content: []const u8) !void {
+    std.fs.cwd().access(path, .{}) catch {
+        if (std.fs.path.dirname(path)) |dir_name| {
+            try std.fs.cwd().makePath(dir_name);
+        }
+        var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+        defer file.close();
+        try file.writeAll(content);
+        return;
+    };
+}
+
+fn resolveConfigPath(allocator: std.mem.Allocator) ![]const u8 {
+    _ = allocator;
+    if (pathExists(default_config_path)) return default_config_path;
+    if (pathExists("contubernium.config.json")) return "contubernium.config.json";
+    return default_config_path;
+}
+
+fn pathExists(path: []const u8) bool {
+    std.fs.cwd().access(path, .{}) catch return false;
+    return true;
+}
+
+fn shouldLaunchInteractiveUi() bool {
+    return std.posix.isatty(std.posix.STDIN_FILENO) and std.posix.isatty(std.posix.STDOUT_FILENO);
 }
 
 fn pathIsSafeForWrite(path: []const u8) bool {
@@ -1351,7 +1475,7 @@ fn writeTurnLog(path: []const u8, section: []const u8, content: []const u8) !voi
     var file = try std.fs.cwd().createFile(path, .{ .truncate = false });
     defer file.close();
     try file.seekFromEnd(0);
-    try file.writer().print("[{s}]\n{s}\n\n", .{ section, content });
+    try file.deprecatedWriter().print("[{s}]\n{s}\n\n", .{ section, content });
 }
 
 fn truncateText(allocator: std.mem.Allocator, text: []const u8, max_chars: usize) ![]const u8 {
@@ -1393,9 +1517,9 @@ fn exitCode(term: std.process.Child.Term) i32 {
 }
 
 fn stdoutPrint(comptime fmt: []const u8, args: anytype) !void {
-    try std.io.getStdOut().writer().print(fmt, args);
+    try std.fs.File.stdout().deprecatedWriter().print(fmt, args);
 }
 
 fn stderrPrint(comptime fmt: []const u8, args: anytype) !void {
-    try std.io.getStdErr().writer().print(fmt, args);
+    try std.fs.File.stderr().deprecatedWriter().print(fmt, args);
 }

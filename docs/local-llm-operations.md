@@ -6,26 +6,30 @@ This guide explains how to operate the local-model Contubernium runtime once the
 
 ## Install Flow
 
-### 1. Build the Zig CLI
+### 1. Install the global CLI
 
-From the repo root:
+From the Contubernium repo root:
 
 ```bash
-zig build
+./install.sh
 ```
 
-The executable is exposed through the build output as `contubernium`.
+This builds the binary and symlinks `contubernium` into a user bin directory such as `~/bin` or `~/.local/bin`.
 
 ### 2. Initialize the workspace
 
 ```bash
-./zig-out/bin/contubernium init
+contubernium init
 ```
 
 This prepares:
 
-- `contubernium.config.json`
+- `.contubernium/config.json`
+- `.contubernium/state.json`
+- `.contubernium/prompts/`
 - `.contubernium/logs/`
+
+If you run it in a normal terminal session, it immediately opens the interactive prompt UI after scaffolding.
 
 ### 3. Start Ollama
 
@@ -46,7 +50,7 @@ ollama pull llama3.1:8b
 
 Use one reliable instruct or coding model first. Keep the phase 1 setup simple.
 
-### 5. Edit `contubernium.config.json`
+### 5. Edit `.contubernium/config.json`
 
 Set:
 
@@ -58,7 +62,7 @@ Set:
 ### 6. Run `doctor`
 
 ```bash
-./zig-out/bin/contubernium doctor
+contubernium doctor
 ```
 
 This should pass before real missions are attempted.
@@ -66,13 +70,25 @@ This should pass before real missions are attempted.
 ### 7. Start a mission
 
 ```bash
-./zig-out/bin/contubernium run "Add a release checklist to the docs"
+contubernium run "Add a release checklist to the docs"
 ```
 
 ### 8. Resume if needed
 
 ```bash
-./zig-out/bin/contubernium resume
+contubernium resume
+```
+
+### 9. Start the interactive UI
+
+```bash
+contubernium
+```
+
+or
+
+```bash
+contubernium ui
 ```
 
 ## Day-To-Day Commands
@@ -80,13 +96,13 @@ This should pass before real missions are attempted.
 List models:
 
 ```bash
-./zig-out/bin/contubernium models list
+contubernium models list
 ```
 
 Advance only one turn:
 
 ```bash
-./zig-out/bin/contubernium step
+contubernium step
 ```
 
 ## Approval Behavior
@@ -138,7 +154,7 @@ ollama pull <model-name>
 Then rerun:
 
 ```bash
-./zig-out/bin/contubernium doctor
+contubernium doctor
 ```
 
 ### The model returns invalid JSON

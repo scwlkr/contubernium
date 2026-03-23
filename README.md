@@ -6,7 +6,7 @@
 
 - **Project Scaffolding Complete**: The foundational directory structure for the 10-agent contubernium is established under `.agents/`.
 - **Agent Personas Defined**: Skill definitions (`SKILL.md`) for all 10 agents are maintained within their respective directories.
-- **Loop-Aware State Management**: The local JSON state manager (`contubernium_state.json`) now tracks the mission, the active loop, and per-tool invocations.
+- **Loop-Aware State Management**: The project-local JSON state manager (`.contubernium/state.json`) now tracks the mission, the active loop, and per-tool invocations.
 - **Deployment Script Standardized**: `init.sh` hydrates the Roman roster and protects existing project state from being overwritten.
 - **Local Runtime Added**: A Zig CLI now provides a standalone runner for local-model execution against Ollama first, then OpenAI-compatible local backends.
 - **Persistent Runtime Docs Added**: The local-model plan, runtime spec, and operations guide now live in `docs/` and are linked below.
@@ -15,7 +15,7 @@
 
 The workspace is powered by 8 core legionaries and 2 auxiliaries. `decanus` is the orchestrator; the remaining agents operate as specialist tools inside the commander loop.
 
-1. **decanus**: The state commander who reads the mission, assigns work, and updates `contubernium_state.json`.
+1. **decanus**: The state commander who reads the mission, assigns work, and updates `.contubernium/state.json`.
 2. **faber**: The backend blacksmith who builds databases, APIs, and server logic.
 3. **artifex**: The frontend artisan who builds the interface and connects client behavior to the backend.
 4. **architectus**: The systems siege-engineer who manages infrastructure, CI/CD, and deployment scripts.
@@ -47,14 +47,28 @@ The mental model is:
 In practice:
 
 1. The user prompt goes to `decanus`.
-2. `decanus` writes the mission into `contubernium_state.json`.
+2. `decanus` writes the mission into `.contubernium/state.json`.
 3. `decanus` decides whether to answer directly or invoke a specialist lane.
 4. The chosen specialist completes the scoped invocation and returns control to `decanus`.
 5. `decanus` either invokes the next tool or writes the final response.
 
 ## 🛠️ Usage
 
-To initialize the swarm in a target directory (assuming Contubernium is your global reference):
+To install the global CLI:
+
+```bash
+/path/to/Contubernium/install.sh
+```
+
+Then, from any project directory:
+
+```bash
+contubernium init
+```
+
+When you run `contubernium init` in a normal terminal session, it scaffolds `.contubernium/` and immediately drops you into the interactive prompt UI.
+
+If you still want the older bootstrap script that symlinks shared assets into a workspace, you can also run:
 
 ```bash
 /path/to/Contubernium/init.sh
@@ -70,24 +84,35 @@ This script will:
 
 ## Local Model Runtime
 
-Contubernium now includes a standalone Zig CLI for running the commander/specialist loop against local models.
+Contubernium now includes a standalone Zig CLI for running the commander/specialist loop against local models from any project directory.
 
-Build the runtime:
+Install the command globally:
 
 ```bash
-zig build
+/path/to/Contubernium/install.sh
 ```
 
 Main commands:
 
 ```bash
-./zig-out/bin/contubernium init
-./zig-out/bin/contubernium doctor
-./zig-out/bin/contubernium models list
-./zig-out/bin/contubernium run "your mission prompt"
-./zig-out/bin/contubernium step
-./zig-out/bin/contubernium resume
+contubernium init
+contubernium doctor
+contubernium models list
+contubernium run "your mission prompt"
+contubernium step
+contubernium resume
+contubernium ui
+contubernium
 ```
+
+What `contubernium init` creates in the current project:
+
+- `.contubernium/config.json`
+- `.contubernium/state.json`
+- `.contubernium/prompts/`
+- `.contubernium/logs/`
+
+Running `contubernium` with no arguments starts the same interactive prompt-first UI. Running `contubernium ui` does the same thing explicitly.
 
 The first implementation target is Ollama. The runtime also includes an OpenAI-compatible adapter layer so it can be extended to other local servers without changing the Contubernium protocol.
 
@@ -99,7 +124,7 @@ Reference docs:
 
 ## 📄 State Tracking
 
-Contubernium relies on `contubernium_state.json` to monitor the overarching project. It tracks:
+Contubernium relies on `.contubernium/state.json` to monitor the overarching project. It tracks:
 - `project_name`
 - `global_status`
 - `current_actor`
