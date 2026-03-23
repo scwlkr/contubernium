@@ -1,0 +1,40 @@
+{
+  "runtime_version": 1,
+  "provider": {
+    "type": "ollama-native",
+    "base_url": "http://127.0.0.1:11434",
+    "model": "qwen2.5-coder:7b",
+    "timeout_ms": 120000,
+    "max_retries": 2,
+    "structured_output": "json"
+  },
+  "fallback_provider": {
+    "enabled": false,
+    "type": "openai-compatible",
+    "base_url": "http://127.0.0.1:8000",
+    "model": "",
+    "timeout_ms": 120000
+  },
+  "paths": {
+    "state_file": "contubernium_state.json",
+    "prompts_dir": "prompts",
+    "logs_dir": ".contubernium/logs"
+  },
+  "policy": {
+    "approval_mode": "guarded",
+    "allow_read_tools_without_confirmation": true,
+    "allow_workspace_writes_without_confirmation": false,
+    "allow_shell_without_confirmation": false,
+    "blocked_command_patterns": [
+      "rm -rf",
+      "git reset --hard"
+    ]
+  },
+  "context": {
+    "max_history_events": 8,
+    "max_prompt_chars": 32000,
+    "max_file_read_bytes": 12000,
+    "max_search_hits": 20,
+    "max_tool_result_chars": 6000
+  }
+}

@@ -18,6 +18,19 @@
     "last_tool_result": "",
     "history": []
   },
+  "runtime_session": {
+    "status": "idle",
+    "provider": "",
+    "model": "",
+    "endpoint": "",
+    "approval_mode": "guarded",
+    "current_turn_id": "",
+    "last_health_check": "",
+    "last_error": "",
+    "active_log_path": "",
+    "last_actor": "",
+    "repair_attempts": 0
+  },
   "agent_tools": {
     "faber": {
       "lane": "backend",

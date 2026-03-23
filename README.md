@@ -8,6 +8,8 @@
 - **Agent Personas Defined**: Skill definitions (`SKILL.md`) for all 10 agents are maintained within their respective directories.
 - **Loop-Aware State Management**: The local JSON state manager (`contubernium_state.json`) now tracks the mission, the active loop, and per-tool invocations.
 - **Deployment Script Standardized**: `init.sh` hydrates the Roman roster and protects existing project state from being overwritten.
+- **Local Runtime Added**: A Zig CLI now provides a standalone runner for local-model execution against Ollama first, then OpenAI-compatible local backends.
+- **Persistent Runtime Docs Added**: The local-model plan, runtime spec, and operations guide now live in `docs/` and are linked below.
 
 ## 🤖 The Roster
 
@@ -61,7 +63,39 @@ To initialize the swarm in a target directory (assuming Contubernium is your glo
 This script will:
 1. Safely symlink the `.agents` directory to your local working directory.
 2. Copy `templates/contubernium_state.template.json` into a local `contubernium_state.json`.
-3. Start the workspace in a commander-first loop with `current_actor` set to `decanus`.
+3. Symlink the packaged prompt assets into a local `prompts/` directory.
+4. Copy `templates/contubernium.config.template.json` into a local `contubernium.config.json`.
+5. Prepare `.contubernium/logs/` for runtime turn logs.
+6. Start the workspace in a commander-first loop with `current_actor` set to `decanus`.
+
+## Local Model Runtime
+
+Contubernium now includes a standalone Zig CLI for running the commander/specialist loop against local models.
+
+Build the runtime:
+
+```bash
+zig build
+```
+
+Main commands:
+
+```bash
+./zig-out/bin/contubernium init
+./zig-out/bin/contubernium doctor
+./zig-out/bin/contubernium models list
+./zig-out/bin/contubernium run "your mission prompt"
+./zig-out/bin/contubernium step
+./zig-out/bin/contubernium resume
+```
+
+The first implementation target is Ollama. The runtime also includes an OpenAI-compatible adapter layer so it can be extended to other local servers without changing the Contubernium protocol.
+
+Reference docs:
+
+- [Local LLM plan](docs/local-llm-contubernium-plan.md)
+- [Runtime spec](docs/local-llm-runtime-spec.md)
+- [Operations guide](docs/local-llm-operations.md)
 
 ## 📄 State Tracking
 
@@ -71,6 +105,7 @@ Contubernium relies on `contubernium_state.json` to monitor the overarching proj
 - `current_actor`
 - `mission`, including the initial user prompt and final response
 - `agent_loop`, including iteration count, active tool, and loop history
+- `runtime_session`, including provider, model, endpoint, approval mode, and the active turn log
 - `agent_tools`, which describes when each specialist should be used
 - Task lanes for backend, frontend, systems, QA, research, brand, media, documentation, and bulk operations
 - Per-lane `invocation` contracts so specialists behave like tools and always return control to `decanus`

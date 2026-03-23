@@ -1,0 +1,22 @@
+{
+  "action": "complete | tool_request | ask_user | blocked",
+  "reasoning": "short explanation",
+  "description": "what changed or what was learned",
+  "result_summary": "short result summary",
+  "artifacts": [
+    "changed files or produced outputs"
+  ],
+  "follow_up_needed": "optional suggestion for decanus",
+  "question": "required when action is ask_user",
+  "blocked_reason": "required when action is blocked",
+  "tool_requests": [
+    {
+      "tool": "list_files | read_file | search_text | run_command | write_file | ask_user",
+      "description": "why the tool is needed",
+      "path": "",
+      "pattern": "",
+      "command": "",
+      "content": ""
+    }
+  ]
+}
