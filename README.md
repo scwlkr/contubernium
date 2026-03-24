@@ -70,7 +70,7 @@ The installer builds the CLI and installs `contubernium` into `~/.local/bin` by 
 To start Contubernium in any project directory:
 
 ```bash
-cd ~/Desktop/dev/test_deez
+cd ~/path/to/project
 contubernium
 ```
 
