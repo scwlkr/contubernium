@@ -4,7 +4,7 @@
 **Objective:** Replace the local JSON state with a robust local database and establish a zero-cost system heartbeat.
 * **v0.1.0: SQLite Migration**
   * Script a schema in SQLite (`contubernium.db`) to track Jobs, Tasks, and Agent Statuses.
-  * Update the Optio/Decanus logic to read/write to SQLite instead of `contubernium_state.json`.
+  * Update the Decanus logic to read/write to SQLite instead of `contubernium_state.json`.
 * **v0.2.0: The Async Heartbeat**
   * Write a lightweight Python/Node daemon (`castra_daemon`).
   * Implement an event loop that ticks every 60 seconds to check the SQLite `Jobs` table for pending items. 

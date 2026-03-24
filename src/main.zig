@@ -1915,7 +1915,7 @@ fn buildRenderFrame(allocator: std.mem.Allocator, tui: *const TuiSession, size: 
     const temp_allocator = arena.allocator();
 
     const sidebar_width: usize = if (size.cols >= 124) 38 else 0;
-    const divider_width: usize = if (sidebar_width > 0) roman_divider_width else 0;
+    const divider_width: usize = if (sidebar_width > 0) roman_divider_lane_width else 0;
     const body_width = if (sidebar_width > 0 and size.cols > sidebar_width + divider_width + 24) size.cols - sidebar_width - divider_width else size.cols;
     const header_height: usize = 3;
     const footer_height: usize = 4;
@@ -2838,6 +2838,10 @@ fn ansiForRomanDividerPixel(pixel: RomanDividerPixel) []const u8 {
     };
 }
 
+fn romanDividerInset() usize {
+    return (roman_divider_lane_width - roman_divider_width) / 2;
+}
+
 fn romanDividerPixelFromMask(mask_pixel: u8) RomanDividerPixel {
     return switch (mask_pixel) {
         @intFromEnum(RomanDividerPixel.bg) => .bg,
@@ -2853,6 +2857,10 @@ fn romanDividerPixelFromMask(mask_pixel: u8) RomanDividerPixel {
 
 fn writeRomanDividerLegacy(writer: anytype, row: usize, height: usize) !void {
     const mask = romanDividerMaskRow(row, height);
+    const inset = romanDividerInset();
+    const trailing = roman_divider_lane_width - roman_divider_width - inset;
+    try writer.writeAll(ansiForRomanDividerPixel(.bg));
+    if (inset > 0) try writer.writeByteNTimes(' ', inset);
     var index: usize = 0;
     while (index < mask.len) {
         const pixel = romanDividerPixelFromMask(mask[index]);
@@ -2862,6 +2870,8 @@ fn writeRomanDividerLegacy(writer: anytype, row: usize, height: usize) !void {
         try writer.writeByteNTimes(' ', next - index);
         index = next;
     }
+    try writer.writeAll(ansiForRomanDividerPixel(.bg));
+    if (trailing > 0) try writer.writeByteNTimes(' ', trailing);
     try writer.writeAll("\x1b[0m");
 }
 
@@ -5936,6 +5946,7 @@ const roman_stone_light = vaxis.Color.rgbFromUint(0xd8d1c4);
 const roman_stone_mid = vaxis.Color.rgbFromUint(0xb4ada2);
 const roman_stone_dark = vaxis.Color.rgbFromUint(0x7b756b);
 const roman_divider_width: usize = 9;
+const roman_divider_lane_width: usize = 13;
 
 const RomanDividerPixel = enum(u8) {
     bg = '.',
@@ -6078,6 +6089,7 @@ fn drawRomanDivider(win: vaxis.Window) void {
     fillStyled(win, shellStyle());
     var cells: [roman_divider_width]u8 = undefined;
     @memset(&cells, ' ');
+    const inset = if (win.width > roman_divider_width) (@as(usize, win.width) - roman_divider_width) / 2 else 0;
 
     var row: usize = 0;
     while (row < win.height) : (row += 1) {
@@ -6087,7 +6099,7 @@ fn drawRomanDivider(win: vaxis.Window) void {
             const pixel = romanDividerPixelFromMask(mask[start]);
             var end = start + 1;
             while (end < mask.len and mask[end] == mask[start]) : (end += 1) {}
-            drawText(win, row, start, cells[0 .. end - start], romanDividerPixelStyle(pixel));
+            drawText(win, row, inset + start, cells[0 .. end - start], romanDividerPixelStyle(pixel));
             start = end;
         }
     }
@@ -6517,9 +6529,8 @@ fn renderSessionUi(allocator: std.mem.Allocator, root: vaxis.Window, ui: *VaxisU
     const main_top: usize = 2;
     const composer_y = @as(usize, shell.height) -| composer_height;
     const rail_width: usize = if (shouldShowRail(ui, shell.width)) 30 else 0;
-    const divider_width: usize = if (rail_width > 0) roman_divider_width else 0;
-    const rail_gap_width: usize = if (rail_width > 0) 1 else 0;
-    const transcript_width = @as(usize, shell.width) -| 2 -| rail_width -| divider_width -| rail_gap_width;
+    const divider_width: usize = if (rail_width > 0) roman_divider_lane_width else 0;
+    const transcript_width = @as(usize, shell.width) -| 2 -| rail_width -| divider_width;
     const transcript_height = composer_y -| main_top;
 
     const transcript_win = shell.child(.{
@@ -6565,7 +6576,7 @@ fn renderSessionUi(allocator: std.mem.Allocator, root: vaxis.Window, ui: *VaxisU
         drawRomanDivider(divider_win);
 
         const rail_shell = shell.child(.{
-            .x_off = clampI17(1 + transcript_width + divider_width + rail_gap_width),
+            .x_off = clampI17(1 + transcript_width + divider_width),
             .y_off = clampI17(main_top),
             .width = clampU16(rail_width),
             .height = clampU16(transcript_height),
@@ -6906,6 +6917,12 @@ test "romanDividerMaskRow keeps a fixed pixel width" {
             try testing.expectEqual(roman_divider_width, mask.len);
         }
     }
+}
+
+test "romanDivider lane leaves breathing room" {
+    const testing = std.testing;
+    try testing.expect(roman_divider_lane_width > roman_divider_width);
+    try testing.expectEqual(@as(usize, 2), romanDividerInset());
 }
 
 test "romanDividerMaskRow keeps outer gutter on tall columns" {
