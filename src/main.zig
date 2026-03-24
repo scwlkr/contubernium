@@ -5452,7 +5452,9 @@ fn interactiveUiLoopVaxis(allocator: std.mem.Allocator) !void {
 
         const now_ms = std.time.milliTimestamp();
         if (ui.dirty or now_ms - last_render_ms >= 100) {
-            try renderVaxisUi(allocator, &vx, &ui);
+            var render_arena = std.heap.ArenaAllocator.init(allocator);
+            defer render_arena.deinit();
+            try renderVaxisUi(render_arena.allocator(), &vx, &ui);
             try vx.render(tty.writer());
             last_render_ms = now_ms;
             ui.dirty = false;
@@ -5723,8 +5725,6 @@ fn buildTimelineLinesVaxis(
                 if (entry.kind == .tool) 200 else 140,
             );
         }
-        defer if (preview_text.ptr != entry.text.items.ptr) allocator.free(preview_text);
-
         try appendWrappedVaxisLinesWithPrefix(
             allocator,
             lines,
@@ -5754,19 +5754,14 @@ fn buildRailLinesVaxis(
 ) !void {
     try lines.append(allocator, .{ .text = "LIVE CONTEXT", .kind = .tool, .tone = .warning, .bold = true });
     const actor_line = try std.fmt.allocPrint(allocator, "actor  {s}", .{ui.snapshot.current_actor});
-    defer allocator.free(actor_line);
     try appendWrappedVaxisLinesWithPrefix(allocator, lines, actor_line, width, .info, .plain, .system, "");
     const lane_line = try std.fmt.allocPrint(allocator, "lane   {s}", .{ui.snapshot.active_lane});
-    defer allocator.free(lane_line);
     try appendWrappedVaxisLinesWithPrefix(allocator, lines, lane_line, width, .info, .plain, .system, "");
     const global_line = try std.fmt.allocPrint(allocator, "global {s}", .{ui.snapshot.global_status});
-    defer allocator.free(global_line);
     try appendWrappedVaxisLinesWithPrefix(allocator, lines, global_line, width, .info, .plain, .system, "");
     const runtime_line = try std.fmt.allocPrint(allocator, "runtime {s}", .{ui.snapshot.runtime_status});
-    defer allocator.free(runtime_line);
     try appendWrappedVaxisLinesWithPrefix(allocator, lines, runtime_line, width, .info, .plain, .system, "");
     const turn_line = try std.fmt.allocPrint(allocator, "turn   {d}", .{ui.snapshot.iteration});
-    defer allocator.free(turn_line);
     try appendWrappedVaxisLinesWithPrefix(allocator, lines, turn_line, width, .info, .plain, .system, "");
     try lines.append(allocator, .{});
     try lines.append(allocator, .{ .text = "GOAL", .kind = .tool, .tone = .warning, .bold = true });
@@ -5774,7 +5769,6 @@ fn buildRailLinesVaxis(
     try lines.append(allocator, .{});
     try lines.append(allocator, .{ .text = "LATEST", .kind = .tool, .tone = .warning, .bold = true });
     const latest = try compactTextForUi(allocator, if (ui.snapshot.last_tool_result.len > 0) ui.snapshot.last_tool_result else "none", 6, 260);
-    defer allocator.free(latest);
     try appendWrappedVaxisLinesWithPrefix(allocator, lines, latest, width, .info, .plain, .system, "");
     try lines.append(allocator, .{});
     try lines.append(allocator, .{ .text = "MODELS", .kind = .tool, .tone = .warning, .bold = true });
@@ -5935,7 +5929,6 @@ fn renderSessionUi(allocator: std.mem.Allocator, root: vaxis.Window, ui: *VaxisU
         "Contubernium  •  actor {s}  •  lane {s}  •  global {s}",
         .{ ui.snapshot.current_actor, ui.snapshot.active_lane, ui.snapshot.global_status },
     );
-    defer allocator.free(strip_text);
     drawText(top_strip, 0, 0, strip_text, .{ .fg = roman_ivory, .bg = roman_bg, .bold = true });
 
     const meta_text = try std.fmt.allocPrint(
@@ -5943,7 +5936,6 @@ fn renderSessionUi(allocator: std.mem.Allocator, root: vaxis.Window, ui: *VaxisU
         "{s}  •  {s}  •  turn {d}",
         .{ ui.snapshot.provider_type, ui.snapshot.model, ui.snapshot.iteration },
     );
-    defer allocator.free(meta_text);
     const meta_col = if (displayWidth(meta_text) + 1 < top_strip.width) @as(usize, top_strip.width) - displayWidth(meta_text) else 0;
     drawText(top_strip, 0, meta_col, meta_text, .{ .fg = roman_muted, .bg = roman_bg });
 
@@ -6040,7 +6032,6 @@ fn renderStatusOverlay(allocator: std.mem.Allocator, root: vaxis.Window, ui: *co
     drawText(panel, 0, 0, "Runtime Status", .{ .fg = roman_gold, .bg = roman_panel_alt, .bold = true });
 
     const status = try renderStatusBlock(allocator, ui.snapshot);
-    defer allocator.free(status);
     _ = drawWrapped(panel, 2, 0, status, .{ .fg = roman_ivory, .bg = roman_panel_alt });
     drawText(panel, panel.height - 1, 0, "Esc closes", .{ .fg = roman_muted, .bg = roman_panel_alt, .dim = true });
 }
@@ -6063,7 +6054,6 @@ fn renderCommandOverlay(allocator: std.mem.Allocator, root: vaxis.Window, ui: *c
     for (palette_commands, 0..) |entry, index| {
         const selected = index == ui.command_palette_index;
         const line = try std.fmt.allocPrint(allocator, "{s} {s}  {s}", .{ if (selected) ">" else " ", entry.label, entry.description });
-        defer allocator.free(line);
         drawText(
             panel,
             index + 2,
@@ -6107,7 +6097,6 @@ fn renderModelsOverlay(allocator: std.mem.Allocator, root: vaxis.Window, ui: *co
             "{s} {d}. {s}{s}",
             .{ if (selected) ">" else " ", row + 1, model, if (eql(model, ui.snapshot.model)) "  (current)" else "" },
         );
-        defer allocator.free(line);
         drawText(
             panel,
             row + 2,
@@ -6170,18 +6159,14 @@ fn renderOverlay(allocator: std.mem.Allocator, root: vaxis.Window, ui: *const Va
 }
 
 fn renderVaxisUi(allocator: std.mem.Allocator, vx: *vaxis.Vaxis, ui: *VaxisUiSession) !void {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const temp_allocator = arena.allocator();
-
     var root = vx.window();
     fillStyled(root, shellStyle());
     if (ui.mode == .landing and ui.timeline.items.len == 0 and ui.running_command == null and ui.overlay == .none) {
-        try renderLandingUi(temp_allocator, root, ui);
+        try renderLandingUi(allocator, root, ui);
     } else {
-        try renderSessionUi(temp_allocator, root, ui);
+        try renderSessionUi(allocator, root, ui);
     }
-    try renderOverlay(temp_allocator, root, ui);
+    try renderOverlay(allocator, root, ui);
     if (ui.focus != .composer or ui.overlay != .none) root.hideCursor();
 }
 
