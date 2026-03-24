@@ -258,6 +258,7 @@ const HighlightKind = enum {
     plain,
     json,
     command,
+    summary,
 };
 
 const MessageKind = enum {
@@ -979,6 +980,7 @@ const RenderLine = struct {
     text: []const u8 = "",
     tone: ChatTone = .info,
     highlight: HighlightKind = .plain,
+    bold: bool = false,
 };
 
 const RenderFrame = struct {
@@ -1524,7 +1526,7 @@ fn compactTextForUi(allocator: std.mem.Allocator, text: []const u8, max_lines: u
     const trimmed = trimAscii(text);
     if (trimmed.len == 0) return try allocator.dupe(u8, "");
 
-    const char_limited = if (trimmed.len > max_chars) trimmed[0..max_chars] else trimmed;
+    const char_limited = safeUtf8PrefixByBytes(trimmed, max_chars);
     var buffer: std.ArrayList(u8) = .empty;
     errdefer buffer.deinit(allocator);
 
@@ -1749,9 +1751,9 @@ fn buildRenderFrame(allocator: std.mem.Allocator, tui: *const TuiSession, size: 
     defer arena.deinit();
     const temp_allocator = arena.allocator();
 
-    const sidebar_width: usize = if (size.cols >= 118) 36 else 0;
-    const gutter_width: usize = if (sidebar_width > 0) 3 else 0;
-    const body_width = if (sidebar_width > 0 and size.cols > sidebar_width + gutter_width + 2) size.cols - sidebar_width - gutter_width else size.cols;
+    const sidebar_width: usize = if (size.cols >= 124) 38 else 0;
+    const gutter_width: usize = if (sidebar_width > 0) 4 else 0;
+    const body_width = if (sidebar_width > 0 and size.cols > sidebar_width + gutter_width + 24) size.cols - sidebar_width - gutter_width else size.cols;
     const header_height: usize = 3;
     const footer_height: usize = 4;
     const chat_height: usize = if (size.rows > header_height + footer_height) size.rows - header_height - footer_height else 1;
@@ -1773,7 +1775,7 @@ fn buildRenderFrame(allocator: std.mem.Allocator, tui: *const TuiSession, size: 
     defer screen.deinit(allocator);
 
     const writer = screen.writer(allocator);
-    try writer.writeAll("\x1b[H");
+    try writer.writeAll("\x1b[?25l\x1b[2J\x1b[H");
 
     try writeHeaderLine(writer, size.cols, " CONTUBERNIUM COMMAND TENT ", .info);
     try writeHeaderLine(
@@ -1815,7 +1817,7 @@ fn buildRenderFrame(allocator: std.mem.Allocator, tui: *const TuiSession, size: 
         if (sidebar_width > 0) {
             const side_line = if (body_row < side_lines.items.len) side_lines.items[body_row] else RenderLine{};
             try writePaddedLine(writer, chat_line, body_width);
-            try writer.writeAll("\x1b[38;5;240m │ \x1b[0m");
+            try writer.writeAll("\x1b[38;5;238m  │ \x1b[0m");
             try writePaddedLine(writer, side_line, sidebar_width);
             try writer.writeByte('\n');
         } else {
@@ -1866,14 +1868,9 @@ fn buildChatLines(
         return;
     }
     for (tui.messages.items) |message| {
-        const header = switch (message.kind) {
-            .user => try std.fmt.allocPrint(allocator, "USER | {s}", .{message.title}),
-            .agent => try std.fmt.allocPrint(allocator, "{s} | {s}", .{ toUpperAscii(allocator, message.actor) catch message.actor, if (message.streaming) "streaming ..." else "response" }),
-            .tool => try std.fmt.allocPrint(allocator, "TOOL | {s}", .{message.title}),
-            .system => try std.fmt.allocPrint(allocator, "SYSTEM | {s}", .{message.title}),
-        };
-        try lines.append(allocator, .{ .text = header, .tone = message.tone });
-        try appendWrappedLines(allocator, lines, message.text.items, width, message.tone, message.highlight);
+        const header = try messageHeading(allocator, message);
+        try lines.append(allocator, .{ .text = header, .tone = message.tone, .bold = true });
+        try appendWrappedLinesWithPrefix(allocator, lines, message.text.items, width, message.tone, message.highlight, "  ");
         try lines.append(allocator, .{});
     }
 }
@@ -1884,34 +1881,69 @@ fn buildSidebarLines(
     lines: *std.ArrayList(RenderLine),
     width: usize,
 ) !void {
-    try lines.append(allocator, .{ .text = "LIVE CONTEXT", .tone = .warning });
-    try lines.append(allocator, .{ .text = try std.fmt.allocPrint(allocator, "actor   {s}", .{tui.snapshot.current_actor}), .tone = .info });
-    try lines.append(allocator, .{ .text = try std.fmt.allocPrint(allocator, "lane    {s}", .{tui.snapshot.active_lane}), .tone = .info });
-    try lines.append(allocator, .{ .text = try std.fmt.allocPrint(allocator, "global  {s}", .{tui.snapshot.global_status}), .tone = .info });
-    try lines.append(allocator, .{ .text = try std.fmt.allocPrint(allocator, "runtime {s}", .{tui.snapshot.runtime_status}), .tone = .info });
-    try lines.append(allocator, .{ .text = try std.fmt.allocPrint(allocator, "turn    {d}", .{tui.snapshot.iteration}), .tone = .info });
-    try lines.append(allocator, .{ .text = try std.fmt.allocPrint(allocator, "tool    {s}", .{if (tui.snapshot.active_tool.len > 0) tui.snapshot.active_tool else "none"}), .tone = .info });
+    try appendSidebarSectionHeader(allocator, lines, "LIVE CONTEXT");
+    try appendWrappedLinesWithPrefix(allocator, lines, try std.fmt.allocPrint(allocator, "actor: {s}", .{tui.snapshot.current_actor}), width, .info, .plain, "  ");
+    try appendWrappedLinesWithPrefix(allocator, lines, try std.fmt.allocPrint(allocator, "lane: {s}", .{tui.snapshot.active_lane}), width, .info, .plain, "  ");
+    try appendWrappedLinesWithPrefix(allocator, lines, try std.fmt.allocPrint(allocator, "global: {s}", .{tui.snapshot.global_status}), width, .info, .plain, "  ");
+    try appendWrappedLinesWithPrefix(allocator, lines, try std.fmt.allocPrint(allocator, "runtime: {s}", .{tui.snapshot.runtime_status}), width, .info, .plain, "  ");
+    try appendWrappedLinesWithPrefix(allocator, lines, try std.fmt.allocPrint(allocator, "turn: {d}", .{tui.snapshot.iteration}), width, .info, .plain, "  ");
+    try appendWrappedLinesWithPrefix(allocator, lines, try std.fmt.allocPrint(allocator, "tool: {s}", .{if (tui.snapshot.active_tool.len > 0) tui.snapshot.active_tool else "none"}), width, .info, .plain, "  ");
     try lines.append(allocator, .{});
-    try lines.append(allocator, .{ .text = "GOAL", .tone = .warning });
-    try appendWrappedLines(allocator, lines, if (tui.snapshot.current_goal.len > 0) tui.snapshot.current_goal else "idle", width, .info, .plain);
+    try appendSidebarSectionHeader(allocator, lines, "GOAL");
+    try appendWrappedLinesWithPrefix(allocator, lines, if (tui.snapshot.current_goal.len > 0) tui.snapshot.current_goal else "idle", width, .info, .plain, "  ");
     try lines.append(allocator, .{});
-    try lines.append(allocator, .{ .text = "LATEST", .tone = .warning });
-    const latest = try compactTextForUi(allocator, if (tui.snapshot.last_tool_result.len > 0) tui.snapshot.last_tool_result else "none", 8, 420);
-    try appendWrappedLines(allocator, lines, latest, width, .info, .plain);
+    try appendSidebarSectionHeader(allocator, lines, "LATEST");
+    const latest = try compactTextForUi(allocator, if (tui.snapshot.last_tool_result.len > 0) tui.snapshot.last_tool_result else "none", 7, 320);
+    try appendWrappedLinesWithPrefix(allocator, lines, latest, width, .info, .plain, "  ");
     try lines.append(allocator, .{});
-    try lines.append(allocator, .{ .text = "ERROR", .tone = .warning });
-    try appendWrappedLines(allocator, lines, if (tui.snapshot.last_error.len > 0) tui.snapshot.last_error else "none", width, .danger, .plain);
+    try appendSidebarSectionHeader(allocator, lines, "ERROR");
+    try appendWrappedLinesWithPrefix(allocator, lines, if (tui.snapshot.last_error.len > 0) tui.snapshot.last_error else "none", width, .danger, .plain, "  ");
     try lines.append(allocator, .{});
-    try lines.append(allocator, .{ .text = "MODELS", .tone = .warning });
+    try appendSidebarSectionHeader(allocator, lines, "MODELS");
     if (tui.cached_models.len == 0) {
-        try appendWrappedLines(allocator, lines, if (tui.last_model_error.len > 0) tui.last_model_error else "run /models", width, .info, .plain);
+        try appendWrappedLinesWithPrefix(allocator, lines, if (tui.last_model_error.len > 0) tui.last_model_error else "run /models", width, .info, .plain, "  ");
     } else {
         var model_index: usize = 0;
         while (model_index < tui.cached_models.len and model_index < 6) : (model_index += 1) {
             const marker = if (eql(tui.cached_models[model_index], tui.snapshot.model)) "*" else " ";
-            try lines.append(allocator, .{ .text = try std.fmt.allocPrint(allocator, "{s} {d}. {s}", .{ marker, model_index + 1, tui.cached_models[model_index] }), .tone = .info });
+            try lines.append(allocator, .{
+                .text = try std.fmt.allocPrint(allocator, "  {s} {d}. {s}", .{ marker, model_index + 1, tui.cached_models[model_index] }),
+                .tone = .info,
+            });
         }
     }
+}
+
+fn messageHeading(allocator: std.mem.Allocator, message: TuiMessage) ![]const u8 {
+    return switch (message.kind) {
+        .user => try std.fmt.allocPrint(allocator, "[USER] {s}", .{message.title}),
+        .agent => blk: {
+            const actor = try toUpperAscii(allocator, message.actor);
+            const mode = if (message.streaming)
+                "LIVE STREAM"
+            else if (message.highlight == .summary)
+                "REPORT"
+            else
+                "RESPONSE";
+            break :blk try std.fmt.allocPrint(allocator, "[{s}] {s}", .{ actor, mode });
+        },
+        .tool => try std.fmt.allocPrint(allocator, "[TOOL] {s}", .{message.title}),
+        .system => try std.fmt.allocPrint(allocator, "[SYSTEM] {s}", .{message.title}),
+    };
+}
+
+fn appendSidebarSectionHeader(allocator: std.mem.Allocator, lines: *std.ArrayList(RenderLine), text: []const u8) !void {
+    try lines.append(allocator, .{
+        .text = try std.fmt.allocPrint(allocator, "{s}", .{text}),
+        .tone = .warning,
+        .bold = true,
+    });
+}
+
+fn prefixedRenderText(allocator: std.mem.Allocator, prefix: []const u8, text: []const u8) ![]const u8 {
+    if (prefix.len == 0) return text;
+    if (text.len == 0) return prefix;
+    return try std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, text });
 }
 
 fn appendWrappedLines(
@@ -1922,7 +1954,21 @@ fn appendWrappedLines(
     tone: ChatTone,
     highlight: HighlightKind,
 ) !void {
+    try appendWrappedLinesWithPrefix(allocator, lines, text, width, tone, highlight, "");
+}
+
+fn appendWrappedLinesWithPrefix(
+    allocator: std.mem.Allocator,
+    lines: *std.ArrayList(RenderLine),
+    text: []const u8,
+    width: usize,
+    tone: ChatTone,
+    highlight: HighlightKind,
+    prefix: []const u8,
+) !void {
     if (width == 0) return;
+    const prefix_width = displayWidth(prefix);
+    const content_width = if (prefix_width >= width) 1 else width - prefix_width;
     var source_lines = std.mem.splitScalar(u8, text, '\n');
     while (source_lines.next()) |source_line| {
         if (source_line.len == 0) {
@@ -1930,20 +1976,18 @@ fn appendWrappedLines(
             continue;
         }
         var remainder = source_line;
-        while (remainder.len > width) {
-            var split_at = width;
-            if (std.mem.lastIndexOfScalar(u8, remainder[0..width], ' ')) |space_index| {
-                if (space_index > 0) split_at = space_index;
-            }
+        while (displayWidth(remainder) > content_width) {
+            const split_at = wrapTextByteIndex(remainder, content_width);
+            const segment = trimAscii(remainder[0..split_at]);
             try lines.append(allocator, .{
-                .text = trimAscii(remainder[0..split_at]),
+                .text = try prefixedRenderText(allocator, prefix, segment),
                 .tone = tone,
                 .highlight = highlight,
             });
             remainder = trimAscii(remainder[split_at..]);
         }
         try lines.append(allocator, .{
-            .text = remainder,
+            .text = try prefixedRenderText(allocator, prefix, remainder),
             .tone = tone,
             .highlight = highlight,
         });
@@ -1990,7 +2034,7 @@ fn writeFooterLine(writer: anytype, width: usize, text: []const u8) !void {
 }
 
 fn writePaddedLine(writer: anytype, line: RenderLine, width: usize) !void {
-    try writePaddedTone(writer, line.text, width, line.tone, false, line.highlight);
+    try writePaddedTone(writer, line.text, width, line.tone, line.bold, line.highlight);
 }
 
 fn writePaddedTone(writer: anytype, text: []const u8, width: usize, tone: ChatTone, bold: bool, highlight: HighlightKind) !void {
@@ -2009,6 +2053,7 @@ fn writePaddedTone(writer: anytype, text: []const u8, width: usize, tone: ChatTo
 fn writePlain(writer: anytype, text: []const u8, tone: ChatTone, highlight: HighlightKind) !void {
     switch (highlight) {
         .json => try writeJsonHighlighted(writer, text),
+        .summary => try writeSummaryHighlighted(writer, text, tone),
         else => {
             try writer.writeAll(colorForTone(tone));
             try writer.writeAll(text);
@@ -2066,25 +2111,535 @@ fn writeJsonHighlighted(writer: anytype, text: []const u8) !void {
     }
 }
 
+fn writeSummaryHighlighted(writer: anytype, text: []const u8, tone: ChatTone) !void {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    var first_line = true;
+    while (lines.next()) |line| {
+        if (!first_line) try writer.writeByte('\n');
+        first_line = false;
+        try writeSummaryLine(writer, line, tone);
+    }
+}
+
+fn writeSummaryLine(writer: anytype, line: []const u8, tone: ChatTone) !void {
+    const trimmed = trimAscii(line);
+    if (trimmed.len == 0) return;
+
+    if (std.mem.startsWith(u8, trimmed, "- ")) {
+        try writer.writeAll("\x1b[38;5;214m- \x1b[0m");
+        try writer.writeAll(colorForTone(tone));
+        try writer.writeAll(trimmed[2..]);
+        try writer.writeAll("\x1b[0m");
+        return;
+    }
+
+    if (std.mem.indexOfScalar(u8, line, ':')) |colon_index| {
+        const key = trimAscii(line[0..colon_index]);
+        if (isSummaryKey(key)) {
+            try writer.writeAll("\x1b[38;5;214m");
+            try writer.writeAll(key);
+            try writer.writeAll("\x1b[38;5;244m:\x1b[0m");
+            const rest = trimAscii(line[colon_index + 1 ..]);
+            if (rest.len > 0) {
+                try writer.writeAll(" ");
+                try writer.writeAll(colorForTone(tone));
+                try writer.writeAll(rest);
+                try writer.writeAll("\x1b[0m");
+            }
+            return;
+        }
+    }
+
+    try writer.writeAll(colorForTone(tone));
+    try writer.writeAll(line);
+    try writer.writeAll("\x1b[0m");
+}
+
+fn isSummaryKey(text: []const u8) bool {
+    if (text.len == 0 or text.len > 24) return false;
+    for (text) |char| {
+        if (!(std.ascii.isAlphanumeric(char) or char == ' ' or char == '_' or char == '-')) return false;
+    }
+    return true;
+}
+
+const DecodedScalar = struct {
+    codepoint: u21,
+    byte_len: usize,
+};
+
+fn decodeUtf8Scalar(text: []const u8, index: usize) DecodedScalar {
+    if (index >= text.len) return .{ .codepoint = 0, .byte_len = 0 };
+
+    const first = text[index];
+    const byte_len = std.unicode.utf8ByteSequenceLength(first) catch return .{
+        .codepoint = first,
+        .byte_len = 1,
+    };
+    if (index + byte_len > text.len) return .{
+        .codepoint = first,
+        .byte_len = 1,
+    };
+
+    const codepoint = std.unicode.utf8Decode(text[index .. index + byte_len]) catch return .{
+        .codepoint = first,
+        .byte_len = 1,
+    };
+    return .{
+        .codepoint = codepoint,
+        .byte_len = byte_len,
+    };
+}
+
+fn displayWidth(text: []const u8) usize {
+    var width: usize = 0;
+    var index: usize = 0;
+    while (index < text.len) {
+        const scalar = decodeUtf8Scalar(text, index);
+        width += cellWidthForCodepoint(scalar.codepoint);
+        index += scalar.byte_len;
+    }
+    return width;
+}
+
+fn wrapTextByteIndex(text: []const u8, width: usize) usize {
+    if (text.len == 0 or width == 0) return 0;
+
+    var used_width: usize = 0;
+    var index: usize = 0;
+    var last_space: ?usize = null;
+
+    while (index < text.len) {
+        const scalar = decodeUtf8Scalar(text, index);
+        const scalar_width = cellWidthForCodepoint(scalar.codepoint);
+        if (used_width + scalar_width > width) break;
+        if (scalar.codepoint == ' ') last_space = index;
+        used_width += scalar_width;
+        index += scalar.byte_len;
+    }
+
+    if (index >= text.len) return text.len;
+    if (last_space) |space_index| {
+        if (space_index > 0) return space_index;
+    }
+    if (index == 0) return decodeUtf8Scalar(text, 0).byte_len;
+    return index;
+}
+
+fn utf8PrefixByCellWidth(text: []const u8, width: usize) []const u8 {
+    if (width == 0) return "";
+
+    var used_width: usize = 0;
+    var index: usize = 0;
+    while (index < text.len) {
+        const scalar = decodeUtf8Scalar(text, index);
+        const scalar_width = cellWidthForCodepoint(scalar.codepoint);
+        if (used_width + scalar_width > width) break;
+        used_width += scalar_width;
+        index += scalar.byte_len;
+    }
+    return text[0..index];
+}
+
+fn safeUtf8PrefixByBytes(text: []const u8, max_bytes: usize) []const u8 {
+    if (text.len <= max_bytes) return text;
+
+    var index: usize = 0;
+    while (index < text.len and index < max_bytes) {
+        const scalar = decodeUtf8Scalar(text, index);
+        if (index + scalar.byte_len > max_bytes) break;
+        index += scalar.byte_len;
+    }
+    return text[0..index];
+}
+
+fn cellWidthForCodepoint(codepoint: u21) usize {
+    if (codepoint == 0) return 0;
+    if (codepoint < 32 or (codepoint >= 0x7f and codepoint < 0xa0)) return 0;
+    if (isCombiningCodepoint(codepoint) or codepoint == 0x200d) return 0;
+    if (isWideCodepoint(codepoint)) return 2;
+    return 1;
+}
+
+fn isCombiningCodepoint(codepoint: u21) bool {
+    return (codepoint >= 0x0300 and codepoint <= 0x036f) or
+        (codepoint >= 0x0483 and codepoint <= 0x0489) or
+        (codepoint >= 0x0591 and codepoint <= 0x05bd) or
+        codepoint == 0x05bf or
+        (codepoint >= 0x05c1 and codepoint <= 0x05c2) or
+        (codepoint >= 0x05c4 and codepoint <= 0x05c5) or
+        codepoint == 0x05c7 or
+        (codepoint >= 0x0610 and codepoint <= 0x061a) or
+        (codepoint >= 0x064b and codepoint <= 0x065f) or
+        codepoint == 0x0670 or
+        (codepoint >= 0x06d6 and codepoint <= 0x06dc) or
+        (codepoint >= 0x06df and codepoint <= 0x06e4) or
+        (codepoint >= 0x06e7 and codepoint <= 0x06e8) or
+        (codepoint >= 0x06ea and codepoint <= 0x06ed) or
+        (codepoint >= 0x0711 and codepoint <= 0x0711) or
+        (codepoint >= 0x0730 and codepoint <= 0x074a) or
+        (codepoint >= 0x07a6 and codepoint <= 0x07b0) or
+        (codepoint >= 0x07eb and codepoint <= 0x07f3) or
+        (codepoint >= 0x0816 and codepoint <= 0x0819) or
+        (codepoint >= 0x081b and codepoint <= 0x0823) or
+        (codepoint >= 0x0825 and codepoint <= 0x0827) or
+        (codepoint >= 0x0829 and codepoint <= 0x082d) or
+        (codepoint >= 0x0859 and codepoint <= 0x085b) or
+        (codepoint >= 0x08d3 and codepoint <= 0x08e1) or
+        (codepoint >= 0x08e3 and codepoint <= 0x0902) or
+        codepoint == 0x093a or
+        codepoint == 0x093c or
+        (codepoint >= 0x0941 and codepoint <= 0x0948) or
+        codepoint == 0x094d or
+        (codepoint >= 0x0951 and codepoint <= 0x0957) or
+        (codepoint >= 0x0962 and codepoint <= 0x0963) or
+        (codepoint >= 0x0981 and codepoint <= 0x0981) or
+        codepoint == 0x09bc or
+        codepoint == 0x09c1 or
+        codepoint == 0x09c4 or
+        codepoint == 0x09cd or
+        (codepoint >= 0x09e2 and codepoint <= 0x09e3) or
+        codepoint == 0x0a01 or
+        codepoint == 0x0a02 or
+        codepoint == 0x0a3c or
+        (codepoint >= 0x0a41 and codepoint <= 0x0a42) or
+        (codepoint >= 0x0a47 and codepoint <= 0x0a48) or
+        (codepoint >= 0x0a4b and codepoint <= 0x0a4d) or
+        (codepoint >= 0x0a51 and codepoint <= 0x0a51) or
+        (codepoint >= 0x0a70 and codepoint <= 0x0a71) or
+        codepoint == 0x0a75 or
+        codepoint == 0x0abc or
+        (codepoint >= 0x0ac1 and codepoint <= 0x0ac5) or
+        codepoint == 0x0ac7 or
+        codepoint == 0x0acd or
+        (codepoint >= 0x0ae2 and codepoint <= 0x0ae3) or
+        codepoint == 0x0b3c or
+        codepoint == 0x0b3f or
+        codepoint == 0x0b41 or
+        codepoint == 0x0b44 or
+        codepoint == 0x0b4d or
+        (codepoint >= 0x0b56 and codepoint <= 0x0b56) or
+        (codepoint >= 0x0b62 and codepoint <= 0x0b63) or
+        codepoint == 0x0b82 or
+        codepoint == 0x0bc0 or
+        codepoint == 0x0bcd or
+        codepoint == 0x0c00 or
+        codepoint == 0x0c04 or
+        (codepoint >= 0x0c3e and codepoint <= 0x0c40) or
+        (codepoint >= 0x0c46 and codepoint <= 0x0c48) or
+        (codepoint >= 0x0c4a and codepoint <= 0x0c4d) or
+        (codepoint >= 0x0c55 and codepoint <= 0x0c56) or
+        (codepoint >= 0x0c62 and codepoint <= 0x0c63) or
+        codepoint == 0x0c81 or
+        codepoint == 0x0cbc or
+        codepoint == 0x0cbf or
+        codepoint == 0x0cc6 or
+        (codepoint >= 0x0ccc and codepoint <= 0x0ccd) or
+        (codepoint >= 0x0ce2 and codepoint <= 0x0ce3) or
+        codepoint == 0x0d00 or
+        codepoint == 0x0d01 or
+        (codepoint >= 0x0d3b and codepoint <= 0x0d3c) or
+        codepoint == 0x0d41 or
+        (codepoint >= 0x0d44 and codepoint <= 0x0d44) or
+        codepoint == 0x0d4d or
+        (codepoint >= 0x0d62 and codepoint <= 0x0d63) or
+        codepoint == 0x0dca or
+        (codepoint >= 0x0dd2 and codepoint <= 0x0dd4) or
+        codepoint == 0x0dd6 or
+        codepoint == 0x0e31 or
+        (codepoint >= 0x0e34 and codepoint <= 0x0e3a) or
+        (codepoint >= 0x0e47 and codepoint <= 0x0e4e) or
+        codepoint == 0x0eb1 or
+        (codepoint >= 0x0eb4 and codepoint <= 0x0eb9) or
+        (codepoint >= 0x0ebb and codepoint <= 0x0ebc) or
+        (codepoint >= 0x0ec8 and codepoint <= 0x0ecd) or
+        codepoint == 0x0f18 or
+        codepoint == 0x0f19 or
+        codepoint == 0x0f35 or
+        codepoint == 0x0f37 or
+        codepoint == 0x0f39 or
+        (codepoint >= 0x0f71 and codepoint <= 0x0f7e) or
+        (codepoint >= 0x0f80 and codepoint <= 0x0f84) or
+        (codepoint >= 0x0f86 and codepoint <= 0x0f87) or
+        (codepoint >= 0x0f8d and codepoint <= 0x0f97) or
+        (codepoint >= 0x0f99 and codepoint <= 0x0fbc) or
+        codepoint == 0x0fc6 or
+        (codepoint >= 0x102d and codepoint <= 0x1030) or
+        (codepoint >= 0x1032 and codepoint <= 0x1037) or
+        codepoint == 0x1039 or
+        codepoint == 0x103a or
+        (codepoint >= 0x103d and codepoint <= 0x103e) or
+        (codepoint >= 0x1058 and codepoint <= 0x1059) or
+        (codepoint >= 0x105e and codepoint <= 0x1060) or
+        (codepoint >= 0x1071 and codepoint <= 0x1074) or
+        codepoint == 0x1082 or
+        (codepoint >= 0x1085 and codepoint <= 0x1086) or
+        codepoint == 0x108d or
+        codepoint == 0x109d or
+        (codepoint >= 0x135d and codepoint <= 0x135f) or
+        (codepoint >= 0x1712 and codepoint <= 0x1714) or
+        (codepoint >= 0x1732 and codepoint <= 0x1734) or
+        (codepoint >= 0x1752 and codepoint <= 0x1753) or
+        (codepoint >= 0x1772 and codepoint <= 0x1773) or
+        (codepoint >= 0x17b4 and codepoint <= 0x17b5) or
+        (codepoint >= 0x17b7 and codepoint <= 0x17bd) or
+        codepoint == 0x17c6 or
+        (codepoint >= 0x17c9 and codepoint <= 0x17d3) or
+        codepoint == 0x17dd or
+        (codepoint >= 0x180b and codepoint <= 0x180d) or
+        codepoint == 0x1885 or
+        codepoint == 0x1886 or
+        (codepoint >= 0x18a9 and codepoint <= 0x18a9) or
+        (codepoint >= 0x1920 and codepoint <= 0x1922) or
+        (codepoint >= 0x1927 and codepoint <= 0x1928) or
+        codepoint == 0x1932 or
+        (codepoint >= 0x1939 and codepoint <= 0x193b) or
+        (codepoint >= 0x1a17 and codepoint <= 0x1a18) or
+        codepoint == 0x1a1b or
+        codepoint == 0x1a56 or
+        (codepoint >= 0x1a58 and codepoint <= 0x1a5e) or
+        codepoint == 0x1a60 or
+        codepoint == 0x1a62 or
+        (codepoint >= 0x1a65 and codepoint <= 0x1a6c) or
+        (codepoint >= 0x1a73 and codepoint <= 0x1a7c) or
+        codepoint == 0x1a7f or
+        (codepoint >= 0x1ab0 and codepoint <= 0x1aff) or
+        (codepoint >= 0x1b00 and codepoint <= 0x1b03) or
+        codepoint == 0x1b34 or
+        codepoint == 0x1b36 or
+        (codepoint >= 0x1b3c and codepoint <= 0x1b3c) or
+        codepoint == 0x1b42 or
+        (codepoint >= 0x1b6b and codepoint <= 0x1b73) or
+        (codepoint >= 0x1b80 and codepoint <= 0x1b81) or
+        (codepoint >= 0x1ba2 and codepoint <= 0x1ba5) or
+        (codepoint >= 0x1ba8 and codepoint <= 0x1ba9) or
+        codepoint == 0x1bab or
+        codepoint == 0x1be6 or
+        (codepoint >= 0x1be8 and codepoint <= 0x1be9) or
+        codepoint == 0x1bed or
+        (codepoint >= 0x1bef and codepoint <= 0x1bf1) or
+        (codepoint >= 0x1c2c and codepoint <= 0x1c33) or
+        (codepoint >= 0x1c36 and codepoint <= 0x1c37) or
+        (codepoint >= 0x1cd0 and codepoint <= 0x1cd2) or
+        (codepoint >= 0x1cd4 and codepoint <= 0x1ce0) or
+        (codepoint >= 0x1ce2 and codepoint <= 0x1ce8) or
+        codepoint == 0x1ced or
+        codepoint == 0x1cf4 or
+        codepoint == 0x1cf8 or
+        codepoint == 0x1cf9 or
+        (codepoint >= 0x1dc0 and codepoint <= 0x1dff) or
+        (codepoint >= 0x20d0 and codepoint <= 0x20ff) or
+        codepoint == 0x2cef or
+        codepoint == 0x2cf1 or
+        (codepoint >= 0x2d7f and codepoint <= 0x2d7f) or
+        (codepoint >= 0x2de0 and codepoint <= 0x2dff) or
+        (codepoint >= 0x302a and codepoint <= 0x302f) or
+        codepoint == 0x3099 or
+        codepoint == 0x309a or
+        (codepoint >= 0xa66f and codepoint <= 0xa672) or
+        (codepoint >= 0xa674 and codepoint <= 0xa67d) or
+        codepoint == 0xa69e or
+        codepoint == 0xa69f or
+        (codepoint >= 0xa6f0 and codepoint <= 0xa6f1) or
+        codepoint == 0xa802 or
+        codepoint == 0xa806 or
+        codepoint == 0xa80b or
+        (codepoint >= 0xa825 and codepoint <= 0xa826) or
+        codepoint == 0xa8c4 or
+        (codepoint >= 0xa8e0 and codepoint <= 0xa8f1) or
+        codepoint == 0xa926 or
+        codepoint == 0xa92d or
+        (codepoint >= 0xa947 and codepoint <= 0xa951) or
+        (codepoint >= 0xa980 and codepoint <= 0xa982) or
+        codepoint == 0xa9b3 or
+        (codepoint >= 0xa9b6 and codepoint <= 0xa9b9) or
+        codepoint == 0xa9bc or
+        codepoint == 0xa9e5 or
+        (codepoint >= 0xaa29 and codepoint <= 0xaa2e) or
+        (codepoint >= 0xaa31 and codepoint <= 0xaa32) or
+        (codepoint >= 0xaa35 and codepoint <= 0xaa36) or
+        codepoint == 0xaa43 or
+        codepoint == 0xaa4c or
+        codepoint == 0xaa7c or
+        codepoint == 0xaab0 or
+        (codepoint >= 0xaab2 and codepoint <= 0xaab4) or
+        (codepoint >= 0xaab7 and codepoint <= 0xaab8) or
+        codepoint == 0xaabe or
+        codepoint == 0xaabf or
+        codepoint == 0xaac1 or
+        (codepoint >= 0xaaec and codepoint <= 0xaaed) or
+        codepoint == 0xaaf6 or
+        (codepoint >= 0xabe5 and codepoint <= 0xabe5) or
+        codepoint == 0xabe8 or
+        codepoint == 0xabed or
+        codepoint == 0xfb1e or
+        (codepoint >= 0xfe00 and codepoint <= 0xfe0f) or
+        (codepoint >= 0xfe20 and codepoint <= 0xfe2f) or
+        (codepoint >= 0x101fd and codepoint <= 0x101fd) or
+        (codepoint >= 0x102e0 and codepoint <= 0x102e0) or
+        (codepoint >= 0x10376 and codepoint <= 0x1037a) or
+        (codepoint >= 0x10a01 and codepoint <= 0x10a03) or
+        (codepoint >= 0x10a05 and codepoint <= 0x10a06) or
+        (codepoint >= 0x10a0c and codepoint <= 0x10a0f) or
+        (codepoint >= 0x10a38 and codepoint <= 0x10a3a) or
+        codepoint == 0x10a3f or
+        (codepoint >= 0x10ae5 and codepoint <= 0x10ae6) or
+        (codepoint >= 0x11001 and codepoint <= 0x11001) or
+        (codepoint >= 0x11038 and codepoint <= 0x11046) or
+        (codepoint >= 0x1107f and codepoint <= 0x11081) or
+        (codepoint >= 0x110b3 and codepoint <= 0x110b6) or
+        (codepoint >= 0x110b9 and codepoint <= 0x110ba) or
+        codepoint == 0x11100 or
+        (codepoint >= 0x11127 and codepoint <= 0x1112b) or
+        (codepoint >= 0x1112d and codepoint <= 0x11134) or
+        codepoint == 0x11173 or
+        (codepoint >= 0x11180 and codepoint <= 0x11181) or
+        (codepoint >= 0x111b6 and codepoint <= 0x111be) or
+        codepoint == 0x111c9 or
+        (codepoint >= 0x1122f and codepoint <= 0x11231) or
+        codepoint == 0x11234 or
+        (codepoint >= 0x11236 and codepoint <= 0x11237) or
+        codepoint == 0x1123e or
+        (codepoint >= 0x112df and codepoint <= 0x112df) or
+        (codepoint >= 0x112e3 and codepoint <= 0x112ea) or
+        codepoint == 0x11300 or
+        codepoint == 0x11301 or
+        codepoint == 0x1133c or
+        codepoint == 0x11340 or
+        codepoint == 0x11366 or
+        (codepoint >= 0x11370 and codepoint <= 0x11374) or
+        (codepoint >= 0x11438 and codepoint <= 0x1143f) or
+        (codepoint >= 0x11442 and codepoint <= 0x11444) or
+        codepoint == 0x11446 or
+        (codepoint >= 0x114b3 and codepoint <= 0x114b8) or
+        codepoint == 0x114ba or
+        (codepoint >= 0x114bf and codepoint <= 0x114c0) or
+        codepoint == 0x114c2 or
+        (codepoint >= 0x115b2 and codepoint <= 0x115b5) or
+        (codepoint >= 0x115bc and codepoint <= 0x115bd) or
+        codepoint == 0x115bf or
+        codepoint == 0x11633 or
+        (codepoint >= 0x1163d and codepoint <= 0x1163d) or
+        codepoint == 0x1163f or
+        codepoint == 0x116ab or
+        (codepoint >= 0x116ad and codepoint <= 0x116ad) or
+        codepoint == 0x116b0 or
+        (codepoint >= 0x116b2 and codepoint <= 0x116b5) or
+        (codepoint >= 0x1171d and codepoint <= 0x1171f) or
+        (codepoint >= 0x11722 and codepoint <= 0x11725) or
+        codepoint == 0x11727 or
+        codepoint == 0x1172b or
+        (codepoint >= 0x1182f and codepoint <= 0x11837) or
+        codepoint == 0x11839 or
+        (codepoint >= 0x11a01 and codepoint <= 0x11a0a) or
+        (codepoint >= 0x11a33 and codepoint <= 0x11a38) or
+        (codepoint >= 0x11a3b and codepoint <= 0x11a3e) or
+        codepoint == 0x11a47 or
+        (codepoint >= 0x11a51 and codepoint <= 0x11a56) or
+        codepoint == 0x11a59 or
+        (codepoint >= 0x11a8a and codepoint <= 0x11a96) or
+        codepoint == 0x11a98 or
+        (codepoint >= 0x11c30 and codepoint <= 0x11c36) or
+        (codepoint >= 0x11c38 and codepoint <= 0x11c3d) or
+        codepoint == 0x11c3f or
+        (codepoint >= 0x11c92 and codepoint <= 0x11ca7) or
+        (codepoint >= 0x11caa and codepoint <= 0x11cb0) or
+        (codepoint >= 0x11cb2 and codepoint <= 0x11cb3) or
+        codepoint == 0x11cb5 or
+        codepoint == 0x11cb6 or
+        (codepoint >= 0x11d31 and codepoint <= 0x11d36) or
+        codepoint == 0x11d3a or
+        (codepoint >= 0x11d3c and codepoint <= 0x11d3d) or
+        (codepoint >= 0x11d3f and codepoint <= 0x11d45) or
+        codepoint == 0x11d47 or
+        (codepoint >= 0x11d90 and codepoint <= 0x11d91) or
+        codepoint == 0x11d95 or
+        codepoint == 0x11d97 or
+        codepoint == 0x11ef3 or
+        codepoint == 0x11ef4 or
+        (codepoint >= 0x16af0 and codepoint <= 0x16af4) or
+        (codepoint >= 0x16b30 and codepoint <= 0x16b36) or
+        (codepoint >= 0x16f8f and codepoint <= 0x16f92) or
+        (codepoint >= 0x1bc9d and codepoint <= 0x1bc9e) or
+        (codepoint >= 0x1d167 and codepoint <= 0x1d169) or
+        (codepoint >= 0x1d17b and codepoint <= 0x1d182) or
+        (codepoint >= 0x1d185 and codepoint <= 0x1d18b) or
+        (codepoint >= 0x1d1aa and codepoint <= 0x1d1ad) or
+        (codepoint >= 0x1d242 and codepoint <= 0x1d244) or
+        (codepoint >= 0x1da00 and codepoint <= 0x1da36) or
+        (codepoint >= 0x1da3b and codepoint <= 0x1da6c) or
+        codepoint == 0x1da75 or
+        codepoint == 0x1da84 or
+        (codepoint >= 0x1da9b and codepoint <= 0x1da9f) or
+        (codepoint >= 0x1daa1 and codepoint <= 0x1daaf) or
+        (codepoint >= 0x1e000 and codepoint <= 0x1e006) or
+        (codepoint >= 0x1e008 and codepoint <= 0x1e018) or
+        (codepoint >= 0x1e01b and codepoint <= 0x1e021) or
+        (codepoint >= 0x1e023 and codepoint <= 0x1e024) or
+        (codepoint >= 0x1e026 and codepoint <= 0x1e02a) or
+        (codepoint >= 0x1e130 and codepoint <= 0x1e136) or
+        (codepoint >= 0x1e2ec and codepoint <= 0x1e2ef) or
+        (codepoint >= 0x1e8d0 and codepoint <= 0x1e8d6) or
+        (codepoint >= 0x1e944 and codepoint <= 0x1e94a) or
+        (codepoint >= 0xe0100 and codepoint <= 0xe01ef);
+}
+
+fn isWideCodepoint(codepoint: u21) bool {
+    return codepoint >= 0x1100 and
+        (codepoint <= 0x115f or
+            codepoint == 0x2329 or
+            codepoint == 0x232a or
+            (codepoint >= 0x2e80 and codepoint <= 0xa4cf and codepoint != 0x303f) or
+            (codepoint >= 0xac00 and codepoint <= 0xd7a3) or
+            (codepoint >= 0xf900 and codepoint <= 0xfaff) or
+            (codepoint >= 0xfe10 and codepoint <= 0xfe19) or
+            (codepoint >= 0xfe30 and codepoint <= 0xfe6f) or
+            (codepoint >= 0xff00 and codepoint <= 0xff60) or
+            (codepoint >= 0xffe0 and codepoint <= 0xffe6) or
+            (codepoint >= 0x1f300 and codepoint <= 0x1f64f) or
+            (codepoint >= 0x1f680 and codepoint <= 0x1f6ff) or
+            (codepoint >= 0x1f900 and codepoint <= 0x1f9ff) or
+            (codepoint >= 0x1fa70 and codepoint <= 0x1faff) or
+            (codepoint >= 0x20000 and codepoint <= 0x3fffd));
+}
+
 fn visibleInputWindow(text: []const u8, cursor: usize, width: usize) struct { text: []const u8, cursor_col: usize } {
     if (width == 0) return .{ .text = "", .cursor_col = 0 };
-    if (text.len <= width) return .{ .text = text, .cursor_col = cursor };
     const safe_cursor = @min(cursor, text.len);
-    var start = if (safe_cursor > width - 1) safe_cursor - (width - 1) else 0;
-    if (start + width > text.len) start = text.len - width;
+    if (displayWidth(text) <= width) {
+        return .{
+            .text = text,
+            .cursor_col = displayWidth(text[0..safe_cursor]),
+        };
+    }
+
+    var start: usize = 0;
+    while (start < safe_cursor and displayWidth(text[start..safe_cursor]) > width) {
+        start += decodeUtf8Scalar(text, start).byte_len;
+    }
+
+    var end = start;
+    var used_width: usize = 0;
+    while (end < text.len) {
+        const scalar = decodeUtf8Scalar(text, end);
+        const scalar_width = cellWidthForCodepoint(scalar.codepoint);
+        if (used_width + scalar_width > width) break;
+        used_width += scalar_width;
+        end += scalar.byte_len;
+    }
     return .{
-        .text = text[start .. start + width],
-        .cursor_col = safe_cursor - start,
+        .text = text[start..end],
+        .cursor_col = displayWidth(text[start..safe_cursor]),
     };
 }
 
 fn visibleLen(text: []const u8) usize {
-    return text.len;
+    return displayWidth(text);
 }
 
 fn clipText(text: []const u8, width: usize) []const u8 {
-    if (text.len <= width) return text;
-    return text[0..width];
+    if (displayWidth(text) <= width) return text;
+    return utf8PrefixByCellWidth(text, width);
 }
 
 fn colorForTone(tone: ChatTone) []const u8 {
@@ -2305,7 +2860,7 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
     const decision = response.value;
     try writeTurnLog(state.runtime_session.active_log_path, "model_output", response.raw_text);
     const decision_summary = summarizeDecanusDecisionForUi(allocator, decision) catch prettyPrintJson(allocator, response.raw_text) catch response.raw_text;
-    emitStreamFinalize(hooks, "decanus", decision_summary, .plain);
+    emitStreamFinalize(hooks, "decanus", decision_summary, .summary);
 
     if (decision.current_goal.len > 0) {
         state.mission.current_goal = decision.current_goal;
@@ -2481,7 +3036,7 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
     const result = response.value;
     try writeTurnLog(state.runtime_session.active_log_path, "model_output", response.raw_text);
     const result_summary = summarizeSpecialistResultForUi(allocator, result) catch prettyPrintJson(allocator, response.raw_text) catch response.raw_text;
-    emitStreamFinalize(hooks, actor, result_summary, .plain);
+    emitStreamFinalize(hooks, actor, result_summary, .summary);
 
     if (result.tool_requests.len > 0 or eql(result.action, "tool_request")) {
         emitLog(
@@ -3835,7 +4390,7 @@ fn writeTurnLog(path: []const u8, section: []const u8, content: []const u8) !voi
 
 fn truncateText(allocator: std.mem.Allocator, text: []const u8, max_chars: usize) ![]const u8 {
     if (text.len <= max_chars) return text;
-    return try std.fmt.allocPrint(allocator, "{s}\n...[truncated]...", .{text[0..max_chars]});
+    return try std.fmt.allocPrint(allocator, "{s}\n...[truncated]...", .{safeUtf8PrefixByBytes(text, max_chars)});
 }
 
 fn unixTimestampString(allocator: std.mem.Allocator) ![]const u8 {
@@ -3987,6 +4542,23 @@ test "appendWrappedLines respects width boundaries" {
     try testing.expect(lines.items.len >= 3);
     for (lines.items) |line| {
         try testing.expect(line.text.len <= 5);
+    }
+}
+
+test "displayWidth counts wide glyphs as terminal cells" {
+    const testing = std.testing;
+    try testing.expectEqual(@as(usize, 4), displayWidth("A🚀B"));
+}
+
+test "appendWrappedLines keeps wide glyphs inside the target width" {
+    const testing = std.testing;
+    var lines: std.ArrayList(RenderLine) = .empty;
+    defer lines.deinit(testing.allocator);
+
+    try appendWrappedLines(testing.allocator, &lines, "alpha 🚀 beta gamma", 8, .info, .plain);
+    try testing.expect(lines.items.len >= 2);
+    for (lines.items) |line| {
+        try testing.expect(displayWidth(line.text) <= 8);
     }
 }
 
@@ -4320,7 +4892,7 @@ test "processRuntimeEvents keeps snapshot data after freeing events" {
 
     const frame = try buildRenderFrame(testing.allocator, &tui, .{ .rows = 24, .cols = 140 });
     defer testing.allocator.free(frame.screen);
-    try testing.expect(std.mem.indexOf(u8, frame.screen, "actor   artifex") != null);
+    try testing.expect(std.mem.indexOf(u8, frame.screen, "actor: artifex") != null);
     try testing.expect(std.mem.indexOf(u8, frame.screen, "LATEST") != null);
     try testing.expect(std.mem.indexOf(u8, frame.screen, "read_file README.md") != null);
 }
