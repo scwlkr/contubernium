@@ -1915,8 +1915,8 @@ fn buildRenderFrame(allocator: std.mem.Allocator, tui: *const TuiSession, size: 
     const temp_allocator = arena.allocator();
 
     const sidebar_width: usize = if (size.cols >= 124) 38 else 0;
-    const gutter_width: usize = if (sidebar_width > 0) 4 else 0;
-    const body_width = if (sidebar_width > 0 and size.cols > sidebar_width + gutter_width + 24) size.cols - sidebar_width - gutter_width else size.cols;
+    const divider_width: usize = if (sidebar_width > 0) roman_divider_width else 0;
+    const body_width = if (sidebar_width > 0 and size.cols > sidebar_width + divider_width + 24) size.cols - sidebar_width - divider_width else size.cols;
     const header_height: usize = 3;
     const footer_height: usize = 4;
     const chat_height: usize = if (size.rows > header_height + footer_height) size.rows - header_height - footer_height else 1;
@@ -1983,7 +1983,7 @@ fn buildRenderFrame(allocator: std.mem.Allocator, tui: *const TuiSession, size: 
         if (sidebar_width > 0) {
             const side_line = if (body_row < side_lines.items.len) side_lines.items[body_row] else RenderLine{};
             try writePaddedLine(writer, chat_line, body_width);
-            try writer.writeAll("\x1b[38;5;238m  │ \x1b[0m");
+            try writeRomanDividerLegacy(writer, body_row, chat_height);
             try writePaddedLine(writer, side_line, sidebar_width);
             try writer.writeByte('\n');
         } else {
@@ -2824,6 +2824,45 @@ fn colorForTone(tone: ChatTone) []const u8 {
         .warning => "\x1b[38;5;214m",
         else => "\x1b[38;5;252m",
     };
+}
+
+fn ansiForRomanDividerPixel(pixel: RomanDividerPixel) []const u8 {
+    return switch (pixel) {
+        .bg => "\x1b[48;5;232m",
+        .gold => "\x1b[48;5;179m",
+        .gold_shadow => "\x1b[48;5;136m",
+        .ivory => "\x1b[48;5;252m",
+        .stone_light => "\x1b[48;5;251m",
+        .stone_mid => "\x1b[48;5;247m",
+        .stone_dark => "\x1b[48;5;242m",
+    };
+}
+
+fn romanDividerPixelFromMask(mask_pixel: u8) RomanDividerPixel {
+    return switch (mask_pixel) {
+        @intFromEnum(RomanDividerPixel.bg) => .bg,
+        @intFromEnum(RomanDividerPixel.gold) => .gold,
+        @intFromEnum(RomanDividerPixel.gold_shadow) => .gold_shadow,
+        @intFromEnum(RomanDividerPixel.ivory) => .ivory,
+        @intFromEnum(RomanDividerPixel.stone_light) => .stone_light,
+        @intFromEnum(RomanDividerPixel.stone_mid) => .stone_mid,
+        @intFromEnum(RomanDividerPixel.stone_dark) => .stone_dark,
+        else => .bg,
+    };
+}
+
+fn writeRomanDividerLegacy(writer: anytype, row: usize, height: usize) !void {
+    const mask = romanDividerMaskRow(row, height);
+    var index: usize = 0;
+    while (index < mask.len) {
+        const pixel = romanDividerPixelFromMask(mask[index]);
+        var next = index + 1;
+        while (next < mask.len and mask[next] == mask[index]) : (next += 1) {}
+        try writer.writeAll(ansiForRomanDividerPixel(pixel));
+        try writer.writeByteNTimes(' ', next - index);
+        index = next;
+    }
+    try writer.writeAll("\x1b[0m");
 }
 
 fn toUpperAscii(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
@@ -5892,6 +5931,21 @@ const roman_gold = vaxis.Color.rgbFromUint(0xc8a65a);
 const roman_blue = vaxis.Color.rgbFromUint(0x5e95d8);
 const roman_success = vaxis.Color.rgbFromUint(0x8fd19a);
 const roman_danger = vaxis.Color.rgbFromUint(0xd47b72);
+const roman_gold_shadow = vaxis.Color.rgbFromUint(0x8d6a32);
+const roman_stone_light = vaxis.Color.rgbFromUint(0xd8d1c4);
+const roman_stone_mid = vaxis.Color.rgbFromUint(0xb4ada2);
+const roman_stone_dark = vaxis.Color.rgbFromUint(0x7b756b);
+const roman_divider_width: usize = 9;
+
+const RomanDividerPixel = enum(u8) {
+    bg = '.',
+    gold = 'g',
+    gold_shadow = 'h',
+    ivory = 'i',
+    stone_light = 'l',
+    stone_mid = 'm',
+    stone_dark = 'd',
+};
 
 fn clampU16(value: usize) u16 {
     return @intCast(@min(value, @as(usize, std.math.maxInt(u16))));
@@ -5989,6 +6043,54 @@ fn headingStyle() vaxis.Style {
 
 fn overlayStyle() vaxis.Style {
     return .{ .fg = roman_ivory, .bg = roman_panel_alt };
+}
+
+fn romanDividerMaskRow(row: usize, height: usize) []const u8 {
+    if (height <= 2) return "..dlild..";
+    if (height <= 5) {
+        if (row == 0) return ".ghhhhhg.";
+        if (row + 1 == height) return ".hgggggh.";
+        return "..dlild..";
+    }
+
+    if (row == 0) return ".ghhhhhg.";
+    if (row == 1) return ".hgggggh.";
+    if (row == 2) return ".iimmmii.";
+    if (row + 3 == height) return "..dmmmd..";
+    if (row + 2 == height) return ".giiiiig.";
+    if (row + 1 == height) return ".hgggggh.";
+    return if (row % 2 == 0) "..dlild.." else "..dlmld..";
+}
+
+fn romanDividerPixelStyle(pixel: RomanDividerPixel) vaxis.Style {
+    return switch (pixel) {
+        .bg => .{ .fg = roman_bg, .bg = roman_bg },
+        .gold => .{ .fg = roman_gold, .bg = roman_gold },
+        .gold_shadow => .{ .fg = roman_gold_shadow, .bg = roman_gold_shadow },
+        .ivory => .{ .fg = roman_ivory, .bg = roman_ivory },
+        .stone_light => .{ .fg = roman_stone_light, .bg = roman_stone_light },
+        .stone_mid => .{ .fg = roman_stone_mid, .bg = roman_stone_mid },
+        .stone_dark => .{ .fg = roman_stone_dark, .bg = roman_stone_dark },
+    };
+}
+
+fn drawRomanDivider(win: vaxis.Window) void {
+    fillStyled(win, shellStyle());
+    var cells: [roman_divider_width]u8 = undefined;
+    @memset(&cells, ' ');
+
+    var row: usize = 0;
+    while (row < win.height) : (row += 1) {
+        const mask = romanDividerMaskRow(row, win.height);
+        var start: usize = 0;
+        while (start < mask.len) {
+            const pixel = romanDividerPixelFromMask(mask[start]);
+            var end = start + 1;
+            while (end < mask.len and mask[end] == mask[start]) : (end += 1) {}
+            drawText(win, row, start, cells[0 .. end - start], romanDividerPixelStyle(pixel));
+            start = end;
+        }
+    }
 }
 
 fn toneStyle(kind: TimelineEntryKind, tone: ChatTone, bold: bool, highlight: HighlightKind) vaxis.Style {
@@ -6415,8 +6517,9 @@ fn renderSessionUi(allocator: std.mem.Allocator, root: vaxis.Window, ui: *VaxisU
     const main_top: usize = 2;
     const composer_y = @as(usize, shell.height) -| composer_height;
     const rail_width: usize = if (shouldShowRail(ui, shell.width)) 30 else 0;
-    const gap_width: usize = if (rail_width > 0) 2 else 0;
-    const transcript_width = @as(usize, shell.width) -| 2 -| rail_width -| gap_width;
+    const divider_width: usize = if (rail_width > 0) roman_divider_width else 0;
+    const rail_gap_width: usize = if (rail_width > 0) 1 else 0;
+    const transcript_width = @as(usize, shell.width) -| 2 -| rail_width -| divider_width -| rail_gap_width;
     const transcript_height = composer_y -| main_top;
 
     const transcript_win = shell.child(.{
@@ -6453,8 +6556,16 @@ fn renderSessionUi(allocator: std.mem.Allocator, root: vaxis.Window, ui: *VaxisU
     }
 
     if (rail_width > 0) {
+        const divider_win = shell.child(.{
+            .x_off = clampI17(1 + transcript_width),
+            .y_off = clampI17(main_top),
+            .width = clampU16(divider_width),
+            .height = clampU16(transcript_height),
+        });
+        drawRomanDivider(divider_win);
+
         const rail_shell = shell.child(.{
-            .x_off = clampI17(1 + transcript_width + gap_width),
+            .x_off = clampI17(1 + transcript_width + divider_width + rail_gap_width),
             .y_off = clampI17(main_top),
             .width = clampU16(rail_width),
             .height = clampU16(transcript_height),
@@ -6464,15 +6575,22 @@ fn renderSessionUi(allocator: std.mem.Allocator, root: vaxis.Window, ui: *VaxisU
             },
         });
         fillStyled(rail_shell, panelStyle());
+        const rail_content = rail_shell.child(.{
+            .x_off = 1,
+            .y_off = 1,
+            .width = rail_shell.width -| 2,
+            .height = rail_shell.height -| 2,
+        });
+        fillStyled(rail_content, panelStyle());
         var rail_lines: std.ArrayList(VaxisRenderLine) = .empty;
         defer rail_lines.deinit(allocator);
-        try buildRailLinesVaxis(allocator, ui, &rail_lines, rail_width - 2);
+        try buildRailLinesVaxis(allocator, ui, &rail_lines, rail_content.width);
         var rail_row: usize = 0;
-        while (rail_row < rail_shell.height and rail_row < rail_lines.items.len) : (rail_row += 1) {
-            drawVaxisRenderLine(rail_shell.child(.{
+        while (rail_row < rail_content.height and rail_row < rail_lines.items.len) : (rail_row += 1) {
+            drawVaxisRenderLine(rail_content.child(.{
                 .x_off = 0,
                 .y_off = clampI17(rail_row),
-                .width = rail_shell.width,
+                .width = rail_content.width,
                 .height = 1,
             }), 0, rail_lines.items[rail_row]);
         }
@@ -6779,6 +6897,28 @@ test "appendWrappedLines keeps wide glyphs inside the target width" {
     }
 }
 
+test "romanDividerMaskRow keeps a fixed pixel width" {
+    const testing = std.testing;
+    for ([_]usize{ 2, 5, 12 }) |height| {
+        var row: usize = 0;
+        while (row < height) : (row += 1) {
+            const mask = romanDividerMaskRow(row, height);
+            try testing.expectEqual(roman_divider_width, mask.len);
+        }
+    }
+}
+
+test "romanDividerMaskRow keeps outer gutter on tall columns" {
+    const testing = std.testing;
+    const height: usize = 12;
+    var row: usize = 0;
+    while (row < height) : (row += 1) {
+        const mask = romanDividerMaskRow(row, height);
+        try testing.expectEqual(@as(u8, '.'), mask[0]);
+        try testing.expectEqual(@as(u8, '.'), mask[mask.len - 1]);
+    }
+}
+
 test "buildRenderFrame places cursor after prompt and input" {
     const testing = std.testing;
     var tui = initTestTui(testing.allocator);
@@ -6805,6 +6945,7 @@ test "buildRenderFrame includes sidebar on wide terminals" {
     defer testing.allocator.free(frame.screen);
 
     try testing.expect(std.mem.indexOf(u8, frame.screen, "LIVE CONTEXT") != null);
+    try testing.expect(std.mem.indexOf(u8, frame.screen, "\x1b[48;5;179m") != null);
 }
 
 test "buildRenderFrame omits sidebar on narrow terminals" {
