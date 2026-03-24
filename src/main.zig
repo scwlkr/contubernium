@@ -771,6 +771,10 @@ fn runMain(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     const command = args[1];
+    if (eql(command, "help") or eql(command, "--help") or eql(command, "-h")) {
+        try printUsage();
+        return;
+    }
     if (eql(command, "init")) {
         try cmdInit(allocator);
         return;
@@ -814,6 +818,7 @@ fn printUsage() !void {
         \\Contubernium local runtime
         \\
         \\usage:
+        \\  contubernium
         \\  contubernium init
         \\  contubernium doctor
         \\  contubernium models list
@@ -822,16 +827,16 @@ fn printUsage() !void {
         \\  contubernium resume
         \\  contubernium ui [--vaxis|--legacy]
         \\
+        \\`contubernium` scaffolds .contubernium in the current directory if needed
+        \\and starts the interactive UI.
+        \\`contubernium init` only writes the runtime scaffold.
+        \\
     , .{});
 }
 
 fn cmdInit(allocator: std.mem.Allocator) !void {
     try scaffoldProject(allocator);
     try stdoutPrint("initialized project runtime in {s}\n", .{runtime_dir_name});
-    if (shouldLaunchInteractiveUi()) {
-        try stdoutPrint("starting interactive mode\n", .{});
-        try cmdUi(allocator, &.{});
-    }
 }
 
 fn cmdDoctor(allocator: std.mem.Allocator) !void {
@@ -4757,10 +4762,6 @@ fn resolveConfigPath(allocator: std.mem.Allocator) ![]const u8 {
 fn pathExists(path: []const u8) bool {
     std.fs.cwd().access(path, .{}) catch return false;
     return true;
-}
-
-fn shouldLaunchInteractiveUi() bool {
-    return std.posix.isatty(std.posix.STDIN_FILENO) and std.posix.isatty(std.posix.STDOUT_FILENO);
 }
 
 fn pathIsSafeForWrite(path: []const u8) bool {

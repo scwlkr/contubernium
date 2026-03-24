@@ -52,50 +52,60 @@ In practice:
 4. The chosen specialist completes the scoped invocation and returns control to `decanus`.
 5. `decanus` either invokes the next tool or writes the final response.
 
-## 🛠️ Usage
+## 🛠️ Quick Start
 
-To install the global CLI:
+Prerequisites:
+
+- `git`
+- `zig 0.15.2`
+
+Quick install from GitHub:
 
 ```bash
-/path/to/Contubernium/install.sh
+curl -fsSL https://raw.githubusercontent.com/scwlkr/contubernium/main/install.sh | bash
 ```
 
-Then, from any project directory:
+The installer builds the CLI and installs `contubernium` into `~/.local/bin` by default, or `~/bin` if that directory is already on your `PATH`. If the install directory is not on your `PATH`, the script prints the exact `export` line to add.
+
+To start Contubernium in any project directory:
+
+```bash
+cd ~/Desktop/dev/test_deez
+contubernium
+```
+
+On first run, `contubernium` creates `.contubernium/` in the current directory and writes:
+
+- `.contubernium/config.json`
+- `.contubernium/state.json`
+- `.contubernium/prompts/`
+- `.contubernium/logs/`
+
+If you want to scaffold the project files without opening the interactive UI, run:
 
 ```bash
 contubernium init
 ```
 
-When you run `contubernium init` in a normal terminal session, it scaffolds `.contubernium/` and immediately opens the full-screen Contubernium command tent.
-
-If you still want the older bootstrap script that symlinks shared assets into a workspace, you can also run:
+If you prefer to install from a local clone instead of the one-line GitHub bootstrap:
 
 ```bash
-/path/to/Contubernium/init.sh
+git clone https://github.com/scwlkr/contubernium.git
+cd contubernium
+./install.sh
 ```
 
-This script will:
-1. Safely symlink the `.agents` directory to your local working directory.
-2. Copy `templates/contubernium_state.template.json` into a local `contubernium_state.json`.
-3. Symlink the packaged prompt assets into a local `prompts/` directory.
-4. Copy `templates/contubernium.config.template.json` into a local `contubernium.config.json`.
-5. Prepare `.contubernium/logs/` for runtime turn logs.
-6. Start the workspace in a commander-first loop with `current_actor` set to `decanus`.
+If you still want the older bootstrap script that symlinks shared assets into a workspace, you can run `./init.sh` from a local clone.
 
 ## Local Model Runtime
 
 Contubernium now includes a standalone Zig CLI for running the commander/specialist loop against local models from any project directory.
 
-Install the command globally:
-
-```bash
-/path/to/Contubernium/install.sh
-```
-
 Main commands:
 
 ```bash
 zig build test
+contubernium
 contubernium init
 contubernium doctor
 contubernium models list
@@ -113,7 +123,7 @@ What `contubernium init` creates in the current project:
 - `.contubernium/prompts/`
 - `.contubernium/logs/`
 
-Running `contubernium` with no arguments starts the same full-screen Roman-styled TUI. Running `contubernium ui` does the same thing explicitly.
+Running `contubernium` with no arguments initializes `.contubernium/` if needed and starts the full-screen Roman-styled TUI. Running `contubernium ui` does the same thing explicitly. Running `contubernium init` only writes the runtime scaffold.
 
 Validation:
 
