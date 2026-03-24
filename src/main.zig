@@ -2839,7 +2839,23 @@ fn ansiForRomanDividerPixel(pixel: RomanDividerPixel) []const u8 {
 }
 
 fn romanDividerInset() usize {
-    return (roman_divider_lane_width - roman_divider_width) / 2;
+    return romanDividerGutters(roman_divider_lane_width).leading;
+}
+
+const RomanDividerGutters = struct {
+    leading: usize,
+    trailing: usize,
+};
+
+fn romanDividerGutters(width: usize) RomanDividerGutters {
+    if (width <= roman_divider_width) return .{ .leading = 0, .trailing = 0 };
+    const slack = width - roman_divider_width;
+    const leading = @min(roman_divider_leading_gutter, slack);
+    return .{ .leading = leading, .trailing = slack - leading };
+}
+
+fn romanDividerTrailingGutter() usize {
+    return romanDividerGutters(roman_divider_lane_width).trailing;
 }
 
 fn romanDividerPixelFromMask(mask_pixel: u8) RomanDividerPixel {
@@ -2857,8 +2873,9 @@ fn romanDividerPixelFromMask(mask_pixel: u8) RomanDividerPixel {
 
 fn writeRomanDividerLegacy(writer: anytype, row: usize, height: usize) !void {
     const mask = romanDividerMaskRow(row, height);
-    const inset = romanDividerInset();
-    const trailing = roman_divider_lane_width - roman_divider_width - inset;
+    const gutters = romanDividerGutters(roman_divider_lane_width);
+    const inset = gutters.leading;
+    const trailing = gutters.trailing;
     try writer.writeAll(ansiForRomanDividerPixel(.bg));
     if (inset > 0) try writer.writeByteNTimes(' ', inset);
     var index: usize = 0;
@@ -5946,7 +5963,8 @@ const roman_stone_light = vaxis.Color.rgbFromUint(0xd8d1c4);
 const roman_stone_mid = vaxis.Color.rgbFromUint(0xb4ada2);
 const roman_stone_dark = vaxis.Color.rgbFromUint(0x7b756b);
 const roman_divider_width: usize = 9;
-const roman_divider_lane_width: usize = 13;
+const roman_divider_leading_gutter: usize = 2;
+const roman_divider_lane_width: usize = roman_divider_width + roman_divider_leading_gutter;
 
 const RomanDividerPixel = enum(u8) {
     bg = '.',
@@ -6089,7 +6107,8 @@ fn drawRomanDivider(win: vaxis.Window) void {
     fillStyled(win, shellStyle());
     var cells: [roman_divider_width]u8 = undefined;
     @memset(&cells, ' ');
-    const inset = if (win.width > roman_divider_width) (@as(usize, win.width) - roman_divider_width) / 2 else 0;
+    const gutters = romanDividerGutters(@as(usize, win.width));
+    const inset = gutters.leading;
 
     var row: usize = 0;
     while (row < win.height) : (row += 1) {
@@ -6923,6 +6942,7 @@ test "romanDivider lane leaves breathing room" {
     const testing = std.testing;
     try testing.expect(roman_divider_lane_width > roman_divider_width);
     try testing.expectEqual(@as(usize, 2), romanDividerInset());
+    try testing.expectEqual(@as(usize, 0), romanDividerTrailingGutter());
 }
 
 test "romanDividerMaskRow keeps outer gutter on tall columns" {
