@@ -16,6 +16,13 @@ From the Contubernium repo root:
 
 This builds the binary and symlinks `contubernium` into a user bin directory such as `~/bin` or `~/.local/bin`.
 
+Before shipping changes to the runtime itself, run:
+
+```bash
+zig build
+zig build test
+```
+
 ### 2. Initialize the workspace
 
 ```bash

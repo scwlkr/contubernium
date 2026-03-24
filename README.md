@@ -95,6 +95,7 @@ Install the command globally:
 Main commands:
 
 ```bash
+zig build test
 contubernium init
 contubernium doctor
 contubernium models list
@@ -113,6 +114,11 @@ What `contubernium init` creates in the current project:
 - `.contubernium/logs/`
 
 Running `contubernium` with no arguments starts the same full-screen Roman-styled TUI. Running `contubernium ui` does the same thing explicitly.
+
+Validation:
+
+- `zig build` compiles the runtime
+- `zig build test` runs the TUI/layout, streaming parser, and helper unit tests
 
 Inside the TUI you can:
 

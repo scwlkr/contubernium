@@ -7,6 +7,7 @@ const default_state_path = ".contubernium/state.json";
 const default_config_path = ".contubernium/config.json";
 const default_prompts_dir = ".contubernium/prompts";
 const default_logs_dir = ".contubernium/logs";
+const max_list_files_entries = 400;
 
 const EmbeddedAsset = struct {
     relative_path: []const u8,
@@ -276,6 +277,8 @@ const TuiMessage = struct {
     streaming: bool = false,
 
     fn deinit(self: *TuiMessage, allocator: std.mem.Allocator) void {
+        if (self.actor.len > 0) allocator.free(self.actor);
+        if (self.title.len > 0) allocator.free(self.title);
         self.text.deinit(allocator);
     }
 };
@@ -291,10 +294,47 @@ const TuiSnapshot = struct {
     active_tool: []const u8 = "",
     active_lane: []const u8 = "",
     current_goal: []const u8 = "",
+    last_tool_result: []const u8 = "",
     last_error: []const u8 = "",
     last_log_path: []const u8 = "",
     iteration: usize = 0,
 };
+
+fn cloneTuiSnapshot(allocator: std.mem.Allocator, snapshot: TuiSnapshot) !TuiSnapshot {
+    return .{
+        .project_name = try allocator.dupe(u8, snapshot.project_name),
+        .provider_type = try allocator.dupe(u8, snapshot.provider_type),
+        .model = try allocator.dupe(u8, snapshot.model),
+        .approval_mode = try allocator.dupe(u8, snapshot.approval_mode),
+        .global_status = try allocator.dupe(u8, snapshot.global_status),
+        .runtime_status = try allocator.dupe(u8, snapshot.runtime_status),
+        .current_actor = try allocator.dupe(u8, snapshot.current_actor),
+        .active_tool = try allocator.dupe(u8, snapshot.active_tool),
+        .active_lane = try allocator.dupe(u8, snapshot.active_lane),
+        .current_goal = try allocator.dupe(u8, snapshot.current_goal),
+        .last_tool_result = try allocator.dupe(u8, snapshot.last_tool_result),
+        .last_error = try allocator.dupe(u8, snapshot.last_error),
+        .last_log_path = try allocator.dupe(u8, snapshot.last_log_path),
+        .iteration = snapshot.iteration,
+    };
+}
+
+fn freeTuiSnapshot(allocator: std.mem.Allocator, snapshot: *TuiSnapshot) void {
+    allocator.free(snapshot.project_name);
+    allocator.free(snapshot.provider_type);
+    allocator.free(snapshot.model);
+    allocator.free(snapshot.approval_mode);
+    allocator.free(snapshot.global_status);
+    allocator.free(snapshot.runtime_status);
+    allocator.free(snapshot.current_actor);
+    allocator.free(snapshot.active_tool);
+    allocator.free(snapshot.active_lane);
+    allocator.free(snapshot.current_goal);
+    allocator.free(snapshot.last_tool_result);
+    allocator.free(snapshot.last_error);
+    allocator.free(snapshot.last_log_path);
+    snapshot.* = .{};
+}
 
 const ApprovalPrompt = struct {
     tool_name: []const u8 = "",
@@ -335,6 +375,7 @@ const RuntimeUiEvent = struct {
     active_tool: []const u8 = "",
     active_lane: []const u8 = "",
     current_goal: []const u8 = "",
+    last_tool_result: []const u8 = "",
     last_error: []const u8 = "",
     last_log_path: []const u8 = "",
     iteration: usize = 0,
@@ -346,6 +387,9 @@ const RuntimeEventQueue = struct {
     items: std.ArrayList(RuntimeUiEvent) = .empty,
 
     fn deinit(self: *RuntimeEventQueue) void {
+        for (self.items.items) |event| {
+            freeRuntimeUiEvent(self.allocator, event);
+        }
         self.items.deinit(self.allocator);
     }
 
@@ -359,35 +403,68 @@ const RuntimeEventQueue = struct {
     fn drain(self: *RuntimeEventQueue, allocator: std.mem.Allocator) ![]RuntimeUiEvent {
         self.mutex.lock();
         defer self.mutex.unlock();
-        const drained = try allocator.dupe(RuntimeUiEvent, self.items.items);
+        var drained: std.ArrayList(RuntimeUiEvent) = .empty;
+        for (self.items.items) |event| {
+            try drained.append(allocator, try cloneRuntimeUiEvent(allocator, event));
+            freeRuntimeUiEvent(self.allocator, event);
+        }
         self.items.clearRetainingCapacity();
-        return drained;
+        return try drained.toOwnedSlice(allocator);
     }
 
     fn cloneEvent(self: *RuntimeEventQueue, event: RuntimeUiEvent) !RuntimeUiEvent {
-        return .{
-            .kind = event.kind,
-            .tone = event.tone,
-            .actor = try self.allocator.dupe(u8, event.actor),
-            .title = try self.allocator.dupe(u8, event.title),
-            .text = try self.allocator.dupe(u8, event.text),
-            .highlight = event.highlight,
-            .project_name = try self.allocator.dupe(u8, event.project_name),
-            .provider_type = try self.allocator.dupe(u8, event.provider_type),
-            .model = try self.allocator.dupe(u8, event.model),
-            .approval_mode = try self.allocator.dupe(u8, event.approval_mode),
-            .global_status = try self.allocator.dupe(u8, event.global_status),
-            .runtime_status = try self.allocator.dupe(u8, event.runtime_status),
-            .current_actor = try self.allocator.dupe(u8, event.current_actor),
-            .active_tool = try self.allocator.dupe(u8, event.active_tool),
-            .active_lane = try self.allocator.dupe(u8, event.active_lane),
-            .current_goal = try self.allocator.dupe(u8, event.current_goal),
-            .last_error = try self.allocator.dupe(u8, event.last_error),
-            .last_log_path = try self.allocator.dupe(u8, event.last_log_path),
-            .iteration = event.iteration,
-        };
+        return try cloneRuntimeUiEvent(self.allocator, event);
     }
 };
+
+fn cloneRuntimeUiEvent(allocator: std.mem.Allocator, event: RuntimeUiEvent) !RuntimeUiEvent {
+    return .{
+        .kind = event.kind,
+        .tone = event.tone,
+        .actor = try allocator.dupe(u8, event.actor),
+        .title = try allocator.dupe(u8, event.title),
+        .text = try allocator.dupe(u8, event.text),
+        .highlight = event.highlight,
+        .project_name = try allocator.dupe(u8, event.project_name),
+        .provider_type = try allocator.dupe(u8, event.provider_type),
+        .model = try allocator.dupe(u8, event.model),
+        .approval_mode = try allocator.dupe(u8, event.approval_mode),
+        .global_status = try allocator.dupe(u8, event.global_status),
+        .runtime_status = try allocator.dupe(u8, event.runtime_status),
+        .current_actor = try allocator.dupe(u8, event.current_actor),
+        .active_tool = try allocator.dupe(u8, event.active_tool),
+        .active_lane = try allocator.dupe(u8, event.active_lane),
+        .current_goal = try allocator.dupe(u8, event.current_goal),
+        .last_tool_result = try allocator.dupe(u8, event.last_tool_result),
+        .last_error = try allocator.dupe(u8, event.last_error),
+        .last_log_path = try allocator.dupe(u8, event.last_log_path),
+        .iteration = event.iteration,
+    };
+}
+
+fn freeRuntimeUiEvent(allocator: std.mem.Allocator, event: RuntimeUiEvent) void {
+    allocator.free(event.actor);
+    allocator.free(event.title);
+    allocator.free(event.text);
+    allocator.free(event.project_name);
+    allocator.free(event.provider_type);
+    allocator.free(event.model);
+    allocator.free(event.approval_mode);
+    allocator.free(event.global_status);
+    allocator.free(event.runtime_status);
+    allocator.free(event.current_actor);
+    allocator.free(event.active_tool);
+    allocator.free(event.active_lane);
+    allocator.free(event.current_goal);
+    allocator.free(event.last_tool_result);
+    allocator.free(event.last_error);
+    allocator.free(event.last_log_path);
+}
+
+fn freeRuntimeUiEvents(allocator: std.mem.Allocator, events: []RuntimeUiEvent) void {
+    for (events) |event| freeRuntimeUiEvent(allocator, event);
+    allocator.free(events);
+}
 
 const RuntimeControl = struct {
     interrupt_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -475,6 +552,7 @@ const TuiSession = struct {
     cursor: usize = 0,
     scroll_offset: usize = 0,
     snapshot: TuiSnapshot = .{},
+    owns_snapshot: bool = false,
     cached_models: []const []const u8 = &.{},
     last_model_error: []const u8 = "",
     pending_approval: ?ApprovalPrompt = null,
@@ -489,8 +567,30 @@ const TuiSession = struct {
         }
         self.messages.deinit(self.allocator);
         self.input.deinit(self.allocator);
+        if (self.owns_snapshot) freeTuiSnapshot(self.allocator, &self.snapshot);
+        if (self.active_stream_actor.len > 0) self.allocator.free(self.active_stream_actor);
+        if (self.pending_approval) |approval| {
+            self.allocator.free(approval.tool_name);
+            self.allocator.free(approval.detail);
+        }
+        for (self.cached_models) |model| {
+            self.allocator.free(model);
+        }
+        if (self.cached_models.len > 0) self.allocator.free(self.cached_models);
     }
 };
+
+fn setTuiSnapshot(tui: *TuiSession, snapshot: TuiSnapshot) !void {
+    var owned = try cloneTuiSnapshot(tui.allocator, snapshot);
+    errdefer freeTuiSnapshot(tui.allocator, &owned);
+
+    if (tui.owns_snapshot) {
+        freeTuiSnapshot(tui.allocator, &tui.snapshot);
+    }
+
+    tui.snapshot = owned;
+    tui.owns_snapshot = true;
+}
 
 const OllamaTagsResponse = struct {
     models: []const OllamaModel = &.{},
@@ -514,6 +614,26 @@ const OllamaChatStreamChunk = struct {
 
 const OllamaMessage = struct {
     content: []const u8 = "",
+    thinking: []const u8 = "",
+    tool_calls: []const OllamaToolCall = &.{},
+};
+
+const OllamaToolCall = struct {
+    function: OllamaToolFunction = .{},
+};
+
+const OllamaToolFunction = struct {
+    name: []const u8 = "",
+    arguments: OllamaToolArguments = .{},
+};
+
+const OllamaToolArguments = struct {
+    description: []const u8 = "",
+    path: []const u8 = "",
+    pattern: []const u8 = "",
+    command: []const u8 = "",
+    content: []const u8 = "",
+    cmd: []const []const u8 = &.{},
 };
 
 const OpenAIModelsResponse = struct {
@@ -536,10 +656,20 @@ const OpenAIChoice = struct {
 
 const OpenAIMessage = struct {
     content: []const u8 = "",
+    tool_calls: []const OpenAIToolCall = &.{},
 };
 
 const OpenAIErrorEnvelope = struct {
     message: []const u8 = "",
+};
+
+const OpenAIToolCall = struct {
+    function: OpenAIToolFunction = .{},
+};
+
+const OpenAIToolFunction = struct {
+    name: []const u8 = "",
+    arguments: []const u8 = "",
 };
 
 pub fn main() !void {
@@ -686,7 +816,7 @@ fn interactiveUiLoop(allocator: std.mem.Allocator) !void {
     };
     defer tui.deinit();
 
-    tui.snapshot = snapshotFromState(config, state, std.fs.path.basename(cwd));
+    try setTuiSnapshot(&tui, snapshotFromState(config, state, std.fs.path.basename(cwd)));
     try appendChatMessage(
         &tui,
         .system,
@@ -851,10 +981,19 @@ const RenderLine = struct {
     highlight: HighlightKind = .plain,
 };
 
+const RenderFrame = struct {
+    screen: []const u8,
+    cursor_row: usize,
+    cursor_col: usize,
+};
+
 const TerminalSize = struct {
     rows: usize,
     cols: usize,
 };
+
+const input_prompt = "mission> ";
+const input_help = "Enter submit | Up/Down scroll | PgUp/PgDn fast scroll | Ctrl+C interrupt/exit";
 
 fn snapshotFromState(config: AppConfig, state: AppState, project_name: []const u8) TuiSnapshot {
     return .{
@@ -868,6 +1007,7 @@ fn snapshotFromState(config: AppConfig, state: AppState, project_name: []const u
         .active_tool = state.agent_loop.active_tool,
         .active_lane = currentLaneForState(state),
         .current_goal = state.mission.current_goal,
+        .last_tool_result = state.agent_loop.last_tool_result,
         .last_error = state.runtime_session.last_error,
         .last_log_path = state.runtime_session.active_log_path,
         .iteration = state.agent_loop.iteration,
@@ -876,6 +1016,7 @@ fn snapshotFromState(config: AppConfig, state: AppState, project_name: []const u
 
 fn processRuntimeEvents(allocator: std.mem.Allocator, tui: *TuiSession, queue: *RuntimeEventQueue) !void {
     const events = try queue.drain(allocator);
+    defer freeRuntimeUiEvents(allocator, events);
     for (events) |event| {
         switch (event.kind) {
             .log => try appendChatMessage(
@@ -891,7 +1032,7 @@ fn processRuntimeEvents(allocator: std.mem.Allocator, tui: *TuiSession, queue: *
             .stream_chunk => try appendStreamChunk(tui, event.actor, event.text),
             .stream_finalize => try finalizeStreamingMessage(tui, event.actor, event.text, event.highlight),
             .state_snapshot => {
-                tui.snapshot = .{
+                try setTuiSnapshot(tui, .{
                     .project_name = if (event.project_name.len > 0) event.project_name else tui.snapshot.project_name,
                     .provider_type = if (event.provider_type.len > 0) event.provider_type else tui.snapshot.provider_type,
                     .model = if (event.model.len > 0) event.model else tui.snapshot.model,
@@ -902,16 +1043,21 @@ fn processRuntimeEvents(allocator: std.mem.Allocator, tui: *TuiSession, queue: *
                     .active_tool = event.active_tool,
                     .active_lane = if (event.active_lane.len > 0) event.active_lane else tui.snapshot.active_lane,
                     .current_goal = event.current_goal,
+                    .last_tool_result = event.last_tool_result,
                     .last_error = event.last_error,
                     .last_log_path = event.last_log_path,
                     .iteration = event.iteration,
-                };
+                });
                 tui.dirty = true;
             },
             .approval_request => {
+                if (tui.pending_approval) |approval| {
+                    tui.allocator.free(approval.tool_name);
+                    tui.allocator.free(approval.detail);
+                }
                 tui.pending_approval = .{
-                    .tool_name = event.title,
-                    .detail = event.text,
+                    .tool_name = try tui.allocator.dupe(u8, event.title),
+                    .detail = try tui.allocator.dupe(u8, event.text),
                 };
                 try appendChatMessage(
                     tui,
@@ -1183,7 +1329,11 @@ fn handleApprovalInput(tui: *TuiSession, control: *RuntimeControl, byte: u8) boo
         'y', 'Y' => submitApprovalResponse(control, true),
         else => return true,
     }
-    tui.pending_approval = null;
+    if (tui.pending_approval) |approval| {
+        tui.allocator.free(approval.tool_name);
+        tui.allocator.free(approval.detail);
+        tui.pending_approval = null;
+    }
     return true;
 }
 
@@ -1296,8 +1446,8 @@ fn appendChatMessage(
     var message = TuiMessage{
         .kind = kind,
         .tone = tone,
-        .actor = actor,
-        .title = title,
+        .actor = try tui.allocator.dupe(u8, actor),
+        .title = try tui.allocator.dupe(u8, title),
         .highlight = highlight,
     };
     try message.text.appendSlice(tui.allocator, text);
@@ -1311,6 +1461,7 @@ fn clearTuiMessages(tui: *TuiSession) void {
         message.deinit(tui.allocator);
     }
     tui.messages.clearRetainingCapacity();
+    if (tui.active_stream_actor.len > 0) tui.allocator.free(tui.active_stream_actor);
     tui.active_stream_actor = "";
     tui.active_stream_index = null;
     tui.scroll_offset = 0;
@@ -1318,16 +1469,17 @@ fn clearTuiMessages(tui: *TuiSession) void {
 }
 
 fn beginStreamingMessage(tui: *TuiSession, actor: []const u8) !void {
+    if (tui.active_stream_actor.len > 0) tui.allocator.free(tui.active_stream_actor);
     const message = TuiMessage{
         .kind = .agent,
         .tone = .agent,
-        .actor = actor,
-        .title = actor,
+        .actor = try tui.allocator.dupe(u8, actor),
+        .title = try tui.allocator.dupe(u8, actor),
         .highlight = .json,
         .streaming = true,
     };
     try tui.messages.append(tui.allocator, message);
-    tui.active_stream_actor = actor;
+    tui.active_stream_actor = try tui.allocator.dupe(u8, actor);
     tui.active_stream_index = tui.messages.items.len - 1;
     tui.scroll_offset = 0;
     tui.dirty = true;
@@ -1358,6 +1510,7 @@ fn finalizeStreamingMessage(tui: *TuiSession, actor: []const u8, text: []const u
             message.highlight = highlight;
             message.streaming = false;
             tui.active_stream_index = null;
+            if (tui.active_stream_actor.len > 0) tui.allocator.free(tui.active_stream_actor);
             tui.active_stream_actor = "";
             tui.scroll_offset = 0;
             tui.dirty = true;
@@ -1367,7 +1520,204 @@ fn finalizeStreamingMessage(tui: *TuiSession, actor: []const u8, text: []const u
     try appendChatMessage(tui, .agent, .agent, actor, actor, text, highlight);
 }
 
+fn compactTextForUi(allocator: std.mem.Allocator, text: []const u8, max_lines: usize, max_chars: usize) ![]const u8 {
+    const trimmed = trimAscii(text);
+    if (trimmed.len == 0) return try allocator.dupe(u8, "");
+
+    const char_limited = if (trimmed.len > max_chars) trimmed[0..max_chars] else trimmed;
+    var buffer: std.ArrayList(u8) = .empty;
+    errdefer buffer.deinit(allocator);
+
+    var line_count: usize = 0;
+    var truncated = trimmed.len > char_limited.len;
+    var lines = std.mem.splitScalar(u8, char_limited, '\n');
+    while (lines.next()) |line| {
+        if (line_count >= max_lines) {
+            truncated = true;
+            break;
+        }
+        if (line_count > 0) try buffer.append(allocator, '\n');
+        try buffer.appendSlice(allocator, line);
+        line_count += 1;
+    }
+
+    if (truncated) try buffer.appendSlice(allocator, "\n...[truncated]...");
+    return try buffer.toOwnedSlice(allocator);
+}
+
+fn pluralSuffix(count: usize) []const u8 {
+    return if (count == 1) "" else "s";
+}
+
+fn writeToolRequestLabel(writer: anytype, request: ToolRequest) !void {
+    const tool_name = canonicalToolName(request.tool);
+    if (request.path.len > 0) {
+        try writer.print("{s} {s}", .{ tool_name, request.path });
+        return;
+    }
+    if (eql(tool_name, "list_files")) {
+        try writer.print("{s} .", .{tool_name});
+        return;
+    }
+    if (request.pattern.len > 0) {
+        try writer.print("{s} pattern={s}", .{ tool_name, request.pattern });
+        return;
+    }
+    if (request.command.len > 0) {
+        try writer.print("{s} {s}", .{ tool_name, request.command });
+        return;
+    }
+    if (request.description.len > 0) {
+        try writer.print("{s} {s}", .{ tool_name, request.description });
+        return;
+    }
+    try writer.writeAll(tool_name);
+}
+
+fn summarizeToolRequestsForUi(allocator: std.mem.Allocator, requests: []const ToolRequest) ![]const u8 {
+    var buffer: std.ArrayList(u8) = .empty;
+    errdefer buffer.deinit(allocator);
+    const writer = buffer.writer(allocator);
+
+    try writer.print("requested {d} runtime tool{s}", .{ requests.len, pluralSuffix(requests.len) });
+    const preview_count = @min(requests.len, 4);
+    for (requests[0..preview_count]) |request| {
+        try writer.writeAll("\n- ");
+        try writeToolRequestLabel(writer, request);
+    }
+    if (requests.len > preview_count) {
+        try writer.print("\n- ... {d} more", .{requests.len - preview_count});
+    }
+    return try buffer.toOwnedSlice(allocator);
+}
+
+fn summarizeDecanusDecisionForUi(allocator: std.mem.Allocator, decision: DecanusDecision) ![]const u8 {
+    var buffer: std.ArrayList(u8) = .empty;
+    errdefer buffer.deinit(allocator);
+    const writer = buffer.writer(allocator);
+    const action = if (decision.action.len > 0) decision.action else "unknown";
+
+    try writer.print("action: {s}", .{action});
+    if (decision.current_goal.len > 0) {
+        const goal = try compactTextForUi(allocator, decision.current_goal, 2, 220);
+        defer allocator.free(goal);
+        try writer.print("\ngoal: {s}", .{goal});
+    }
+    if (decision.reasoning.len > 0) {
+        const reasoning = try compactTextForUi(allocator, decision.reasoning, 3, 320);
+        defer allocator.free(reasoning);
+        try writer.print("\nreason: {s}", .{reasoning});
+    }
+
+    if (eql(action, "tool_request")) {
+        if (decision.tool_requests.len > 0) {
+            const tools = try summarizeToolRequestsForUi(allocator, decision.tool_requests);
+            defer allocator.free(tools);
+            try writer.print("\n{s}", .{tools});
+        }
+        return try buffer.toOwnedSlice(allocator);
+    }
+
+    if (eql(action, "invoke_specialist")) {
+        const lane = if (decision.lane.len > 0) decision.lane else laneForActor(decision.actor);
+        const actor = if (decision.actor.len > 0) decision.actor else actorForLane(lane);
+        try writer.print("\nhandoff: {s} on {s}", .{ actor, lane });
+        if (decision.objective.len > 0) {
+            const objective = try compactTextForUi(allocator, decision.objective, 4, 360);
+            defer allocator.free(objective);
+            try writer.print("\nobjective: {s}", .{objective});
+        }
+        if (decision.completion_signal.len > 0) {
+            const signal = try compactTextForUi(allocator, decision.completion_signal, 3, 280);
+            defer allocator.free(signal);
+            try writer.print("\ndone when: {s}", .{signal});
+        }
+        return try buffer.toOwnedSlice(allocator);
+    }
+
+    if (eql(action, "finish") and decision.final_response.len > 0) {
+        const response = try compactTextForUi(allocator, decision.final_response, 8, 700);
+        defer allocator.free(response);
+        try writer.print("\nresponse:\n{s}", .{response});
+        return try buffer.toOwnedSlice(allocator);
+    }
+
+    if (eql(action, "ask_user") and decision.question.len > 0) {
+        const question = try compactTextForUi(allocator, decision.question, 4, 320);
+        defer allocator.free(question);
+        try writer.print("\nquestion: {s}", .{question});
+        return try buffer.toOwnedSlice(allocator);
+    }
+
+    if (eql(action, "blocked")) {
+        const blocked_reason = if (decision.blocked_reason.len > 0) decision.blocked_reason else "blocked";
+        const reason = try compactTextForUi(allocator, blocked_reason, 4, 320);
+        defer allocator.free(reason);
+        try writer.print("\nblocked: {s}", .{reason});
+    }
+
+    return try buffer.toOwnedSlice(allocator);
+}
+
+fn summarizeSpecialistResultForUi(allocator: std.mem.Allocator, result: SpecialistResult) ![]const u8 {
+    var buffer: std.ArrayList(u8) = .empty;
+    errdefer buffer.deinit(allocator);
+    const writer = buffer.writer(allocator);
+    const action = if (result.action.len > 0) result.action else "unknown";
+
+    try writer.print("action: {s}", .{action});
+    if (result.reasoning.len > 0) {
+        const reasoning = try compactTextForUi(allocator, result.reasoning, 3, 320);
+        defer allocator.free(reasoning);
+        try writer.print("\nreason: {s}", .{reasoning});
+    }
+
+    if (eql(action, "tool_request")) {
+        if (result.tool_requests.len > 0) {
+            const tools = try summarizeToolRequestsForUi(allocator, result.tool_requests);
+            defer allocator.free(tools);
+            try writer.print("\n{s}", .{tools});
+        }
+        return try buffer.toOwnedSlice(allocator);
+    }
+
+    if (eql(action, "complete")) {
+        if (result.description.len > 0) {
+            const description = try compactTextForUi(allocator, result.description, 3, 280);
+            defer allocator.free(description);
+            try writer.print("\ndescription: {s}", .{description});
+        }
+        if (result.result_summary.len > 0) {
+            const summary = try compactTextForUi(allocator, result.result_summary, 6, 520);
+            defer allocator.free(summary);
+            try writer.print("\nsummary:\n{s}", .{summary});
+        }
+        return try buffer.toOwnedSlice(allocator);
+    }
+
+    if (eql(action, "ask_user") and result.question.len > 0) {
+        const question = try compactTextForUi(allocator, result.question, 4, 320);
+        defer allocator.free(question);
+        try writer.print("\nquestion: {s}", .{question});
+        return try buffer.toOwnedSlice(allocator);
+    }
+
+    if (eql(action, "blocked")) {
+        const blocked_reason = if (result.blocked_reason.len > 0) result.blocked_reason else "blocked";
+        const reason = try compactTextForUi(allocator, blocked_reason, 4, 320);
+        defer allocator.free(reason);
+        try writer.print("\nblocked: {s}", .{reason});
+    }
+
+    return try buffer.toOwnedSlice(allocator);
+}
+
 fn updateCachedModels(allocator: std.mem.Allocator, tui: *TuiSession, text: []const u8) !void {
+    for (tui.cached_models) |model| {
+        allocator.free(model);
+    }
+    if (tui.cached_models.len > 0) allocator.free(tui.cached_models);
+
     var items: std.ArrayList([]const u8) = .empty;
     var lines = std.mem.tokenizeScalar(u8, text, '\n');
     while (lines.next()) |line| {
@@ -1389,11 +1739,16 @@ fn updateCachedModels(allocator: std.mem.Allocator, tui: *TuiSession, text: []co
 }
 
 fn renderTui(allocator: std.mem.Allocator, tui: *const TuiSession) !void {
+    const frame = try buildRenderFrame(allocator, tui, terminalSize());
+    defer allocator.free(frame.screen);
+    try std.fs.File.stdout().writeAll(frame.screen);
+}
+
+fn buildRenderFrame(allocator: std.mem.Allocator, tui: *const TuiSession, size: TerminalSize) !RenderFrame {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const temp_allocator = arena.allocator();
 
-    const size = terminalSize();
     const sidebar_width: usize = if (size.cols >= 118) 36 else 0;
     const gutter_width: usize = if (sidebar_width > 0) 3 else 0;
     const body_width = if (sidebar_width > 0 and size.cols > sidebar_width + gutter_width + 2) size.cols - sidebar_width - gutter_width else size.cols;
@@ -1470,10 +1825,12 @@ fn renderTui(allocator: std.mem.Allocator, tui: *const TuiSession) !void {
     }
 
     try writeHeaderLine(writer, size.cols, " INPUT ", .warning);
-    try writeFooterLine(writer, size.cols, " Enter submit | Up/Down scroll | PgUp/PgDn fast scroll | Ctrl+C interrupt/exit ");
-    const prompt_width = if (size.cols > 10) size.cols - 10 else size.cols;
+    try writeFooterLine(writer, size.cols, input_help);
+    const prompt_width = if (size.cols > input_prompt.len) size.cols - input_prompt.len else 0;
     const input_view = visibleInputWindow(tui.input.items, tui.cursor, prompt_width);
-    try writer.writeAll("\x1b[38;5;220m mission>\x1b[0m ");
+    try writer.writeAll("\x1b[38;5;220m");
+    try writer.writeAll(input_prompt);
+    try writer.writeAll("\x1b[0m");
     try writePlain(writer, input_view.text, .mission, .plain);
     if (visibleLen(input_view.text) < prompt_width) {
         try writer.writeByteNTimes(' ', prompt_width - visibleLen(input_view.text));
@@ -1487,10 +1844,15 @@ fn renderTui(allocator: std.mem.Allocator, tui: *const TuiSession) !void {
         "ready";
     try writeFooterLine(writer, size.cols, approval_text);
 
-    const cursor_row = header_height + chat_height + 2;
-    const cursor_col = 9 + input_view.cursor_col;
+    const cursor_row = @min(size.rows, header_height + chat_height + 3);
+    const cursor_col = @min(size.cols, input_prompt.len + 1 + input_view.cursor_col);
     try writer.print("\x1b[{d};{d}H\x1b[?25h", .{ cursor_row, cursor_col });
-    try std.fs.File.stdout().writeAll(screen.items);
+
+    return .{
+        .screen = try allocator.dupe(u8, screen.items),
+        .cursor_row = cursor_row,
+        .cursor_col = cursor_col,
+    };
 }
 
 fn buildChatLines(
@@ -1506,7 +1868,7 @@ fn buildChatLines(
     for (tui.messages.items) |message| {
         const header = switch (message.kind) {
             .user => try std.fmt.allocPrint(allocator, "USER | {s}", .{message.title}),
-            .agent => try std.fmt.allocPrint(allocator, "{s} | streaming {s}", .{ toUpperAscii(allocator, message.actor) catch message.actor, if (message.streaming) "..." else "done" }),
+            .agent => try std.fmt.allocPrint(allocator, "{s} | {s}", .{ toUpperAscii(allocator, message.actor) catch message.actor, if (message.streaming) "streaming ..." else "response" }),
             .tool => try std.fmt.allocPrint(allocator, "TOOL | {s}", .{message.title}),
             .system => try std.fmt.allocPrint(allocator, "SYSTEM | {s}", .{message.title}),
         };
@@ -1532,6 +1894,10 @@ fn buildSidebarLines(
     try lines.append(allocator, .{});
     try lines.append(allocator, .{ .text = "GOAL", .tone = .warning });
     try appendWrappedLines(allocator, lines, if (tui.snapshot.current_goal.len > 0) tui.snapshot.current_goal else "idle", width, .info, .plain);
+    try lines.append(allocator, .{});
+    try lines.append(allocator, .{ .text = "LATEST", .tone = .warning });
+    const latest = try compactTextForUi(allocator, if (tui.snapshot.last_tool_result.len > 0) tui.snapshot.last_tool_result else "none", 8, 420);
+    try appendWrappedLines(allocator, lines, latest, width, .info, .plain);
     try lines.append(allocator, .{});
     try lines.append(allocator, .{ .text = "ERROR", .tone = .warning });
     try appendWrappedLines(allocator, lines, if (tui.snapshot.last_error.len > 0) tui.snapshot.last_error else "none", width, .danger, .plain);
@@ -1701,6 +2067,7 @@ fn writeJsonHighlighted(writer: anytype, text: []const u8) !void {
 }
 
 fn visibleInputWindow(text: []const u8, cursor: usize, width: usize) struct { text: []const u8, cursor_col: usize } {
+    if (width == 0) return .{ .text = "", .cursor_col = 0 };
     if (text.len <= width) return .{ .text = text, .cursor_col = cursor };
     const safe_cursor = @min(cursor, text.len);
     var start = if (safe_cursor > width - 1) safe_cursor - (width - 1) else 0;
@@ -1778,12 +2145,12 @@ fn emitStreamChunk(hooks: RuntimeHooks, actor: []const u8, text: []const u8) voi
     });
 }
 
-fn emitStreamFinalize(hooks: RuntimeHooks, actor: []const u8, text: []const u8) void {
+fn emitStreamFinalize(hooks: RuntimeHooks, actor: []const u8, text: []const u8, highlight: HighlightKind) void {
     hooks.emit(.{
         .kind = .stream_finalize,
         .actor = actor,
         .text = text,
-        .highlight = .json,
+        .highlight = highlight,
     });
 }
 
@@ -1800,6 +2167,7 @@ fn emitStateSnapshot(hooks: RuntimeHooks, config: AppConfig, state: AppState) vo
         .active_tool = state.agent_loop.active_tool,
         .active_lane = currentLaneForState(state),
         .current_goal = state.mission.current_goal,
+        .last_tool_result = state.agent_loop.last_tool_result,
         .last_error = state.runtime_session.last_error,
         .last_log_path = state.runtime_session.active_log_path,
         .iteration = state.agent_loop.iteration,
@@ -1834,6 +2202,9 @@ fn friendlyRuntimeError(allocator: std.mem.Allocator, err: anyerror) ![]const u8
     }
     if (err == error.Interrupted) {
         return try allocator.dupe(u8, "the active loop was interrupted by the operator.");
+    }
+    if (err == error.FileNotFound) {
+        return try allocator.dupe(u8, "requested path was not found inside the workspace.");
     }
     return try std.fmt.allocPrint(allocator, "runtime error: {s}", .{@errorName(err)});
 }
@@ -1933,7 +2304,8 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
     };
     const decision = response.value;
     try writeTurnLog(state.runtime_session.active_log_path, "model_output", response.raw_text);
-    emitStreamFinalize(hooks, "decanus", prettyPrintJson(allocator, response.raw_text) catch response.raw_text);
+    const decision_summary = summarizeDecanusDecisionForUi(allocator, decision) catch prettyPrintJson(allocator, response.raw_text) catch response.raw_text;
+    emitStreamFinalize(hooks, "decanus", decision_summary, .plain);
 
     if (decision.current_goal.len > 0) {
         state.mission.current_goal = decision.current_goal;
@@ -1942,7 +2314,14 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
     emitStateSnapshot(hooks, config, state.*);
 
     if (decision.tool_requests.len > 0 or eql(decision.action, "tool_request")) {
-        emitLog(hooks, .tool, "decanus", "Runtime Tool", "decanus requested runtime tools", .plain);
+        emitLog(
+            hooks,
+            .tool,
+            "decanus",
+            "Runtime Tool",
+            summarizeToolRequestsForUi(allocator, decision.tool_requests) catch "decanus requested runtime tools",
+            .plain,
+        );
         const tool_result = try executeToolRequests(allocator, config, state, "decanus", "", decision.tool_requests, hooks);
         state.agent_loop.last_tool_result = tool_result.summary;
         try appendHistory(
@@ -1964,7 +2343,14 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
             emitStateSnapshot(hooks, config, state.*);
             return .blocked;
         }
-        emitLog(hooks, .tool, "decanus", "Tool Result", tool_result.summary, .plain);
+        emitLog(
+            hooks,
+            .tool,
+            "decanus",
+            "Tool Result",
+            compactTextForUi(allocator, tool_result.summary, 12, 900) catch tool_result.summary,
+            .plain,
+        );
         return .advanced;
     }
 
@@ -2094,10 +2480,18 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
     };
     const result = response.value;
     try writeTurnLog(state.runtime_session.active_log_path, "model_output", response.raw_text);
-    emitStreamFinalize(hooks, actor, prettyPrintJson(allocator, response.raw_text) catch response.raw_text);
+    const result_summary = summarizeSpecialistResultForUi(allocator, result) catch prettyPrintJson(allocator, response.raw_text) catch response.raw_text;
+    emitStreamFinalize(hooks, actor, result_summary, .plain);
 
     if (result.tool_requests.len > 0 or eql(result.action, "tool_request")) {
-        emitLog(hooks, .tool, actor, "Runtime Tool", "specialist requested runtime tools", .plain);
+        emitLog(
+            hooks,
+            .tool,
+            actor,
+            "Runtime Tool",
+            summarizeToolRequestsForUi(allocator, result.tool_requests) catch "specialist requested runtime tools",
+            .plain,
+        );
         const tool_result = try executeToolRequests(allocator, config, state, actor, lane, result.tool_requests, hooks);
         state.agent_loop.last_tool_result = tool_result.summary;
         if (tool_result.blocked) {
@@ -2107,7 +2501,14 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
             return .blocked;
         }
         task.invocation.status = "running";
-        emitLog(hooks, .tool, actor, "Tool Result", tool_result.summary, .plain);
+        emitLog(
+            hooks,
+            .tool,
+            actor,
+            "Tool Result",
+            compactTextForUi(allocator, tool_result.summary, 12, 900) catch tool_result.summary,
+            .plain,
+        );
         return .advanced;
     }
 
@@ -2173,7 +2574,7 @@ fn executeToolRequests(
 
     var summaries: std.ArrayList([]const u8) = .empty;
     for (requests) |request| {
-        const tool_name = request.tool;
+        const tool_name = canonicalToolName(request.tool);
         if (tool_name.len == 0) continue;
         emitLog(hooks, .tool, actor, tool_name, toolRequestDisplay(allocator, request) catch tool_name, .plain);
 
@@ -2181,7 +2582,7 @@ fn executeToolRequests(
             if (!config.policy.allow_read_tools_without_confirmation and !try confirmTool(allocator, hooks, tool_name, request.description)) {
                 return try blockedToolOutcome(allocator, state, "list_files denied by operator");
             }
-            const output = try runCommandCapture(allocator, &.{ "find", if (request.path.len > 0) request.path else ".", "-maxdepth", "3" });
+            const output = try listWorkspaceFiles(allocator, request.path);
             try summaries.append(allocator, try summarizeCommandResult(allocator, "list_files", output, config.context.max_tool_result_chars));
             continue;
         }
@@ -2244,7 +2645,7 @@ fn executeToolRequests(
             };
         }
 
-        try summaries.append(allocator, try std.fmt.allocPrint(allocator, "unknown tool `{s}` requested by {s} on lane {s}", .{ tool_name, actor, lane }));
+        try summaries.append(allocator, try std.fmt.allocPrint(allocator, "unknown tool `{s}` requested by {s} on lane {s}", .{ request.tool, actor, lane }));
     }
 
     return .{
@@ -2274,7 +2675,7 @@ fn structuredChatWithRepair(
         try writeTurnLog(state.runtime_session.active_log_path, "provider_transport", response.transport_text);
         const parsed = parseModelJson(T, allocator, response.raw_text) catch |err| {
             try writeTurnLog(state.runtime_session.active_log_path, "invalid_model_output", response.raw_text);
-            emitStreamFinalize(hooks, actor, response.raw_text);
+            emitStreamFinalize(hooks, actor, response.raw_text, .json);
             if (attempt >= max_retries) return err;
             attempt += 1;
             state.runtime_session.repair_attempts = attempt;
@@ -2588,52 +2989,20 @@ fn providerStructuredChat(
     const started = std.time.milliTimestamp();
 
     if (eql(provider.type, "ollama-native")) {
-        const messages = [_]MessagePayload{
-            .{ .role = "system", .content = system_prompt },
-            .{ .role = "user", .content = user_prompt },
-        };
-        const body = try stringifyJsonToString(
-            allocator,
-            OllamaChatRequest{
-                .model = provider.model,
-                .stream = hooks.emit_fn != null,
-                .format = provider.structured_output,
-                .messages = &messages,
-            },
-        );
         const url = try std.fmt.allocPrint(allocator, "{s}/api/chat", .{provider.base_url});
+        const stream = hooks.emit_fn != null;
+        const body = try buildOllamaChatBody(allocator, provider, system_prompt, user_prompt, stream);
 
-        if (hooks.emit_fn != null) {
-            return try providerStructuredChatOllamaStreaming(allocator, provider, schema_kind, body, url, started, hooks);
+        if (stream) {
+            return providerStructuredChatOllamaStreaming(allocator, provider, schema_kind, body, url, started, hooks) catch |err| {
+                if (err != error.EmptyModelOutput) return err;
+                emitLog(hooks, .warning, schema_kind, "Streaming Retry", "streaming returned no content; retrying once without streaming", .plain);
+                const retry_body = try buildOllamaChatBody(allocator, provider, system_prompt, user_prompt, false);
+                return try providerStructuredChatOllamaNonStreaming(allocator, provider, retry_body, url, started);
+            };
         }
 
-        const result = try runCommandCapture(
-            allocator,
-            &.{
-                "curl",
-                "-fsS",
-                "--max-time",
-                try timeoutSeconds(allocator, provider.timeout_ms),
-                "-H",
-                "Content-Type: application/json",
-                "-X",
-                "POST",
-                "-d",
-                body,
-                url,
-            },
-        );
-        if (result.exit_code != 0) return error.BackendUnavailable;
-        const parsed = try parseJson(OllamaChatResponse, allocator, result.stdout);
-        if (parsed.@"error".len > 0) return error.ProviderRejectedRequest;
-        if (trimAscii(parsed.message.content).len == 0) return error.EmptyModelOutput;
-        return .{
-            .raw_text = parsed.message.content,
-            .transport_text = result.stdout,
-            .provider_name = provider.type,
-            .model_name = provider.model,
-            .latency_ms = std.time.milliTimestamp() - started,
-        };
+        return try providerStructuredChatOllamaNonStreaming(allocator, provider, body, url, started);
     }
 
     if (eql(provider.type, "openai-compatible")) {
@@ -2669,9 +3038,9 @@ fn providerStructuredChat(
         const parsed = try parseJson(OpenAIChatResponse, allocator, result.stdout);
         if (parsed.@"error".message.len > 0) return error.ProviderRejectedRequest;
         if (parsed.choices.len == 0) return error.EmptyProviderResponse;
-        if (trimAscii(parsed.choices[0].message.content).len == 0) return error.EmptyModelOutput;
+        const raw_text = try openAIMessageRawText(allocator, parsed.choices[0].message);
         return .{
-            .raw_text = parsed.choices[0].message.content,
+            .raw_text = raw_text,
             .transport_text = result.stdout,
             .provider_name = provider.type,
             .model_name = provider.model,
@@ -2690,6 +3059,7 @@ const MessagePayload = struct {
 const OllamaChatRequest = struct {
     model: []const u8,
     stream: bool,
+    think: bool = false,
     format: []const u8,
     messages: []const MessagePayload,
 };
@@ -2699,8 +3069,205 @@ const OpenAIChatRequest = struct {
     messages: []const MessagePayload,
 };
 
+fn buildOllamaChatBody(
+    allocator: std.mem.Allocator,
+    provider: ProviderConfig,
+    system_prompt: []const u8,
+    user_prompt: []const u8,
+    stream: bool,
+) ![]const u8 {
+    const messages = [_]MessagePayload{
+        .{ .role = "system", .content = system_prompt },
+        .{ .role = "user", .content = user_prompt },
+    };
+    return try stringifyJsonToString(
+        allocator,
+        OllamaChatRequest{
+            .model = provider.model,
+            .stream = stream,
+            .format = provider.structured_output,
+            .messages = &messages,
+        },
+    );
+}
+
 fn stringifyJsonToString(allocator: std.mem.Allocator, value: anytype) ![]const u8 {
     return try std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(value, .{})});
+}
+
+fn providerStructuredChatOllamaNonStreaming(
+    allocator: std.mem.Allocator,
+    provider: ProviderConfig,
+    body: []const u8,
+    url: []const u8,
+    started: i64,
+) !ProviderResponse {
+    const result = try runCommandCapture(
+        allocator,
+        &.{
+            "curl",
+            "-fsS",
+            "--max-time",
+            try timeoutSeconds(allocator, provider.timeout_ms),
+            "-H",
+            "Content-Type: application/json",
+            "-X",
+            "POST",
+            "-d",
+            body,
+            url,
+        },
+    );
+    if (result.exit_code != 0) return error.BackendUnavailable;
+    const parsed = try parseJson(OllamaChatResponse, allocator, result.stdout);
+    if (parsed.@"error".len > 0) return error.ProviderRejectedRequest;
+    const raw_text = try ollamaMessageRawText(allocator, parsed.message);
+    return .{
+        .raw_text = raw_text,
+        .transport_text = result.stdout,
+        .provider_name = provider.type,
+        .model_name = provider.model,
+        .latency_ms = std.time.milliTimestamp() - started,
+    };
+}
+
+fn ollamaMessageRawText(allocator: std.mem.Allocator, message: OllamaMessage) ![]const u8 {
+    if (trimAscii(message.content).len > 0) return message.content;
+    if (message.tool_calls.len > 0) return try ollamaToolCallsToStructuredJson(allocator, message);
+    return error.EmptyModelOutput;
+}
+
+fn openAIMessageRawText(allocator: std.mem.Allocator, message: OpenAIMessage) ![]const u8 {
+    if (trimAscii(message.content).len > 0) return message.content;
+    if (message.tool_calls.len > 0) return try openAIToolCallsToStructuredJson(allocator, message.tool_calls);
+    return error.EmptyModelOutput;
+}
+
+fn ollamaToolCallsToStructuredJson(allocator: std.mem.Allocator, message: OllamaMessage) ![]const u8 {
+    var requests: std.ArrayList(ToolRequest) = .empty;
+    defer requests.deinit(allocator);
+    for (message.tool_calls) |tool_call| {
+        try requests.append(allocator, try toolRequestFromOllamaToolCall(tool_call.function));
+    }
+
+    const reasoning = if (trimAscii(message.thinking).len > 0)
+        trimAscii(message.thinking)
+    else
+        "model emitted tool_calls";
+
+    return try std.fmt.allocPrint(
+        allocator,
+        "{{\"action\":\"tool_request\",\"reasoning\":{f},\"tool_requests\":{f}}}",
+        .{
+            std.json.fmt(reasoning, .{}),
+            std.json.fmt(requests.items, .{}),
+        },
+    );
+}
+
+fn openAIToolCallsToStructuredJson(allocator: std.mem.Allocator, tool_calls: []const OpenAIToolCall) ![]const u8 {
+    var requests: std.ArrayList(ToolRequest) = .empty;
+    defer {
+        for (requests.items) |request| freeOwnedToolRequest(allocator, request);
+        requests.deinit(allocator);
+    }
+    for (tool_calls) |tool_call| {
+        if (tool_call.function.arguments.len > 0) {
+            const parsed = try std.json.parseFromSlice(OllamaToolArguments, allocator, tool_call.function.arguments, .{
+                .ignore_unknown_fields = true,
+            });
+            defer parsed.deinit();
+            const request = try toolRequestFromProviderToolCall(tool_call.function.name, parsed.value);
+            try requests.append(allocator, try cloneToolRequest(allocator, request));
+            continue;
+        }
+        const request = try toolRequestFromProviderToolCall(tool_call.function.name, .{});
+        try requests.append(allocator, try cloneToolRequest(allocator, request));
+    }
+
+    return try std.fmt.allocPrint(
+        allocator,
+        "{{\"action\":\"tool_request\",\"reasoning\":\"model emitted tool_calls\",\"tool_requests\":{f}}}",
+        .{std.json.fmt(requests.items, .{})},
+    );
+}
+
+fn cloneToolRequest(allocator: std.mem.Allocator, request: ToolRequest) !ToolRequest {
+    return .{
+        .tool = try allocator.dupe(u8, request.tool),
+        .description = try allocator.dupe(u8, request.description),
+        .path = try allocator.dupe(u8, request.path),
+        .pattern = try allocator.dupe(u8, request.pattern),
+        .command = try allocator.dupe(u8, request.command),
+        .content = try allocator.dupe(u8, request.content),
+    };
+}
+
+fn freeOwnedToolRequest(allocator: std.mem.Allocator, request: ToolRequest) void {
+    allocator.free(request.tool);
+    allocator.free(request.description);
+    allocator.free(request.path);
+    allocator.free(request.pattern);
+    allocator.free(request.command);
+    allocator.free(request.content);
+}
+
+fn toolRequestFromOllamaToolCall(function: OllamaToolFunction) !ToolRequest {
+    return try toolRequestFromProviderToolCall(function.name, function.arguments);
+}
+
+fn toolRequestFromProviderToolCall(name: []const u8, arguments: OllamaToolArguments) !ToolRequest {
+    const normalized_name = canonicalToolName(name);
+    if (!eql(normalized_name, name)) {
+        return .{
+            .tool = normalized_name,
+            .description = arguments.description,
+            .path = arguments.path,
+            .pattern = arguments.pattern,
+            .command = arguments.command,
+            .content = arguments.content,
+        };
+    }
+
+    if (eql(name, "container.exec")) {
+        const command = shellCommandFromOllamaToolArgs(arguments);
+        if (looksLikeListFilesCommand(command)) {
+            return .{
+                .tool = "list_files",
+                .description = "inferred from container.exec",
+                .path = ".",
+            };
+        }
+        return .{
+            .tool = "run_command",
+            .description = "inferred from container.exec",
+            .command = command,
+        };
+    }
+
+    return .{
+        .tool = name,
+        .description = arguments.description,
+        .path = arguments.path,
+        .pattern = arguments.pattern,
+        .command = arguments.command,
+        .content = arguments.content,
+    };
+}
+
+fn shellCommandFromOllamaToolArgs(arguments: OllamaToolArguments) []const u8 {
+    if (arguments.command.len > 0) return arguments.command;
+    if (arguments.cmd.len >= 3 and (eql(arguments.cmd[0], "bash") or eql(arguments.cmd[0], "sh")) and eql(arguments.cmd[1], "-lc")) {
+        return arguments.cmd[2];
+    }
+    if (arguments.cmd.len == 1) return arguments.cmd[0];
+    return "";
+}
+
+fn looksLikeListFilesCommand(command: []const u8) bool {
+    return std.mem.indexOf(u8, command, "ls") != null or
+        std.mem.indexOf(u8, command, "find") != null or
+        std.mem.indexOf(u8, command, "rg --files") != null;
 }
 
 fn providerStructuredChatOllamaStreaming(
@@ -2827,7 +3394,11 @@ fn processOllamaPendingLine(
     hooks: RuntimeHooks,
 ) !void {
     if (line.len == 0) return;
-    const chunk = try parseJson(OllamaChatStreamChunk, allocator, line);
+    const parsed = try std.json.parseFromSlice(OllamaChatStreamChunk, allocator, line, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    const chunk = parsed.value;
     if (chunk.@"error".len > 0) return error.ProviderRejectedRequest;
     if (chunk.message.content.len > 0) {
         try full_text.appendSlice(allocator, chunk.message.content);
@@ -2852,6 +3423,119 @@ fn runShellCommand(allocator: std.mem.Allocator, command: []const u8) !CommandRe
     return try runCommandCapture(allocator, &.{ "sh", "-lc", command });
 }
 
+fn shouldSkipWorkspacePath(path: []const u8, prune_noise: bool) bool {
+    if (!prune_noise) return false;
+    return eql(path, ".git") or
+        std.mem.startsWith(u8, path, ".git/") or
+        eql(path, ".zig-cache") or
+        std.mem.startsWith(u8, path, ".zig-cache/") or
+        eql(path, "zig-out") or
+        std.mem.startsWith(u8, path, "zig-out/") or
+        eql(path, "node_modules") or
+        std.mem.startsWith(u8, path, "node_modules/") or
+        eql(path, ".contubernium/logs") or
+        std.mem.startsWith(u8, path, ".contubernium/logs/");
+}
+
+fn appendWorkspaceEntries(
+    allocator: std.mem.Allocator,
+    dir: std.fs.Dir,
+    prefix: []const u8,
+    prune_noise: bool,
+    lines: *std.ArrayList([]const u8),
+    truncated: *bool,
+) !void {
+    var iter = dir.iterate();
+    while (try iter.next()) |entry| {
+        if (truncated.*) return;
+
+        const relative_path = if (prefix.len == 0)
+            try allocator.dupe(u8, entry.name)
+        else
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ prefix, entry.name });
+        errdefer allocator.free(relative_path);
+
+        if (shouldSkipWorkspacePath(relative_path, prune_noise)) {
+            allocator.free(relative_path);
+            continue;
+        }
+
+        if (entry.kind == .directory) {
+            const display_path = try std.fmt.allocPrint(allocator, "{s}/", .{relative_path});
+            if (lines.items.len >= max_list_files_entries) {
+                allocator.free(display_path);
+                allocator.free(relative_path);
+                truncated.* = true;
+                return;
+            }
+            try lines.append(allocator, display_path);
+
+            var child = try dir.openDir(entry.name, .{ .iterate = true });
+            defer child.close();
+            try appendWorkspaceEntries(allocator, child, relative_path, prune_noise, lines, truncated);
+            allocator.free(relative_path);
+            continue;
+        }
+
+        if (lines.items.len >= max_list_files_entries) {
+            allocator.free(relative_path);
+            truncated.* = true;
+            return;
+        }
+        try lines.append(allocator, relative_path);
+    }
+}
+
+fn sortStringsAsc(_: void, lhs: []const u8, rhs: []const u8) bool {
+    return std.mem.lessThan(u8, lhs, rhs);
+}
+
+fn listWorkspaceFiles(allocator: std.mem.Allocator, path: []const u8) !CommandResult {
+    const root = if (trimAscii(path).len > 0) trimAscii(path) else ".";
+
+    var lines: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (lines.items) |line| allocator.free(line);
+        lines.deinit(allocator);
+    }
+
+    const prune_noise = eql(root, ".");
+    var truncated = false;
+
+    const dir = std.fs.cwd().openDir(root, .{ .iterate = true }) catch |err| switch (err) {
+        error.NotDir => {
+            const stdout = try allocator.dupe(u8, root);
+            return .{
+                .stdout = stdout,
+                .stderr = "",
+                .exit_code = 0,
+            };
+        },
+        else => return err,
+    };
+    var root_dir = dir;
+    defer root_dir.close();
+
+    const prefix = if (eql(root, ".")) "" else root;
+    try appendWorkspaceEntries(allocator, root_dir, prefix, prune_noise, &lines, &truncated);
+    std.mem.sort([]const u8, lines.items, {}, sortStringsAsc);
+
+    const joined = if (lines.items.len == 0)
+        try allocator.dupe(u8, "no files found")
+    else
+        try joinStrings(allocator, lines.items, "\n");
+    const stdout = if (truncated)
+        try std.fmt.allocPrint(allocator, "{s}\n...[truncated]...", .{joined})
+    else
+        joined;
+
+    return .{
+        .stdout = stdout,
+        .stderr = if (truncated) "truncated directory listing" else "",
+        .exit_code = 0,
+    };
+}
+
 fn summarizeCommandResult(
     allocator: std.mem.Allocator,
     label: []const u8,
@@ -2867,7 +3551,13 @@ fn summarizeCommandResult(
 }
 
 fn searchText(allocator: std.mem.Allocator, pattern: []const u8, path: []const u8, max_hits: usize) ![]const u8 {
-    const rg_result = try runCommandCapture(allocator, &.{ "rg", "-n", "--no-heading", "--max-count", try std.fmt.allocPrint(allocator, "{d}", .{max_hits}), pattern, path });
+    const rg_result = runCommandCapture(allocator, &.{ "rg", "-n", "--no-heading", "--max-count", try std.fmt.allocPrint(allocator, "{d}", .{max_hits}), pattern, path }) catch |err| switch (err) {
+        error.FileNotFound => {
+            const grep_result = try runCommandCapture(allocator, &.{ "grep", "-R", "-n", pattern, path });
+            return grep_result.stdout;
+        },
+        else => return err,
+    };
     if (rg_result.exit_code == 0 or rg_result.exit_code == 1) {
         return rg_result.stdout;
     }
@@ -3009,19 +3699,10 @@ fn blockedToolOutcome(allocator: std.mem.Allocator, state: *AppState, reason: []
 }
 
 fn toolRequestDisplay(allocator: std.mem.Allocator, request: ToolRequest) ![]const u8 {
-    if (request.path.len > 0) {
-        return try std.fmt.allocPrint(allocator, "{s} {s}", .{ request.tool, request.path });
-    }
-    if (request.pattern.len > 0) {
-        return try std.fmt.allocPrint(allocator, "{s} pattern={s}", .{ request.tool, request.pattern });
-    }
-    if (request.command.len > 0) {
-        return try std.fmt.allocPrint(allocator, "{s} {s}", .{ request.tool, request.command });
-    }
-    if (request.description.len > 0) {
-        return try std.fmt.allocPrint(allocator, "{s} {s}", .{ request.tool, request.description });
-    }
-    return request.tool;
+    var buffer: std.ArrayList(u8) = .empty;
+    errdefer buffer.deinit(allocator);
+    try writeToolRequestLabel(buffer.writer(allocator), request);
+    return try buffer.toOwnedSlice(allocator);
 }
 
 fn confirmTool(allocator: std.mem.Allocator, hooks: RuntimeHooks, tool_name: []const u8, detail: []const u8) !bool {
@@ -3118,6 +3799,24 @@ fn joinStrings(allocator: std.mem.Allocator, items: []const []const u8, separato
     return try std.mem.join(allocator, separator, items);
 }
 
+fn canonicalToolName(tool_name: []const u8) []const u8 {
+    if (isSupportedToolName(tool_name)) return tool_name;
+    if (std.mem.lastIndexOfScalar(u8, tool_name, '.')) |dot_index| {
+        const suffix = tool_name[dot_index + 1 ..];
+        if (isSupportedToolName(suffix)) return suffix;
+    }
+    return tool_name;
+}
+
+fn isSupportedToolName(tool_name: []const u8) bool {
+    return eql(tool_name, "list_files") or
+        eql(tool_name, "read_file") or
+        eql(tool_name, "search_text") or
+        eql(tool_name, "run_command") or
+        eql(tool_name, "write_file") or
+        eql(tool_name, "ask_user");
+}
+
 fn makeTurnId(allocator: std.mem.Allocator, actor: []const u8, iteration: usize) ![]const u8 {
     return try std.fmt.allocPrint(allocator, "{d}-{d}-{s}", .{ std.time.timestamp(), iteration, actor });
 }
@@ -3160,6 +3859,7 @@ fn prettyPrintJson(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, normalized, .{
         .ignore_unknown_fields = true,
     });
+    defer parsed.deinit();
     return try std.fmt.allocPrint(
         allocator,
         "{f}",
@@ -3218,6 +3918,418 @@ fn exitCode(term: std.process.Child.Term) i32 {
         .Exited => |code| code,
         else => -1,
     };
+}
+
+fn makeTestSnapshot() TuiSnapshot {
+    return .{
+        .project_name = "Contubernium",
+        .provider_type = "ollama-native",
+        .model = "qwen2.5-coder:7b",
+        .approval_mode = "guarded",
+        .global_status = "idle",
+        .runtime_status = "ready",
+        .current_actor = "decanus",
+        .active_lane = "command",
+        .current_goal = "Test the command tent",
+    };
+}
+
+fn initTestTui(allocator: std.mem.Allocator) TuiSession {
+    return .{
+        .allocator = allocator,
+        .snapshot = makeTestSnapshot(),
+    };
+}
+
+fn testQueueEmit(context: ?*anyopaque, event: RuntimeUiEvent) void {
+    const queue: *RuntimeEventQueue = @ptrCast(@alignCast(context.?));
+    queue.push(event);
+}
+
+test "visibleInputWindow handles zero width" {
+    const testing = std.testing;
+    const view = visibleInputWindow("salve", 3, 0);
+    try testing.expectEqualStrings("", view.text);
+    try testing.expectEqual(@as(usize, 0), view.cursor_col);
+}
+
+test "visibleInputWindow keeps cursor visible at tail" {
+    const testing = std.testing;
+    const view = visibleInputWindow("abcdefghij", 10, 4);
+    try testing.expectEqualStrings("ghij", view.text);
+    try testing.expectEqual(@as(usize, 4), view.cursor_col);
+}
+
+test "currentLaneForState returns command for decanus" {
+    const testing = std.testing;
+    var state = AppState{};
+    state.current_actor = "decanus";
+    try testing.expectEqualStrings("command", currentLaneForState(state));
+}
+
+test "updateCachedModels parses formatted roster" {
+    const testing = std.testing;
+    var tui = initTestTui(testing.allocator);
+    defer tui.deinit();
+
+    try updateCachedModels(testing.allocator, &tui, "[1] gpt-oss:20b\n[2] qwen3-coder:latest (current)\n");
+    try testing.expectEqual(@as(usize, 2), tui.cached_models.len);
+    try testing.expectEqualStrings("gpt-oss:20b", tui.cached_models[0]);
+    try testing.expectEqualStrings("qwen3-coder:latest", tui.cached_models[1]);
+}
+
+test "appendWrappedLines respects width boundaries" {
+    const testing = std.testing;
+    var lines: std.ArrayList(RenderLine) = .empty;
+    defer lines.deinit(testing.allocator);
+
+    try appendWrappedLines(testing.allocator, &lines, "alpha beta gamma", 5, .info, .plain);
+    try testing.expect(lines.items.len >= 3);
+    for (lines.items) |line| {
+        try testing.expect(line.text.len <= 5);
+    }
+}
+
+test "buildRenderFrame places cursor after prompt and input" {
+    const testing = std.testing;
+    var tui = initTestTui(testing.allocator);
+    defer tui.deinit();
+
+    try tui.input.appendSlice(testing.allocator, "salve");
+    tui.cursor = tui.input.items.len;
+
+    const frame = try buildRenderFrame(testing.allocator, &tui, .{ .rows = 24, .cols = 80 });
+    defer testing.allocator.free(frame.screen);
+
+    try testing.expectEqual(@as(usize, 23), frame.cursor_row);
+    try testing.expectEqual(input_prompt.len + 1 + tui.cursor, frame.cursor_col);
+    try testing.expect(std.mem.indexOf(u8, frame.screen, input_prompt) != null);
+    try testing.expect(std.mem.indexOf(u8, frame.screen, "salve") != null);
+}
+
+test "buildRenderFrame includes sidebar on wide terminals" {
+    const testing = std.testing;
+    var tui = initTestTui(testing.allocator);
+    defer tui.deinit();
+
+    const frame = try buildRenderFrame(testing.allocator, &tui, .{ .rows = 24, .cols = 140 });
+    defer testing.allocator.free(frame.screen);
+
+    try testing.expect(std.mem.indexOf(u8, frame.screen, "LIVE CONTEXT") != null);
+}
+
+test "buildRenderFrame omits sidebar on narrow terminals" {
+    const testing = std.testing;
+    var tui = initTestTui(testing.allocator);
+    defer tui.deinit();
+
+    const frame = try buildRenderFrame(testing.allocator, &tui, .{ .rows = 24, .cols = 90 });
+    defer testing.allocator.free(frame.screen);
+
+    try testing.expect(std.mem.indexOf(u8, frame.screen, "LIVE CONTEXT") == null);
+}
+
+test "buildRenderFrame keeps cursor inside tiny terminal bounds" {
+    const testing = std.testing;
+    var tui = initTestTui(testing.allocator);
+    defer tui.deinit();
+
+    try tui.input.appendSlice(testing.allocator, "abc");
+    tui.cursor = tui.input.items.len;
+
+    const frame = try buildRenderFrame(testing.allocator, &tui, .{ .rows = 8, .cols = 12 });
+    defer testing.allocator.free(frame.screen);
+
+    try testing.expect(frame.cursor_row <= 8);
+    try testing.expect(frame.cursor_col <= 12);
+}
+
+test "toolRequestDisplay prefers command and path fields" {
+    const testing = std.testing;
+    const command_text = try toolRequestDisplay(testing.allocator, .{ .tool = "run_command", .command = "zig build" });
+    defer testing.allocator.free(command_text);
+    try testing.expectEqualStrings("run_command zig build", command_text);
+
+    const path_text = try toolRequestDisplay(testing.allocator, .{ .tool = "read_file", .path = "src/main.zig" });
+    defer testing.allocator.free(path_text);
+    try testing.expectEqualStrings("read_file src/main.zig", path_text);
+
+    const list_text = try toolRequestDisplay(testing.allocator, .{ .tool = "list_files" });
+    defer testing.allocator.free(list_text);
+    try testing.expectEqualStrings("list_files .", list_text);
+}
+
+test "canonicalToolName maps repo_browser aliases" {
+    const testing = std.testing;
+    try testing.expectEqualStrings("list_files", canonicalToolName("repo_browser.list_files"));
+    try testing.expectEqualStrings("read_file", canonicalToolName("repo_browser.read_file"));
+    try testing.expectEqualStrings("search_text", canonicalToolName("repo_browser.search_text"));
+    try testing.expectEqualStrings("write_file", canonicalToolName("write_file"));
+}
+
+test "prettyPrintJson indents normalized model output" {
+    const testing = std.testing;
+    const text = try prettyPrintJson(testing.allocator, "```json\n{\"status\":\"ok\",\"nested\":{\"value\":1}}\n```");
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "\n  \"status\"") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "\n  \"nested\"") != null);
+}
+
+test "buildOllamaChatBody preserves structured output settings across stream modes" {
+    const testing = std.testing;
+    const provider = ProviderConfig{
+        .model = "gpt-oss:20b",
+        .structured_output = "json",
+    };
+
+    const streaming_body = try buildOllamaChatBody(
+        testing.allocator,
+        provider,
+        "Return valid JSON only.",
+        "{\"status\":\"ok\"}",
+        true,
+    );
+    defer testing.allocator.free(streaming_body);
+
+    const non_streaming_body = try buildOllamaChatBody(
+        testing.allocator,
+        provider,
+        "Return valid JSON only.",
+        "{\"status\":\"ok\"}",
+        false,
+    );
+    defer testing.allocator.free(non_streaming_body);
+
+    try testing.expect(std.mem.indexOf(u8, streaming_body, "\"stream\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, non_streaming_body, "\"stream\":false") != null);
+    try testing.expect(std.mem.indexOf(u8, streaming_body, "\"think\":false") != null);
+    try testing.expect(std.mem.indexOf(u8, non_streaming_body, "\"think\":false") != null);
+}
+
+test "ollamaMessageRawText converts tool calls into structured tool_request JSON" {
+    const testing = std.testing;
+    const raw = try ollamaMessageRawText(testing.allocator, .{
+        .thinking = "Need to inspect the README.",
+        .tool_calls = &.{
+            .{
+                .function = .{
+                    .name = "repo_browser.read_file",
+                    .arguments = .{
+                        .path = "README.md",
+                    },
+                },
+            },
+        },
+    });
+    defer testing.allocator.free(raw);
+
+    try testing.expect(std.mem.indexOf(u8, raw, "\"action\":\"tool_request\"") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"tool\":\"read_file\"") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"path\":\"README.md\"") != null);
+}
+
+test "toolRequestFromOllamaToolCall maps container exec ls to list_files" {
+    const testing = std.testing;
+    const request = try toolRequestFromOllamaToolCall(.{
+        .name = "container.exec",
+        .arguments = .{
+            .cmd = &.{ "bash", "-lc", "ls -R" },
+        },
+    });
+    try testing.expectEqualStrings("list_files", request.tool);
+    try testing.expectEqualStrings(".", request.path);
+}
+
+test "openAIMessageRawText converts tool calls into structured tool_request JSON" {
+    const testing = std.testing;
+    const raw = try openAIMessageRawText(testing.allocator, .{
+        .tool_calls = &.{
+            .{
+                .function = .{
+                    .name = "repo_browser.read_file",
+                    .arguments = "{\"path\":\"README.md\"}",
+                },
+            },
+        },
+    });
+    defer testing.allocator.free(raw);
+
+    try testing.expect(std.mem.indexOf(u8, raw, "\"tool\":\"read_file\"") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"path\":\"README.md\"") != null);
+}
+
+test "listWorkspaceFiles defaults empty path and skips noisy roots" {
+    const testing = std.testing;
+    const result = try listWorkspaceFiles(testing.allocator, "");
+    defer testing.allocator.free(result.stdout);
+
+    try testing.expect(result.exit_code == 0);
+    try testing.expect(std.mem.indexOf(u8, result.stdout, "README.md") != null);
+    try testing.expect(std.mem.indexOf(u8, result.stdout, ".git/") == null);
+}
+
+test "summarizeDecanusDecisionForUi renders compact tool request summary" {
+    const testing = std.testing;
+    const summary = try summarizeDecanusDecisionForUi(testing.allocator, .{
+        .action = "tool_request",
+        .reasoning = "Need to inspect the workspace before reading docs.",
+        .current_goal = "read docs and explain the project",
+        .tool_requests = &.{
+            .{ .tool = "list_files" },
+        },
+    });
+    defer testing.allocator.free(summary);
+
+    try testing.expect(std.mem.indexOf(u8, summary, "action: tool_request") != null);
+    try testing.expect(std.mem.indexOf(u8, summary, "requested 1 runtime tool") != null);
+    try testing.expect(std.mem.indexOf(u8, summary, "- list_files .") != null);
+    try testing.expect(std.mem.indexOf(u8, summary, "\"action\"") == null);
+}
+
+test "processOllamaPendingLines emits stream chunks and preserves partial tail" {
+    const testing = std.testing;
+    var queue = RuntimeEventQueue{ .allocator = testing.allocator };
+    defer queue.deinit();
+
+    var pending: std.ArrayList(u8) = .empty;
+    defer pending.deinit(testing.allocator);
+    var full_text: std.ArrayList(u8) = .empty;
+    defer full_text.deinit(testing.allocator);
+
+    const hooks = RuntimeHooks{
+        .context = &queue,
+        .emit_fn = testQueueEmit,
+    };
+
+    try pending.appendSlice(testing.allocator, "{\"message\":{\"content\":\"hel\"},\"done\":false}\n{\"message\":{\"content\":\"lo\"},\"done\":false}");
+    try processOllamaPendingLines(testing.allocator, &pending, &full_text, "decanus", hooks);
+
+    try testing.expectEqualStrings("hel", full_text.items);
+    try testing.expect(pending.items.len > 0);
+
+    const first_events = try queue.drain(testing.allocator);
+    defer freeRuntimeUiEvents(testing.allocator, first_events);
+    try testing.expectEqual(@as(usize, 1), first_events.len);
+    try testing.expectEqual(RuntimeUiEventKind.stream_chunk, first_events[0].kind);
+    try testing.expectEqualStrings("hel", first_events[0].text);
+}
+
+test "processOllamaPendingLines completes buffered stream output" {
+    const testing = std.testing;
+    var queue = RuntimeEventQueue{ .allocator = testing.allocator };
+    defer queue.deinit();
+
+    var pending: std.ArrayList(u8) = .empty;
+    defer pending.deinit(testing.allocator);
+    var full_text: std.ArrayList(u8) = .empty;
+    defer full_text.deinit(testing.allocator);
+
+    const hooks = RuntimeHooks{
+        .context = &queue,
+        .emit_fn = testQueueEmit,
+    };
+
+    try pending.appendSlice(testing.allocator, "{\"message\":{\"content\":\"hel\"},\"done\":false}\n{\"message\":{\"content\":\"lo\"},\"done\":false}\n{\"message\":{\"content\":\"\"},\"done\":true}\n");
+    try processOllamaPendingLines(testing.allocator, &pending, &full_text, "decanus", hooks);
+
+    try testing.expectEqualStrings("hello", full_text.items);
+    try testing.expectEqual(@as(usize, 0), pending.items.len);
+
+    const events = try queue.drain(testing.allocator);
+    defer freeRuntimeUiEvents(testing.allocator, events);
+    try testing.expectEqual(@as(usize, 2), events.len);
+    try testing.expectEqualStrings("hel", events[0].text);
+    try testing.expectEqualStrings("lo", events[1].text);
+}
+
+test "snapshotFromState uses config and loop state" {
+    const testing = std.testing;
+    const config = AppConfig{};
+    var state = AppState{};
+    state.current_actor = "artifex";
+    state.agent_loop.active_tool = "artifex";
+    state.agent_loop.iteration = 4;
+    state.agent_loop.last_tool_result = "read_file README.md";
+    state.runtime_session.status = "running";
+    state.runtime_session.model = "custom-model";
+
+    const snapshot = snapshotFromState(config, state, "Contubernium");
+    try testing.expectEqualStrings("Contubernium", snapshot.project_name);
+    try testing.expectEqualStrings("custom-model", snapshot.model);
+    try testing.expectEqualStrings("frontend", snapshot.active_lane);
+    try testing.expectEqualStrings("read_file README.md", snapshot.last_tool_result);
+    try testing.expectEqual(@as(usize, 4), snapshot.iteration);
+}
+
+test "setTuiSnapshot clones strings" {
+    const testing = std.testing;
+    var tui = initTestTui(testing.allocator);
+    defer tui.deinit();
+
+    var actor = try testing.allocator.dupe(u8, "artifex");
+    defer testing.allocator.free(actor);
+
+    try setTuiSnapshot(&tui, .{
+        .project_name = "Contubernium",
+        .provider_type = "ollama-native",
+        .model = "qwen2.5-coder:7b",
+        .approval_mode = "guarded",
+        .global_status = "planning",
+        .runtime_status = "running",
+        .current_actor = actor,
+        .active_tool = "artifex",
+        .active_lane = "frontend",
+        .current_goal = "Investigate crash",
+        .last_error = "",
+        .last_log_path = "",
+        .iteration = 2,
+    });
+
+    actor[0] = 'X';
+    try testing.expectEqualStrings("artifex", tui.snapshot.current_actor);
+    try testing.expectEqualStrings("Investigate crash", tui.snapshot.current_goal);
+}
+
+test "processRuntimeEvents keeps snapshot data after freeing events" {
+    const testing = std.testing;
+    var queue = RuntimeEventQueue{ .allocator = testing.allocator };
+    defer queue.deinit();
+
+    var tui = initTestTui(testing.allocator);
+    defer tui.deinit();
+
+    queue.push(.{
+        .kind = .state_snapshot,
+        .global_status = "waiting_on_tool",
+        .runtime_status = "running_tool",
+        .current_actor = "artifex",
+        .active_tool = "artifex",
+        .active_lane = "frontend",
+        .current_goal = "Repair the command tent",
+        .last_tool_result = "read_file README.md\nContubernium is a Roman-command scaffold.",
+        .iteration = 7,
+    });
+
+    try processRuntimeEvents(testing.allocator, &tui, &queue);
+
+    try testing.expectEqualStrings("artifex", tui.snapshot.current_actor);
+    try testing.expectEqualStrings("frontend", tui.snapshot.active_lane);
+    try testing.expectEqualStrings("Repair the command tent", tui.snapshot.current_goal);
+    try testing.expect(std.mem.indexOf(u8, tui.snapshot.last_tool_result, "README.md") != null);
+    try testing.expectEqual(@as(usize, 7), tui.snapshot.iteration);
+
+    const frame = try buildRenderFrame(testing.allocator, &tui, .{ .rows = 24, .cols = 140 });
+    defer testing.allocator.free(frame.screen);
+    try testing.expect(std.mem.indexOf(u8, frame.screen, "actor   artifex") != null);
+    try testing.expect(std.mem.indexOf(u8, frame.screen, "LATEST") != null);
+    try testing.expect(std.mem.indexOf(u8, frame.screen, "read_file README.md") != null);
+}
+
+test "toneForOutcome treats interrupted runs as danger" {
+    const testing = std.testing;
+    var state = AppState{};
+    state.runtime_session.status = "interrupted";
+    try testing.expectEqual(ChatTone.danger, toneForOutcome(state));
 }
 
 fn stdoutPrint(comptime fmt: []const u8, args: anytype) !void {
