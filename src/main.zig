@@ -6170,14 +6170,18 @@ fn renderOverlay(allocator: std.mem.Allocator, root: vaxis.Window, ui: *const Va
 }
 
 fn renderVaxisUi(allocator: std.mem.Allocator, vx: *vaxis.Vaxis, ui: *VaxisUiSession) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const temp_allocator = arena.allocator();
+
     var root = vx.window();
     fillStyled(root, shellStyle());
     if (ui.mode == .landing and ui.timeline.items.len == 0 and ui.running_command == null and ui.overlay == .none) {
-        try renderLandingUi(allocator, root, ui);
+        try renderLandingUi(temp_allocator, root, ui);
     } else {
-        try renderSessionUi(allocator, root, ui);
+        try renderSessionUi(temp_allocator, root, ui);
     }
-    try renderOverlay(allocator, root, ui);
+    try renderOverlay(temp_allocator, root, ui);
     if (ui.focus != .composer or ui.overlay != .none) root.hideCursor();
 }
 
