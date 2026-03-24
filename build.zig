@@ -8,6 +8,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const vaxis_dep = b.dependency("vaxis", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    root_module.addImport("vaxis", vaxis_dep.module("vaxis"));
 
     const exe = b.addExecutable(.{
         .name = "contubernium",

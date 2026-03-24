@@ -1,5 +1,6 @@
 const std = @import("std");
 const embedded = @import("embedded_assets.zig");
+const vaxis = @import("vaxis");
 
 const max_file_bytes = 16 * 1024 * 1024;
 const runtime_dir_name = ".contubernium";
@@ -8,6 +9,11 @@ const default_config_path = ".contubernium/config.json";
 const default_prompts_dir = ".contubernium/prompts";
 const default_logs_dir = ".contubernium/logs";
 const max_list_files_entries = 400;
+
+const UiFlavor = enum {
+    vaxis,
+    legacy,
+};
 
 const EmbeddedAsset = struct {
     relative_path: []const u8,
@@ -684,7 +690,7 @@ pub fn main() !void {
 
 fn runMain(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len < 2) {
-        try cmdUi(allocator);
+        try cmdUi(allocator, &.{});
         return;
     }
 
@@ -718,7 +724,7 @@ fn runMain(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return;
     }
     if (eql(command, "ui") or eql(command, "chat")) {
-        try cmdUi(allocator);
+        try cmdUi(allocator, args[2..]);
         return;
     }
 
@@ -738,7 +744,7 @@ fn printUsage() !void {
         \\  contubernium run "mission prompt"
         \\  contubernium step
         \\  contubernium resume
-        \\  contubernium ui
+        \\  contubernium ui [--vaxis|--legacy]
         \\
     , .{});
 }
@@ -748,7 +754,7 @@ fn cmdInit(allocator: std.mem.Allocator) !void {
     try stdoutPrint("initialized project runtime in {s}\n", .{runtime_dir_name});
     if (shouldLaunchInteractiveUi()) {
         try stdoutPrint("starting interactive mode\n", .{});
-        try interactiveUiLoop(allocator);
+        try cmdUi(allocator, &.{});
     }
 }
 
@@ -796,12 +802,32 @@ fn cmdResume(allocator: std.mem.Allocator) !void {
     try stdoutPrint("{s}\n", .{try missionOutcomeSummary(allocator, state)});
 }
 
-fn cmdUi(allocator: std.mem.Allocator) !void {
-    try scaffoldProject(allocator);
-    try interactiveUiLoop(allocator);
+fn parseUiFlavor(args: []const []const u8) !UiFlavor {
+    var flavor: UiFlavor = .vaxis;
+    for (args) |arg| {
+        if (eql(arg, "--vaxis")) {
+            flavor = .vaxis;
+            continue;
+        }
+        if (eql(arg, "--legacy")) {
+            flavor = .legacy;
+            continue;
+        }
+        try stderrPrint("usage: contubernium ui [--vaxis|--legacy]\n", .{});
+        return error.InvalidArguments;
+    }
+    return flavor;
 }
 
-fn interactiveUiLoop(allocator: std.mem.Allocator) !void {
+fn cmdUi(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    try scaffoldProject(allocator);
+    switch (try parseUiFlavor(args)) {
+        .vaxis => try interactiveUiLoopVaxis(allocator),
+        .legacy => try interactiveUiLoopLegacy(allocator),
+    }
+}
+
+fn interactiveUiLoopLegacy(allocator: std.mem.Allocator) !void {
     const config = try loadProjectConfig(allocator);
     const state = try loadState(allocator, config.paths.state_file);
     const cwd = try std.process.getCwdAlloc(allocator);
@@ -927,9 +953,13 @@ fn formatModelRoster(allocator: std.mem.Allocator, models: []const []const u8, c
 }
 
 fn saveSelectedModel(allocator: std.mem.Allocator, tui: *TuiSession, selector: []const u8) ![]const u8 {
+    const model_name = try resolveModelSelection(allocator, tui, selector);
+    return saveSelectedModelByName(allocator, model_name);
+}
+
+fn saveSelectedModelByName(allocator: std.mem.Allocator, model_name: []const u8) ![]const u8 {
     const config_path = try resolveConfigPath(allocator);
     var config = try loadConfig(allocator, config_path);
-    const model_name = try resolveModelSelection(allocator, tui, selector);
     config.provider.model = model_name;
     try saveConfig(allocator, config_path, config);
 
@@ -4475,6 +4505,1682 @@ fn exitCode(term: std.process.Child.Term) i32 {
     };
 }
 
+const UiMode = enum {
+    landing,
+    session,
+};
+
+const OverlayKind = enum {
+    none,
+    command_palette,
+    model_switcher,
+    approval,
+    status,
+};
+
+const FocusTarget = enum {
+    transcript,
+    composer,
+    rail,
+    overlay,
+};
+
+const TimelineEntryKind = enum {
+    user,
+    thinking,
+    tool,
+    report,
+    final,
+    system,
+    failure,
+};
+
+const RailState = struct {
+    pinned: bool = false,
+};
+
+const ComposerState = struct {
+    placeholder: []const u8 = "Type a mission or /command",
+};
+
+const ViewportState = struct {
+    scroll_offset: usize = 0,
+    follow_latest: bool = true,
+};
+
+const TimelineEntry = struct {
+    kind: TimelineEntryKind = .system,
+    tone: ChatTone = .info,
+    actor: []const u8 = "",
+    title: []const u8 = "",
+    text: std.ArrayList(u8) = .empty,
+    highlight: HighlightKind = .plain,
+    streaming: bool = false,
+    collapsed: bool = false,
+
+    fn deinit(self: *TimelineEntry, allocator: std.mem.Allocator) void {
+        if (self.actor.len > 0) allocator.free(self.actor);
+        if (self.title.len > 0) allocator.free(self.title);
+        self.text.deinit(allocator);
+    }
+};
+
+const PaletteCommand = struct {
+    label: []const u8,
+    command: []const u8,
+    description: []const u8,
+};
+
+const palette_commands = [_]PaletteCommand{
+    .{ .label = "Resume", .command = "/resume", .description = "Continue the active mission loop." },
+    .{ .label = "Doctor", .command = "/doctor", .description = "Run diagnostics and backend checks." },
+    .{ .label = "Models", .command = "/models", .description = "Refresh the available provider model roster." },
+    .{ .label = "Status", .command = "/status", .description = "Inspect the current runtime snapshot." },
+    .{ .label = "Clear", .command = "/clear", .description = "Clear the transcript and return to the atrium." },
+    .{ .label = "Interrupt", .command = "/interrupt", .description = "Interrupt the active runtime loop." },
+    .{ .label = "Exit", .command = "/exit", .description = "Leave the TUI." },
+};
+
+const VaxisEvent = union(enum) {
+    key_press: vaxis.Key,
+    winsize: vaxis.Winsize,
+    focus_in,
+    focus_out,
+};
+
+const VaxisRenderLine = struct {
+    text: []const u8 = "",
+    tone: ChatTone = .info,
+    highlight: HighlightKind = .plain,
+    kind: TimelineEntryKind = .system,
+    bold: bool = false,
+};
+
+const VaxisUiSession = struct {
+    allocator: std.mem.Allocator,
+    cwd: []const u8 = "",
+    snapshot: TuiSnapshot = .{},
+    owns_snapshot: bool = false,
+    timeline: std.ArrayList(TimelineEntry) = .empty,
+    composer: vaxis.widgets.TextInput,
+    composer_state: ComposerState = .{},
+    viewport: ViewportState = .{},
+    rail: RailState = .{},
+    mode: UiMode = .landing,
+    overlay: OverlayKind = .none,
+    focus: FocusTarget = .composer,
+    dirty: bool = true,
+    should_exit: bool = false,
+    pending_approval: ?ApprovalPrompt = null,
+    approval_choice: bool = true,
+    cached_models: []const []const u8 = &.{},
+    last_model_error: []const u8 = "",
+    active_stream_actor: []const u8 = "",
+    active_stream_index: ?usize = null,
+    running_command: ?WorkerCommandKind = null,
+    command_palette_index: usize = 0,
+    model_overlay_index: usize = 0,
+
+    fn init(allocator: std.mem.Allocator, cwd: []const u8) !VaxisUiSession {
+        return .{
+            .allocator = allocator,
+            .cwd = try allocator.dupe(u8, cwd),
+            .composer = vaxis.widgets.TextInput.init(allocator),
+        };
+    }
+
+    fn deinit(self: *VaxisUiSession) void {
+        for (self.timeline.items) |*entry| {
+            entry.deinit(self.allocator);
+        }
+        self.timeline.deinit(self.allocator);
+        self.composer.deinit();
+        if (self.owns_snapshot) freeTuiSnapshot(self.allocator, &self.snapshot);
+        if (self.active_stream_actor.len > 0) self.allocator.free(self.active_stream_actor);
+        if (self.pending_approval) |approval| {
+            self.allocator.free(approval.tool_name);
+            self.allocator.free(approval.detail);
+        }
+        for (self.cached_models) |model| {
+            self.allocator.free(model);
+        }
+        if (self.cached_models.len > 0) self.allocator.free(self.cached_models);
+        if (self.last_model_error.len > 0) self.allocator.free(self.last_model_error);
+        if (self.cwd.len > 0) self.allocator.free(self.cwd);
+    }
+};
+
+fn setVaxisSnapshot(ui: *VaxisUiSession, snapshot: TuiSnapshot) !void {
+    var owned = try cloneTuiSnapshot(ui.allocator, snapshot);
+    errdefer freeTuiSnapshot(ui.allocator, &owned);
+
+    if (ui.owns_snapshot) freeTuiSnapshot(ui.allocator, &ui.snapshot);
+    ui.snapshot = owned;
+    ui.owns_snapshot = true;
+}
+
+fn replaceOwnedString(allocator: std.mem.Allocator, target: *[]const u8, text: []const u8) !void {
+    if (target.*.len > 0) allocator.free(target.*);
+    target.* = if (text.len == 0) "" else try allocator.dupe(u8, text);
+}
+
+fn parseModelRoster(allocator: std.mem.Allocator, text: []const u8) ![]const []const u8 {
+    var items: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (items.items) |item| allocator.free(item);
+        items.deinit(allocator);
+    }
+
+    var lines = std.mem.tokenizeScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        const trimmed = trimAscii(line);
+        if (trimmed.len == 0) continue;
+        if (trimmed[0] == '[') {
+            if (std.mem.indexOfScalar(u8, trimmed, ']')) |close_index| {
+                const remainder = trimAscii(trimmed[close_index + 1 ..]);
+                if (remainder.len == 0) continue;
+                const current_index = std.mem.indexOf(u8, remainder, " (current)") orelse remainder.len;
+                try items.append(allocator, try allocator.dupe(u8, trimAscii(remainder[0..current_index])));
+                continue;
+            }
+        }
+        try items.append(allocator, try allocator.dupe(u8, trimmed));
+    }
+    return try items.toOwnedSlice(allocator);
+}
+
+fn updateCachedModelsVaxis(allocator: std.mem.Allocator, ui: *VaxisUiSession, text: []const u8) !void {
+    for (ui.cached_models) |model| allocator.free(model);
+    if (ui.cached_models.len > 0) allocator.free(ui.cached_models);
+    ui.cached_models = try parseModelRoster(allocator, text);
+    ui.dirty = true;
+}
+
+fn resolveModelSelectionVaxis(allocator: std.mem.Allocator, ui: *VaxisUiSession, selector: []const u8) ![]const u8 {
+    if (isUnsignedDecimal(selector)) {
+        if (ui.cached_models.len == 0) return error.ModelListUnavailable;
+        const index = try std.fmt.parseUnsigned(usize, selector, 10);
+        if (index == 0 or index > ui.cached_models.len) return error.ModelSelectionOutOfRange;
+        return try allocator.dupe(u8, ui.cached_models[index - 1]);
+    }
+    return try allocator.dupe(u8, selector);
+}
+
+fn clearTimeline(ui: *VaxisUiSession) void {
+    for (ui.timeline.items) |*entry| {
+        entry.deinit(ui.allocator);
+    }
+    ui.timeline.clearRetainingCapacity();
+    if (ui.active_stream_actor.len > 0) ui.allocator.free(ui.active_stream_actor);
+    ui.active_stream_actor = "";
+    ui.active_stream_index = null;
+    ui.viewport = .{};
+    ui.mode = .landing;
+    ui.overlay = .none;
+    ui.focus = .composer;
+    ui.dirty = true;
+}
+
+fn markTimelineMutation(ui: *VaxisUiSession) void {
+    ui.mode = if (ui.timeline.items.len == 0 and ui.running_command == null) .landing else .session;
+    if (ui.viewport.follow_latest) ui.viewport.scroll_offset = 0;
+    ui.dirty = true;
+}
+
+fn appendTimelineEntry(
+    ui: *VaxisUiSession,
+    kind: TimelineEntryKind,
+    tone: ChatTone,
+    actor: []const u8,
+    title: []const u8,
+    text: []const u8,
+    highlight: HighlightKind,
+) !void {
+    var entry = TimelineEntry{
+        .kind = kind,
+        .tone = tone,
+        .actor = try ui.allocator.dupe(u8, actor),
+        .title = try ui.allocator.dupe(u8, title),
+        .highlight = highlight,
+        .collapsed = kind == .tool or kind == .thinking,
+    };
+    try entry.text.appendSlice(ui.allocator, text);
+    try ui.timeline.append(ui.allocator, entry);
+    markTimelineMutation(ui);
+}
+
+fn beginStreamingEntryVaxis(ui: *VaxisUiSession, actor: []const u8) !void {
+    if (ui.active_stream_actor.len > 0) ui.allocator.free(ui.active_stream_actor);
+    const entry = TimelineEntry{
+        .kind = .thinking,
+        .tone = .info,
+        .actor = try ui.allocator.dupe(u8, actor),
+        .title = try ui.allocator.dupe(u8, actor),
+        .highlight = .plain,
+        .streaming = true,
+        .collapsed = false,
+    };
+    try ui.timeline.append(ui.allocator, entry);
+    ui.active_stream_actor = try ui.allocator.dupe(u8, actor);
+    ui.active_stream_index = ui.timeline.items.len - 1;
+    markTimelineMutation(ui);
+}
+
+fn appendStreamingChunkVaxis(ui: *VaxisUiSession, actor: []const u8, text: []const u8) !void {
+    if (ui.active_stream_index) |stream_index| {
+        if (eql(ui.active_stream_actor, actor) and stream_index < ui.timeline.items.len) {
+            try ui.timeline.items[stream_index].text.appendSlice(ui.allocator, text);
+            markTimelineMutation(ui);
+            return;
+        }
+    }
+    try beginStreamingEntryVaxis(ui, actor);
+    if (ui.active_stream_index) |stream_index| {
+        try ui.timeline.items[stream_index].text.appendSlice(ui.allocator, text);
+    }
+    markTimelineMutation(ui);
+}
+
+fn finalizeStreamingEntryVaxis(ui: *VaxisUiSession, actor: []const u8, text: []const u8, highlight: HighlightKind) !void {
+    const final_kind: TimelineEntryKind = if (highlight == .summary) .report else .thinking;
+    const final_tone: ChatTone = if (highlight == .summary) .agent else .info;
+
+    if (ui.active_stream_index) |stream_index| {
+        if (eql(ui.active_stream_actor, actor) and stream_index < ui.timeline.items.len) {
+            var entry = &ui.timeline.items[stream_index];
+            entry.text.clearRetainingCapacity();
+            try entry.text.appendSlice(ui.allocator, text);
+            entry.kind = final_kind;
+            entry.tone = final_tone;
+            entry.highlight = highlight;
+            entry.streaming = false;
+            entry.collapsed = final_kind == .thinking;
+            ui.active_stream_index = null;
+            if (ui.active_stream_actor.len > 0) ui.allocator.free(ui.active_stream_actor);
+            ui.active_stream_actor = "";
+            markTimelineMutation(ui);
+            return;
+        }
+    }
+    try appendTimelineEntry(ui, final_kind, final_tone, actor, actor, text, highlight);
+}
+
+fn timelineKindForRuntimeLog(event: RuntimeUiEvent) TimelineEntryKind {
+    if (event.tone == .mission) return .user;
+    if (event.tone == .danger) return .failure;
+    if (event.tone == .tool) return .tool;
+    if (eql(event.title, "Final Response")) return .final;
+    if (event.tone == .success and event.actor.len > 0) return .report;
+    return .system;
+}
+
+fn processRuntimeEventsVaxis(allocator: std.mem.Allocator, ui: *VaxisUiSession, queue: *RuntimeEventQueue) !void {
+    const events = try queue.drain(allocator);
+    defer freeRuntimeUiEvents(allocator, events);
+
+    for (events) |event| {
+        switch (event.kind) {
+            .log => {
+                const kind = timelineKindForRuntimeLog(event);
+                try appendTimelineEntry(
+                    ui,
+                    kind,
+                    if (kind == .final) .success else event.tone,
+                    event.actor,
+                    event.title,
+                    event.text,
+                    event.highlight,
+                );
+                if (eql(event.title, "Model Query Failed")) {
+                    try replaceOwnedString(ui.allocator, &ui.last_model_error, event.text);
+                }
+            },
+            .stream_start => try beginStreamingEntryVaxis(ui, event.actor),
+            .stream_chunk => try appendStreamingChunkVaxis(ui, event.actor, event.text),
+            .stream_finalize => try finalizeStreamingEntryVaxis(ui, event.actor, event.text, event.highlight),
+            .state_snapshot => {
+                try setVaxisSnapshot(ui, .{
+                    .project_name = if (event.project_name.len > 0) event.project_name else ui.snapshot.project_name,
+                    .provider_type = if (event.provider_type.len > 0) event.provider_type else ui.snapshot.provider_type,
+                    .model = if (event.model.len > 0) event.model else ui.snapshot.model,
+                    .approval_mode = if (event.approval_mode.len > 0) event.approval_mode else ui.snapshot.approval_mode,
+                    .global_status = if (event.global_status.len > 0) event.global_status else ui.snapshot.global_status,
+                    .runtime_status = if (event.runtime_status.len > 0) event.runtime_status else ui.snapshot.runtime_status,
+                    .current_actor = if (event.current_actor.len > 0) event.current_actor else ui.snapshot.current_actor,
+                    .active_tool = event.active_tool,
+                    .active_lane = if (event.active_lane.len > 0) event.active_lane else ui.snapshot.active_lane,
+                    .current_goal = event.current_goal,
+                    .last_tool_result = event.last_tool_result,
+                    .last_error = event.last_error,
+                    .last_log_path = event.last_log_path,
+                    .iteration = event.iteration,
+                });
+                ui.dirty = true;
+            },
+            .approval_request => {
+                if (ui.pending_approval) |approval| {
+                    ui.allocator.free(approval.tool_name);
+                    ui.allocator.free(approval.detail);
+                }
+                ui.pending_approval = .{
+                    .tool_name = try ui.allocator.dupe(u8, event.title),
+                    .detail = try ui.allocator.dupe(u8, event.text),
+                };
+                ui.approval_choice = true;
+                ui.overlay = .approval;
+                ui.focus = .overlay;
+                ui.mode = .session;
+                ui.dirty = true;
+            },
+            .model_roster => {
+                try updateCachedModelsVaxis(allocator, ui, event.text);
+                if (ui.last_model_error.len > 0) {
+                    ui.allocator.free(ui.last_model_error);
+                    ui.last_model_error = "";
+                }
+                try appendTimelineEntry(ui, .system, .success, "models", "Model Roster", event.text, .plain);
+            },
+        }
+    }
+}
+
+fn vaxisInterruptOrExit(ui: *VaxisUiSession, control: *RuntimeControl, worker: ?*WorkerTask) !void {
+    if (worker != null and control.running.load(.seq_cst)) {
+        control.interrupt_requested.store(true, .seq_cst);
+        submitApprovalResponse(control, false);
+        try appendTimelineEntry(ui, .system, .warning, "runtime", "Interrupt", "interrupt requested", .plain);
+        return;
+    }
+    ui.should_exit = true;
+    ui.dirty = true;
+}
+
+fn scrollTimelineUp(ui: *VaxisUiSession, amount: usize) void {
+    ui.viewport.scroll_offset +|= amount;
+    ui.viewport.follow_latest = false;
+    ui.dirty = true;
+}
+
+fn scrollTimelineDown(ui: *VaxisUiSession, amount: usize) void {
+    if (ui.viewport.scroll_offset > amount) {
+        ui.viewport.scroll_offset -= amount;
+        ui.viewport.follow_latest = false;
+    } else {
+        ui.viewport.scroll_offset = 0;
+        ui.viewport.follow_latest = true;
+    }
+    ui.dirty = true;
+}
+
+fn jumpTimelineToLatest(ui: *VaxisUiSession) void {
+    ui.viewport.scroll_offset = 0;
+    ui.viewport.follow_latest = true;
+    ui.dirty = true;
+}
+
+fn nextFocusTarget(ui: *VaxisUiSession, terminal_cols: u16) FocusTarget {
+    if (ui.overlay != .none) return .overlay;
+    if (shouldShowRail(ui, terminal_cols)) {
+        return switch (ui.focus) {
+            .composer => .transcript,
+            .transcript => .rail,
+            .rail => .composer,
+            .overlay => .composer,
+        };
+    }
+    return switch (ui.focus) {
+        .composer => .transcript,
+        .transcript => .composer,
+        .rail => .composer,
+        .overlay => .composer,
+    };
+}
+
+fn executePaletteSelection(
+    allocator: std.mem.Allocator,
+    ui: *VaxisUiSession,
+    queue: *RuntimeEventQueue,
+    control: *RuntimeControl,
+    worker: *?*WorkerTask,
+) !void {
+    const entry = palette_commands[ui.command_palette_index];
+    ui.overlay = .none;
+    ui.focus = .composer;
+    if (eql(entry.command, "/status")) {
+        ui.overlay = .status;
+        ui.focus = .overlay;
+        ui.dirty = true;
+        return;
+    }
+    _ = try handleSubmittedInputVaxis(allocator, ui, queue, control, worker, entry.command);
+}
+
+fn openModelSwitcher(
+    allocator: std.mem.Allocator,
+    ui: *VaxisUiSession,
+    queue: *RuntimeEventQueue,
+    control: *RuntimeControl,
+    worker: *?*WorkerTask,
+) !void {
+    ui.overlay = .model_switcher;
+    ui.focus = .overlay;
+    ui.mode = .session;
+    if (ui.cached_models.len == 0 and (worker.* == null or !control.running.load(.seq_cst))) {
+        worker.* = try startWorker(allocator, queue, control, .models, "");
+        ui.running_command = .models;
+    }
+    ui.dirty = true;
+}
+
+fn selectOverlayModel(
+    allocator: std.mem.Allocator,
+    ui: *VaxisUiSession,
+    control: *RuntimeControl,
+    worker: *?*WorkerTask,
+) !void {
+    if (ui.cached_models.len == 0) return;
+    if (worker.* != null and control.running.load(.seq_cst)) {
+        try appendTimelineEntry(ui, .failure, .danger, "models", "Busy", "change the model after the active command finishes", .plain);
+        return;
+    }
+    const selection = ui.cached_models[@min(ui.model_overlay_index, ui.cached_models.len - 1)];
+    const saved = saveSelectedModelByName(allocator, selection) catch |err| {
+        const message = try friendlyRuntimeError(allocator, err);
+        defer allocator.free(message);
+        try replaceOwnedString(ui.allocator, &ui.last_model_error, message);
+        try appendTimelineEntry(ui, .failure, .danger, "models", "Model Change Failed", ui.last_model_error, .plain);
+        return;
+    };
+    defer allocator.free(saved);
+    try setVaxisSnapshot(ui, .{
+        .project_name = ui.snapshot.project_name,
+        .provider_type = ui.snapshot.provider_type,
+        .model = selection,
+        .approval_mode = ui.snapshot.approval_mode,
+        .global_status = ui.snapshot.global_status,
+        .runtime_status = ui.snapshot.runtime_status,
+        .current_actor = ui.snapshot.current_actor,
+        .active_tool = ui.snapshot.active_tool,
+        .active_lane = ui.snapshot.active_lane,
+        .current_goal = ui.snapshot.current_goal,
+        .last_tool_result = ui.snapshot.last_tool_result,
+        .last_error = ui.snapshot.last_error,
+        .last_log_path = ui.snapshot.last_log_path,
+        .iteration = ui.snapshot.iteration,
+    });
+    try appendTimelineEntry(ui, .system, .success, "models", "Model Changed", saved, .plain);
+    ui.overlay = .none;
+    ui.focus = .composer;
+}
+
+fn submitApprovalVaxis(ui: *VaxisUiSession, control: *RuntimeControl, approved: bool) !void {
+    submitApprovalResponse(control, approved);
+    try appendTimelineEntry(
+        ui,
+        .system,
+        if (approved) .success else .warning,
+        "approval",
+        if (approved) "Approval Granted" else "Approval Denied",
+        if (ui.pending_approval) |approval| approval.detail else "approval handled",
+        .plain,
+    );
+    if (ui.pending_approval) |approval| {
+        ui.allocator.free(approval.tool_name);
+        ui.allocator.free(approval.detail);
+        ui.pending_approval = null;
+    }
+    ui.overlay = .none;
+    ui.focus = .composer;
+    ui.dirty = true;
+}
+
+fn handleSubmittedInputVaxis(
+    allocator: std.mem.Allocator,
+    ui: *VaxisUiSession,
+    queue: *RuntimeEventQueue,
+    control: *RuntimeControl,
+    worker: *?*WorkerTask,
+    input: []const u8,
+) !bool {
+    if (input.len == 0) return true;
+
+    if (input[0] != '/') {
+        if (worker.* != null and control.running.load(.seq_cst)) {
+            try appendTimelineEntry(ui, .failure, .danger, "runtime", "Busy", "the runtime is already executing a command", .plain);
+            return true;
+        }
+        try appendTimelineEntry(ui, .user, .mission, "user", "Mission", input, .plain);
+        worker.* = try startWorker(allocator, queue, control, .mission, try allocator.dupe(u8, input));
+        ui.running_command = .mission;
+        ui.mode = .session;
+        ui.focus = .composer;
+        return true;
+    }
+
+    var parts = std.mem.tokenizeScalar(u8, input[1..], ' ');
+    const command = parts.next() orelse return true;
+
+    if (eql(command, "exit") or eql(command, "quit")) return false;
+
+    if (eql(command, "help")) {
+        ui.overlay = .command_palette;
+        ui.focus = .overlay;
+        ui.dirty = true;
+        return true;
+    }
+
+    if (eql(command, "interrupt")) {
+        if (worker.* != null and control.running.load(.seq_cst)) {
+            control.interrupt_requested.store(true, .seq_cst);
+            submitApprovalResponse(control, false);
+            try appendTimelineEntry(ui, .system, .warning, "runtime", "Interrupt", "interrupt requested", .plain);
+        } else {
+            try appendTimelineEntry(ui, .system, .info, "runtime", "Interrupt", "no active command", .plain);
+        }
+        return true;
+    }
+
+    if (eql(command, "clear")) {
+        clearTimeline(ui);
+        return true;
+    }
+
+    if (eql(command, "status")) {
+        ui.overlay = .status;
+        ui.focus = .overlay;
+        ui.dirty = true;
+        return true;
+    }
+
+    if (eql(command, "model")) {
+        if (worker.* != null and control.running.load(.seq_cst)) {
+            try appendTimelineEntry(ui, .failure, .danger, "runtime", "Busy", "change the model after the active command finishes", .plain);
+            return true;
+        }
+        const remainder = std.mem.trim(u8, input[1 + command.len ..], " ");
+        if (remainder.len == 0) {
+            try appendTimelineEntry(ui, .system, .info, "models", "Usage", "usage: /model <n|name>", .plain);
+            return true;
+        }
+        const model_name = resolveModelSelectionVaxis(allocator, ui, remainder) catch |err| {
+            const message = try friendlyRuntimeError(allocator, err);
+            defer allocator.free(message);
+            try appendTimelineEntry(ui, .failure, .danger, "models", "Model Change Failed", message, .plain);
+            return true;
+        };
+        defer allocator.free(model_name);
+        const saved = saveSelectedModelByName(allocator, model_name) catch |err| {
+            const message = try friendlyRuntimeError(allocator, err);
+            defer allocator.free(message);
+            try appendTimelineEntry(ui, .failure, .danger, "models", "Model Change Failed", message, .plain);
+            return true;
+        };
+        defer allocator.free(saved);
+        try setVaxisSnapshot(ui, .{
+            .project_name = ui.snapshot.project_name,
+            .provider_type = ui.snapshot.provider_type,
+            .model = model_name,
+            .approval_mode = ui.snapshot.approval_mode,
+            .global_status = ui.snapshot.global_status,
+            .runtime_status = ui.snapshot.runtime_status,
+            .current_actor = ui.snapshot.current_actor,
+            .active_tool = ui.snapshot.active_tool,
+            .active_lane = ui.snapshot.active_lane,
+            .current_goal = ui.snapshot.current_goal,
+            .last_tool_result = ui.snapshot.last_tool_result,
+            .last_error = ui.snapshot.last_error,
+            .last_log_path = ui.snapshot.last_log_path,
+            .iteration = ui.snapshot.iteration,
+        });
+        try appendTimelineEntry(ui, .system, .success, "models", "Model Changed", saved, .plain);
+        return true;
+    }
+
+    if (worker.* != null and control.running.load(.seq_cst)) {
+        try appendTimelineEntry(ui, .failure, .danger, "runtime", "Busy", "wait for the active command to finish or press Ctrl+C", .plain);
+        return true;
+    }
+
+    if (eql(command, "doctor")) {
+        worker.* = try startWorker(allocator, queue, control, .doctor, "");
+        ui.running_command = .doctor;
+        ui.mode = .session;
+        return true;
+    }
+
+    if (eql(command, "resume")) {
+        worker.* = try startWorker(allocator, queue, control, .resume_run, "");
+        ui.running_command = .resume_run;
+        ui.mode = .session;
+        return true;
+    }
+
+    if (eql(command, "models")) {
+        worker.* = try startWorker(allocator, queue, control, .models, "");
+        ui.running_command = .models;
+        ui.mode = .session;
+        return true;
+    }
+
+    const message = try std.fmt.allocPrint(allocator, "unknown command: /{s}", .{command});
+    defer allocator.free(message);
+    try appendTimelineEntry(ui, .failure, .danger, "help", "Unknown Command", message, .plain);
+    return true;
+}
+
+fn submitComposerVaxis(
+    allocator: std.mem.Allocator,
+    ui: *VaxisUiSession,
+    queue: *RuntimeEventQueue,
+    control: *RuntimeControl,
+    worker: *?*WorkerTask,
+) !bool {
+    const owned = try ui.composer.toOwnedSlice();
+    defer allocator.free(owned);
+    const trimmed = trimAscii(owned);
+    if (trimmed.len == 0) return true;
+    return try handleSubmittedInputVaxis(allocator, ui, queue, control, worker, trimmed);
+}
+
+fn handleOverlayKey(
+    allocator: std.mem.Allocator,
+    ui: *VaxisUiSession,
+    queue: *RuntimeEventQueue,
+    control: *RuntimeControl,
+    worker: *?*WorkerTask,
+    key: vaxis.Key,
+) !bool {
+    switch (ui.overlay) {
+        .approval => {
+            if (key.matches(vaxis.Key.escape, .{})) {
+                try submitApprovalVaxis(ui, control, false);
+                return true;
+            }
+            if (key.matches(vaxis.Key.tab, .{}) or key.matches(vaxis.Key.left, .{}) or key.matches(vaxis.Key.right, .{})) {
+                ui.approval_choice = !ui.approval_choice;
+                ui.dirty = true;
+                return true;
+            }
+            if (key.matches('y', .{}) or key.matches('Y', .{})) {
+                try submitApprovalVaxis(ui, control, true);
+                return true;
+            }
+            if (key.matches('n', .{}) or key.matches('N', .{})) {
+                try submitApprovalVaxis(ui, control, false);
+                return true;
+            }
+            if (key.matches(vaxis.Key.enter, .{})) {
+                try submitApprovalVaxis(ui, control, ui.approval_choice);
+                return true;
+            }
+        },
+        .command_palette => {
+            if (key.matches(vaxis.Key.escape, .{})) {
+                ui.overlay = .none;
+                ui.focus = .composer;
+                ui.dirty = true;
+                return true;
+            }
+            if (key.matches(vaxis.Key.up, .{})) {
+                ui.command_palette_index = if (ui.command_palette_index == 0) palette_commands.len - 1 else ui.command_palette_index - 1;
+                ui.dirty = true;
+                return true;
+            }
+            if (key.matches(vaxis.Key.down, .{})) {
+                ui.command_palette_index = (ui.command_palette_index + 1) % palette_commands.len;
+                ui.dirty = true;
+                return true;
+            }
+            if (key.matches(vaxis.Key.enter, .{})) {
+                try executePaletteSelection(allocator, ui, queue, control, worker);
+                return true;
+            }
+        },
+        .model_switcher => {
+            if (key.matches(vaxis.Key.escape, .{})) {
+                ui.overlay = .none;
+                ui.focus = .composer;
+                ui.dirty = true;
+                return true;
+            }
+            if (ui.cached_models.len > 0 and key.matches(vaxis.Key.up, .{})) {
+                ui.model_overlay_index = if (ui.model_overlay_index == 0) ui.cached_models.len - 1 else ui.model_overlay_index - 1;
+                ui.dirty = true;
+                return true;
+            }
+            if (ui.cached_models.len > 0 and key.matches(vaxis.Key.down, .{})) {
+                ui.model_overlay_index = (ui.model_overlay_index + 1) % ui.cached_models.len;
+                ui.dirty = true;
+                return true;
+            }
+            if (key.matches(vaxis.Key.enter, .{})) {
+                try selectOverlayModel(allocator, ui, control, worker);
+                return true;
+            }
+        },
+        .status => {
+            if (key.matches(vaxis.Key.escape, .{}) or key.matches(vaxis.Key.enter, .{})) {
+                ui.overlay = .none;
+                ui.focus = .composer;
+                ui.dirty = true;
+                return true;
+            }
+        },
+        .none => {},
+    }
+    return true;
+}
+
+fn handleVaxisKey(
+    allocator: std.mem.Allocator,
+    ui: *VaxisUiSession,
+    queue: *RuntimeEventQueue,
+    control: *RuntimeControl,
+    worker: *?*WorkerTask,
+    terminal_cols: u16,
+    key: vaxis.Key,
+) !bool {
+    if (key.matches('c', .{ .ctrl = true })) {
+        try vaxisInterruptOrExit(ui, control, worker.*);
+        return !ui.should_exit;
+    }
+
+    if (ui.overlay != .none) {
+        return try handleOverlayKey(allocator, ui, queue, control, worker, key);
+    }
+
+    if (key.matches('p', .{ .ctrl = true })) {
+        ui.overlay = .command_palette;
+        ui.focus = .overlay;
+        ui.dirty = true;
+        return true;
+    }
+
+    if (key.matches('t', .{ .ctrl = true })) {
+        try openModelSwitcher(allocator, ui, queue, control, worker);
+        return true;
+    }
+
+    if (key.matches('r', .{ .ctrl = true })) {
+        ui.rail.pinned = !ui.rail.pinned;
+        ui.dirty = true;
+        return true;
+    }
+
+    if (key.matches(vaxis.Key.escape, .{})) {
+        ui.focus = .composer;
+        ui.dirty = true;
+        return true;
+    }
+
+    if (key.matches(vaxis.Key.tab, .{})) {
+        ui.focus = nextFocusTarget(ui, terminal_cols);
+        ui.dirty = true;
+        return true;
+    }
+
+    if (key.matches(vaxis.Key.page_up, .{})) {
+        scrollTimelineUp(ui, 12);
+        return true;
+    }
+
+    if (key.matches(vaxis.Key.page_down, .{})) {
+        scrollTimelineDown(ui, 12);
+        return true;
+    }
+
+    if (key.matches(vaxis.Key.end, .{})) {
+        jumpTimelineToLatest(ui);
+        return true;
+    }
+
+    if (ui.focus == .transcript or ui.focus == .rail) {
+        if (key.matches(vaxis.Key.up, .{})) {
+            scrollTimelineUp(ui, 3);
+            return true;
+        }
+        if (key.matches(vaxis.Key.down, .{})) {
+            scrollTimelineDown(ui, 3);
+            return true;
+        }
+    }
+
+    if (ui.focus == .composer) {
+        if (key.matches(vaxis.Key.up, .{})) {
+            scrollTimelineUp(ui, 3);
+            return true;
+        }
+        if (key.matches(vaxis.Key.down, .{})) {
+            scrollTimelineDown(ui, 3);
+            return true;
+        }
+        if (key.matches(vaxis.Key.enter, .{})) {
+            const keep_running = try submitComposerVaxis(allocator, ui, queue, control, worker);
+            ui.mode = if (ui.timeline.items.len == 0 and ui.running_command == null) .landing else .session;
+            ui.dirty = true;
+            return keep_running;
+        }
+        try ui.composer.update(.{ .key_press = key });
+        ui.mode = .session;
+        ui.dirty = true;
+        return true;
+    }
+
+    return true;
+}
+
+fn interactiveUiLoopVaxis(allocator: std.mem.Allocator) !void {
+    const config = try loadProjectConfig(allocator);
+    const state = try loadState(allocator, config.paths.state_file);
+    const cwd = try std.process.getCwdAlloc(allocator);
+
+    var queue = RuntimeEventQueue{ .allocator = allocator };
+    defer queue.deinit();
+
+    var control = RuntimeControl{};
+    var ui = try VaxisUiSession.init(allocator, cwd);
+    defer ui.deinit();
+
+    try setVaxisSnapshot(&ui, snapshotFromState(config, state, std.fs.path.basename(cwd)));
+
+    var tty_buffer: [4096]u8 = undefined;
+    var tty = try vaxis.Tty.init(&tty_buffer);
+    defer tty.deinit();
+
+    var vx = try vaxis.init(allocator, .{
+        .system_clipboard_allocator = allocator,
+        .kitty_keyboard_flags = .{ .report_events = true },
+    });
+    defer vx.deinit(allocator, tty.writer());
+
+    var loop: vaxis.Loop(VaxisEvent) = .{
+        .tty = &tty,
+        .vaxis = &vx,
+    };
+    try loop.init();
+    defer loop.stop();
+    try loop.start();
+
+    const initial_winsize = try vaxis.Tty.getWinsize(tty.fd);
+    try vx.enterAltScreen(tty.writer());
+    try vx.queryTerminal(tty.writer(), 1 * std.time.ns_per_s);
+    try vx.setBracketedPaste(tty.writer(), true);
+    try vx.resize(allocator, tty.writer(), initial_winsize);
+
+    var worker: ?*WorkerTask = null;
+    defer {
+        if (worker) |task| {
+            if (task.control.approval_pending) submitApprovalResponse(task.control, false);
+            if (task.control.running.load(.seq_cst)) task.control.interrupt_requested.store(true, .seq_cst);
+            if (task.thread) |thread| thread.join();
+            allocator.destroy(task);
+        }
+    }
+
+    var last_render_ms = std.time.milliTimestamp();
+
+    while (!ui.should_exit) {
+        if (worker) |task| {
+            if (!task.control.running.load(.seq_cst)) {
+                if (task.thread) |thread| thread.join();
+                allocator.destroy(task);
+                worker = null;
+                ui.running_command = null;
+                if (ui.timeline.items.len == 0) ui.mode = .landing;
+                ui.dirty = true;
+            }
+        }
+
+        try processRuntimeEventsVaxis(allocator, &ui, &queue);
+
+        while (loop.tryEvent()) |event| {
+            switch (event) {
+                .winsize => |winsize| {
+                    try vx.resize(allocator, tty.writer(), winsize);
+                    ui.dirty = true;
+                },
+                .key_press => |key| {
+                    const keep_running = try handleVaxisKey(allocator, &ui, &queue, &control, &worker, vx.screen.width, key);
+                    if (!keep_running) {
+                        ui.should_exit = true;
+                        break;
+                    }
+                },
+                .focus_in, .focus_out => {},
+            }
+        }
+
+        const now_ms = std.time.milliTimestamp();
+        if (ui.dirty or now_ms - last_render_ms >= 100) {
+            try renderVaxisUi(allocator, &vx, &ui);
+            try vx.render(tty.writer());
+            last_render_ms = now_ms;
+            ui.dirty = false;
+        }
+
+        std.Thread.sleep(16 * std.time.ns_per_ms);
+    }
+}
+
+const roman_bg = vaxis.Color.rgbFromUint(0x08090b);
+const roman_panel = vaxis.Color.rgbFromUint(0x111111);
+const roman_panel_alt = vaxis.Color.rgbFromUint(0x1a1918);
+const roman_border = vaxis.Color.rgbFromUint(0x2d2b28);
+const roman_ivory = vaxis.Color.rgbFromUint(0xe7dfd2);
+const roman_muted = vaxis.Color.rgbFromUint(0x8d877d);
+const roman_gold = vaxis.Color.rgbFromUint(0xc8a65a);
+const roman_blue = vaxis.Color.rgbFromUint(0x5e95d8);
+const roman_success = vaxis.Color.rgbFromUint(0x8fd19a);
+const roman_danger = vaxis.Color.rgbFromUint(0xd47b72);
+
+fn clampU16(value: usize) u16 {
+    return @intCast(@min(value, @as(usize, std.math.maxInt(u16))));
+}
+
+fn clampI17(value: usize) i17 {
+    return @intCast(@min(value, @as(usize, std.math.maxInt(i17))));
+}
+
+fn fillStyled(win: vaxis.Window, style: vaxis.Style) void {
+    win.fill(.{
+        .char = .{ .grapheme = " ", .width = 1 },
+        .style = style,
+    });
+}
+
+fn segmentStyle(style: vaxis.Style, text: []const u8) vaxis.Segment {
+    return .{
+        .text = text,
+        .style = style,
+    };
+}
+
+fn drawText(win: vaxis.Window, row: usize, col: usize, text: []const u8, style: vaxis.Style) void {
+    if (row >= win.height or col >= win.width) return;
+    const available = @as(usize, win.width) - col;
+    const clipped = clipText(text, available);
+    _ = win.printSegment(segmentStyle(style, clipped), .{
+        .row_offset = clampU16(row),
+        .col_offset = clampU16(col),
+        .wrap = .none,
+    });
+}
+
+fn drawSegments(win: vaxis.Window, row: usize, col: usize, segments: []const vaxis.Segment) void {
+    if (row >= win.height or col >= win.width) return;
+    _ = win.print(segments, .{
+        .row_offset = clampU16(row),
+        .col_offset = clampU16(col),
+        .wrap = .none,
+    });
+}
+
+fn drawWrapped(win: vaxis.Window, row: usize, col: usize, text: []const u8, style: vaxis.Style) usize {
+    if (row >= win.height or col >= win.width) return row;
+    const child = win.child(.{
+        .x_off = clampI17(col),
+        .y_off = clampI17(row),
+        .width = win.width - clampU16(col),
+        .height = win.height - clampU16(row),
+    });
+    const result = child.printSegment(segmentStyle(style, text), .{
+        .wrap = .word,
+    });
+    return row + result.row + @as(usize, if (result.col > 0 or text.len == 0) 1 else 0);
+}
+
+fn centeredCol(total_width: usize, text: []const u8) usize {
+    const width = displayWidth(text);
+    if (width >= total_width) return 0;
+    return (total_width - width) / 2;
+}
+
+fn shellStyle() vaxis.Style {
+    return .{ .fg = roman_ivory, .bg = roman_bg };
+}
+
+fn mutedStyle() vaxis.Style {
+    return .{ .fg = roman_muted, .bg = roman_bg };
+}
+
+fn panelStyle() vaxis.Style {
+    return .{ .fg = roman_ivory, .bg = roman_panel };
+}
+
+fn panelAltStyle() vaxis.Style {
+    return .{ .fg = roman_ivory, .bg = roman_panel_alt };
+}
+
+fn borderStyle() vaxis.Style {
+    return .{ .fg = roman_border, .bg = roman_panel };
+}
+
+fn accentStyle() vaxis.Style {
+    return .{ .fg = roman_blue, .bg = roman_panel_alt, .bold = true };
+}
+
+fn brandStyle() vaxis.Style {
+    return .{ .fg = roman_ivory, .bg = roman_bg, .bold = true };
+}
+
+fn headingStyle() vaxis.Style {
+    return .{ .fg = roman_gold, .bg = roman_bg, .bold = true };
+}
+
+fn overlayStyle() vaxis.Style {
+    return .{ .fg = roman_ivory, .bg = roman_panel_alt };
+}
+
+fn toneStyle(kind: TimelineEntryKind, tone: ChatTone, bold: bool, highlight: HighlightKind) vaxis.Style {
+    var style: vaxis.Style = .{
+        .fg = roman_ivory,
+        .bg = roman_bg,
+        .bold = bold,
+    };
+
+    switch (kind) {
+        .thinking => {
+            style.fg = roman_muted;
+            style.dim = true;
+        },
+        .tool => style.fg = roman_gold,
+        .report => style.fg = roman_ivory,
+        .final => {
+            style.fg = roman_success;
+            style.bold = true;
+        },
+        .system => style.fg = roman_muted,
+        .failure => {
+            style.fg = roman_danger;
+            style.bold = true;
+        },
+        .user => style.fg = roman_ivory,
+    }
+
+    switch (tone) {
+        .warning => style.fg = roman_gold,
+        .danger => style.fg = roman_danger,
+        .success => style.fg = roman_success,
+        .agent => style.fg = roman_ivory,
+        .tool => style.fg = roman_gold,
+        .mission => style.fg = roman_ivory,
+        .info => {},
+    }
+
+    if (highlight == .summary and kind == .report) {
+        style.fg = roman_ivory;
+    }
+
+    return style;
+}
+
+fn textInputIsEmpty(input: *const vaxis.widgets.TextInput) bool {
+    return input.buf.firstHalf().len + input.buf.secondHalf().len == 0;
+}
+
+fn shouldShowRail(ui: *const VaxisUiSession, terminal_cols: u16) bool {
+    if (terminal_cols < 132) return false;
+    return ui.rail.pinned or
+        ui.pending_approval != null or
+        ui.snapshot.current_goal.len > 0 or
+        ui.snapshot.last_error.len > 0 or
+        ui.snapshot.last_tool_result.len > 0;
+}
+
+fn timelineHeadingText(allocator: std.mem.Allocator, entry: TimelineEntry) ![]const u8 {
+    return switch (entry.kind) {
+        .user => try allocator.dupe(u8, "Mission"),
+        .thinking => if (entry.actor.len > 0)
+            try std.fmt.allocPrint(allocator, "{s} thinking", .{entry.actor})
+        else
+            try allocator.dupe(u8, "Thinking"),
+        .tool => if (entry.title.len > 0)
+            try std.fmt.allocPrint(allocator, "Tool • {s}", .{entry.title})
+        else
+            try allocator.dupe(u8, "Tool"),
+        .report => if (entry.actor.len > 0)
+            try std.fmt.allocPrint(allocator, "{s} report", .{entry.actor})
+        else if (entry.title.len > 0)
+            try allocator.dupe(u8, entry.title)
+        else
+            try allocator.dupe(u8, "Report"),
+        .final => try allocator.dupe(u8, "Final Response"),
+        .system => if (entry.title.len > 0) try allocator.dupe(u8, entry.title) else try allocator.dupe(u8, "System"),
+        .failure => if (entry.title.len > 0) try allocator.dupe(u8, entry.title) else try allocator.dupe(u8, "Error"),
+    };
+}
+
+fn appendWrappedVaxisLinesWithPrefix(
+    allocator: std.mem.Allocator,
+    lines: *std.ArrayList(VaxisRenderLine),
+    text: []const u8,
+    width: usize,
+    tone: ChatTone,
+    highlight: HighlightKind,
+    kind: TimelineEntryKind,
+    prefix: []const u8,
+) !void {
+    if (width == 0) return;
+    const prefix_width = displayWidth(prefix);
+    const content_width = if (prefix_width >= width) 1 else width - prefix_width;
+    var source_lines = std.mem.splitScalar(u8, text, '\n');
+    while (source_lines.next()) |source_line| {
+        if (source_line.len == 0) {
+            try lines.append(allocator, .{ .kind = kind, .tone = tone, .highlight = highlight });
+            continue;
+        }
+        var remainder = source_line;
+        while (displayWidth(remainder) > content_width) {
+            const split_at = wrapTextByteIndex(remainder, content_width);
+            const segment = trimAscii(remainder[0..split_at]);
+            try lines.append(allocator, .{
+                .text = try prefixedRenderText(allocator, prefix, segment),
+                .kind = kind,
+                .tone = tone,
+                .highlight = highlight,
+            });
+            remainder = trimAscii(remainder[split_at..]);
+        }
+        try lines.append(allocator, .{
+            .text = try prefixedRenderText(allocator, prefix, remainder),
+            .kind = kind,
+            .tone = tone,
+            .highlight = highlight,
+        });
+    }
+}
+
+fn buildTimelineLinesVaxis(
+    allocator: std.mem.Allocator,
+    ui: *const VaxisUiSession,
+    lines: *std.ArrayList(VaxisRenderLine),
+    width: usize,
+) !void {
+    if (ui.timeline.items.len == 0) {
+        try lines.append(allocator, .{
+            .text = "No missions yet. Start with a brief objective or open the palette.",
+            .kind = .system,
+            .tone = .info,
+        });
+        return;
+    }
+
+    for (ui.timeline.items) |entry| {
+        const heading = try timelineHeadingText(allocator, entry);
+        try lines.append(allocator, .{
+            .text = heading,
+            .kind = entry.kind,
+            .tone = entry.tone,
+            .bold = true,
+        });
+
+        var preview_text: []const u8 = entry.text.items;
+        if (entry.collapsed and !entry.streaming) {
+            preview_text = try compactTextForUi(
+                allocator,
+                entry.text.items,
+                if (entry.kind == .tool) 2 else 1,
+                if (entry.kind == .tool) 200 else 140,
+            );
+        }
+        defer if (preview_text.ptr != entry.text.items.ptr) allocator.free(preview_text);
+
+        try appendWrappedVaxisLinesWithPrefix(
+            allocator,
+            lines,
+            preview_text,
+            width,
+            entry.tone,
+            entry.highlight,
+            entry.kind,
+            "  ",
+        );
+        if (entry.collapsed and !entry.streaming) {
+            try lines.append(allocator, .{
+                .text = "  … secondary details collapsed",
+                .kind = .thinking,
+                .tone = .info,
+            });
+        }
+        try lines.append(allocator, .{});
+    }
+}
+
+fn buildRailLinesVaxis(
+    allocator: std.mem.Allocator,
+    ui: *const VaxisUiSession,
+    lines: *std.ArrayList(VaxisRenderLine),
+    width: usize,
+) !void {
+    try lines.append(allocator, .{ .text = "LIVE CONTEXT", .kind = .tool, .tone = .warning, .bold = true });
+    const actor_line = try std.fmt.allocPrint(allocator, "actor  {s}", .{ui.snapshot.current_actor});
+    defer allocator.free(actor_line);
+    try appendWrappedVaxisLinesWithPrefix(allocator, lines, actor_line, width, .info, .plain, .system, "");
+    const lane_line = try std.fmt.allocPrint(allocator, "lane   {s}", .{ui.snapshot.active_lane});
+    defer allocator.free(lane_line);
+    try appendWrappedVaxisLinesWithPrefix(allocator, lines, lane_line, width, .info, .plain, .system, "");
+    const global_line = try std.fmt.allocPrint(allocator, "global {s}", .{ui.snapshot.global_status});
+    defer allocator.free(global_line);
+    try appendWrappedVaxisLinesWithPrefix(allocator, lines, global_line, width, .info, .plain, .system, "");
+    const runtime_line = try std.fmt.allocPrint(allocator, "runtime {s}", .{ui.snapshot.runtime_status});
+    defer allocator.free(runtime_line);
+    try appendWrappedVaxisLinesWithPrefix(allocator, lines, runtime_line, width, .info, .plain, .system, "");
+    const turn_line = try std.fmt.allocPrint(allocator, "turn   {d}", .{ui.snapshot.iteration});
+    defer allocator.free(turn_line);
+    try appendWrappedVaxisLinesWithPrefix(allocator, lines, turn_line, width, .info, .plain, .system, "");
+    try lines.append(allocator, .{});
+    try lines.append(allocator, .{ .text = "GOAL", .kind = .tool, .tone = .warning, .bold = true });
+    try appendWrappedVaxisLinesWithPrefix(allocator, lines, if (ui.snapshot.current_goal.len > 0) ui.snapshot.current_goal else "idle", width, .info, .plain, .system, "");
+    try lines.append(allocator, .{});
+    try lines.append(allocator, .{ .text = "LATEST", .kind = .tool, .tone = .warning, .bold = true });
+    const latest = try compactTextForUi(allocator, if (ui.snapshot.last_tool_result.len > 0) ui.snapshot.last_tool_result else "none", 6, 260);
+    defer allocator.free(latest);
+    try appendWrappedVaxisLinesWithPrefix(allocator, lines, latest, width, .info, .plain, .system, "");
+    try lines.append(allocator, .{});
+    try lines.append(allocator, .{ .text = "MODELS", .kind = .tool, .tone = .warning, .bold = true });
+    if (ui.cached_models.len == 0) {
+        try appendWrappedVaxisLinesWithPrefix(
+            allocator,
+            lines,
+            if (ui.last_model_error.len > 0) ui.last_model_error else "Ctrl+T to inspect models",
+            width,
+            if (ui.last_model_error.len > 0) .danger else .info,
+            .plain,
+            if (ui.last_model_error.len > 0) .failure else .system,
+            "",
+        );
+    } else {
+        var index: usize = 0;
+        while (index < ui.cached_models.len and index < 6) : (index += 1) {
+            try lines.append(allocator, .{
+                .text = try std.fmt.allocPrint(
+                    allocator,
+                    "{s} {d}. {s}",
+                    .{ if (eql(ui.cached_models[index], ui.snapshot.model)) "*" else " ", index + 1, ui.cached_models[index] },
+                ),
+                .kind = .system,
+                .tone = .info,
+            });
+        }
+    }
+    if (ui.snapshot.last_error.len > 0) {
+        try lines.append(allocator, .{});
+        try lines.append(allocator, .{ .text = "ERROR", .kind = .failure, .tone = .danger, .bold = true });
+        try appendWrappedVaxisLinesWithPrefix(allocator, lines, ui.snapshot.last_error, width, .danger, .plain, .failure, "");
+    }
+}
+
+fn drawSummaryStyled(win: vaxis.Window, row: usize, text: []const u8, style: vaxis.Style) void {
+    if (row >= win.height) return;
+    const clipped = clipText(text, win.width);
+    if (std.mem.startsWith(u8, trimAscii(clipped), "- ")) {
+        const segments = [_]vaxis.Segment{
+            segmentStyle(.{ .fg = roman_gold, .bg = roman_bg, .bold = true }, "- "),
+            segmentStyle(style, trimAscii(clipped)[2..]),
+        };
+        drawSegments(win, row, 0, &segments);
+        return;
+    }
+    if (std.mem.indexOfScalar(u8, clipped, ':')) |colon_index| {
+        const key = trimAscii(clipped[0..colon_index]);
+        const rest = trimAscii(clipped[colon_index + 1 ..]);
+        if (isSummaryKey(key)) {
+            const segments = [_]vaxis.Segment{
+                segmentStyle(.{ .fg = roman_gold, .bg = roman_bg, .bold = true }, key),
+                segmentStyle(.{ .fg = roman_muted, .bg = roman_bg }, ": "),
+                segmentStyle(style, rest),
+            };
+            drawSegments(win, row, 0, &segments);
+            return;
+        }
+    }
+    drawText(win, row, 0, clipped, style);
+}
+
+fn drawVaxisRenderLine(win: vaxis.Window, row: usize, line: VaxisRenderLine) void {
+    const style = toneStyle(line.kind, line.tone, line.bold, line.highlight);
+    switch (line.highlight) {
+        .summary => drawSummaryStyled(win, row, line.text, style),
+        .json => drawText(win, row, 0, line.text, .{ .fg = roman_blue, .bg = roman_bg, .dim = true }),
+        else => drawText(win, row, 0, line.text, style),
+    }
+}
+
+fn drawComposerCard(win: vaxis.Window, ui: *VaxisUiSession, title: []const u8, footer: []const u8) void {
+    const outer = win.child(.{
+        .width = win.width,
+        .height = win.height,
+        .border = .{
+            .where = .all,
+            .style = borderStyle(),
+        },
+    });
+    fillStyled(outer, panelStyle());
+    drawText(outer, 0, 0, title, .{ .fg = roman_gold, .bg = roman_panel, .bold = true });
+
+    const input_row_y: usize = if (outer.height > 2) 1 else 0;
+    const input_row = outer.child(.{
+        .x_off = 0,
+        .y_off = clampI17(input_row_y),
+        .width = outer.width,
+        .height = 1,
+    });
+    fillStyled(input_row, panelAltStyle());
+    drawText(input_row, 0, 0, "▍", accentStyle());
+
+    const input_field = input_row.child(.{
+        .x_off = 2,
+        .y_off = 0,
+        .width = input_row.width -| 2,
+        .height = 1,
+    });
+    fillStyled(input_field, panelAltStyle());
+
+    if (textInputIsEmpty(&ui.composer)) {
+        drawText(input_field, 0, 0, ui.composer_state.placeholder, .{ .fg = roman_muted, .bg = roman_panel_alt, .dim = true });
+        if (ui.focus == .composer and ui.overlay == .none) input_field.showCursor(0, 0);
+    } else {
+        ui.composer.drawWithStyle(input_field, .{ .fg = roman_ivory, .bg = roman_panel_alt });
+    }
+
+    if (outer.height > 2) {
+        drawText(outer, outer.height - 1, 0, footer, .{ .fg = roman_muted, .bg = roman_panel, .dim = true });
+    }
+}
+
+fn renderLandingUi(allocator: std.mem.Allocator, root: vaxis.Window, ui: *VaxisUiSession) !void {
+    _ = allocator;
+    drawText(root, 1, 2, "contubernium", .{ .fg = roman_muted, .bg = roman_bg, .bold = true });
+
+    const wordmark = "CONTUBERNIUM";
+    const subtitle = "Roman command structure for modern local-first missions";
+    const brand_row = if (root.height > 18) (@as(usize, root.height) / 2) - 6 else 3;
+    drawText(root, brand_row, centeredCol(root.width, wordmark), wordmark, brandStyle());
+    drawText(root, brand_row + 2, centeredCol(root.width, subtitle), subtitle, .{ .fg = roman_gold, .bg = roman_bg });
+
+    const composer_width = @min(@as(usize, root.width) -| 10, 78);
+    const composer_height: usize = 4;
+    const composer_x = if (root.width > composer_width) (@as(usize, root.width) - composer_width) / 2 else 0;
+    const composer_y = brand_row + 4;
+    const composer_win = root.child(.{
+        .x_off = clampI17(composer_x),
+        .y_off = clampI17(composer_y),
+        .width = clampU16(composer_width),
+        .height = clampU16(composer_height),
+    });
+    drawComposerCard(composer_win, ui, "Mission", "Enter submit  •  Ctrl+P palette  •  Ctrl+T models");
+
+    drawText(root, composer_y + composer_height + 1, centeredCol(root.width, "Resume   Doctor   Models"), "Resume   Doctor   Models", .{ .fg = roman_blue, .bg = roman_bg });
+    drawText(root, root.height - 2, 2, ui.cwd, .{ .fg = roman_muted, .bg = roman_bg, .dim = true });
+    drawText(root, root.height - 2, @max(@as(usize, root.width), 24) -| 18, "tab focus  •  ctrl+c", .{ .fg = roman_muted, .bg = roman_bg, .dim = true });
+}
+
+fn renderSessionUi(allocator: std.mem.Allocator, root: vaxis.Window, ui: *VaxisUiSession) !void {
+    const shell = root.child(.{
+        .x_off = 1,
+        .y_off = 1,
+        .width = root.width -| 2,
+        .height = root.height -| 2,
+    });
+    fillStyled(shell, shellStyle());
+
+    const top_strip = shell.child(.{
+        .x_off = 1,
+        .y_off = 0,
+        .width = shell.width -| 2,
+        .height = 1,
+    });
+    const strip_text = try std.fmt.allocPrint(
+        allocator,
+        "Contubernium  •  actor {s}  •  lane {s}  •  global {s}",
+        .{ ui.snapshot.current_actor, ui.snapshot.active_lane, ui.snapshot.global_status },
+    );
+    defer allocator.free(strip_text);
+    drawText(top_strip, 0, 0, strip_text, .{ .fg = roman_ivory, .bg = roman_bg, .bold = true });
+
+    const meta_text = try std.fmt.allocPrint(
+        allocator,
+        "{s}  •  {s}  •  turn {d}",
+        .{ ui.snapshot.provider_type, ui.snapshot.model, ui.snapshot.iteration },
+    );
+    defer allocator.free(meta_text);
+    const meta_col = if (displayWidth(meta_text) + 1 < top_strip.width) @as(usize, top_strip.width) - displayWidth(meta_text) else 0;
+    drawText(top_strip, 0, meta_col, meta_text, .{ .fg = roman_muted, .bg = roman_bg });
+
+    const composer_height: usize = 4;
+    const main_top: usize = 2;
+    const composer_y = @as(usize, shell.height) -| composer_height;
+    const rail_width: usize = if (shouldShowRail(ui, shell.width)) 30 else 0;
+    const gap_width: usize = if (rail_width > 0) 2 else 0;
+    const transcript_width = @as(usize, shell.width) -| 2 -| rail_width -| gap_width;
+    const transcript_height = composer_y -| main_top;
+
+    const transcript_win = shell.child(.{
+        .x_off = 1,
+        .y_off = clampI17(main_top),
+        .width = clampU16(transcript_width),
+        .height = clampU16(transcript_height),
+    });
+    fillStyled(transcript_win, shellStyle());
+
+    var timeline_lines: std.ArrayList(VaxisRenderLine) = .empty;
+    defer timeline_lines.deinit(allocator);
+    try buildTimelineLinesVaxis(allocator, ui, &timeline_lines, transcript_width);
+
+    var row_offset: usize = 0;
+    if (!ui.viewport.follow_latest) {
+        drawText(transcript_win, 0, 0, "Detached from live output  •  End jumps to latest", .{ .fg = roman_blue, .bg = roman_bg });
+        row_offset = 1;
+    }
+
+    const visible_height = transcript_height -| row_offset;
+    const total_lines = timeline_lines.items.len;
+    const hidden_bottom = @min(ui.viewport.scroll_offset, if (total_lines > 0) total_lines - 1 else 0);
+    const visible_end = total_lines - hidden_bottom;
+    const visible_start = if (visible_end > visible_height) visible_end - visible_height else 0;
+    var row: usize = 0;
+    while (row < visible_height and visible_start + row < visible_end) : (row += 1) {
+        drawVaxisRenderLine(transcript_win.child(.{
+            .x_off = 0,
+            .y_off = clampI17(row + row_offset),
+            .width = transcript_win.width,
+            .height = 1,
+        }), 0, timeline_lines.items[visible_start + row]);
+    }
+
+    if (rail_width > 0) {
+        const rail_shell = shell.child(.{
+            .x_off = clampI17(1 + transcript_width + gap_width),
+            .y_off = clampI17(main_top),
+            .width = clampU16(rail_width),
+            .height = clampU16(transcript_height),
+            .border = .{
+                .where = .all,
+                .style = .{ .fg = roman_border, .bg = roman_panel },
+            },
+        });
+        fillStyled(rail_shell, panelStyle());
+        var rail_lines: std.ArrayList(VaxisRenderLine) = .empty;
+        defer rail_lines.deinit(allocator);
+        try buildRailLinesVaxis(allocator, ui, &rail_lines, rail_width - 2);
+        var rail_row: usize = 0;
+        while (rail_row < rail_shell.height and rail_row < rail_lines.items.len) : (rail_row += 1) {
+            drawVaxisRenderLine(rail_shell.child(.{
+                .x_off = 0,
+                .y_off = clampI17(rail_row),
+                .width = rail_shell.width,
+                .height = 1,
+            }), 0, rail_lines.items[rail_row]);
+        }
+    }
+
+    const composer_win = shell.child(.{
+        .x_off = 1,
+        .y_off = clampI17(composer_y),
+        .width = shell.width -| 2,
+        .height = clampU16(composer_height),
+    });
+    drawComposerCard(composer_win, ui, "Mission", "Tab focus  •  Ctrl+P palette  •  Ctrl+T models  •  Ctrl+R rail  •  Ctrl+C interrupt");
+}
+
+fn renderStatusOverlay(allocator: std.mem.Allocator, root: vaxis.Window, ui: *const VaxisUiSession) !void {
+    const panel_width = @min(@as(usize, root.width) -| 8, 72);
+    const panel_height: usize = 12;
+    const panel = root.child(.{
+        .x_off = clampI17((@as(usize, root.width) -| panel_width) / 2),
+        .y_off = clampI17((@as(usize, root.height) -| panel_height) / 2),
+        .width = clampU16(panel_width),
+        .height = clampU16(panel_height),
+        .border = .{
+            .where = .all,
+            .style = .{ .fg = roman_blue, .bg = roman_panel_alt },
+        },
+    });
+    fillStyled(panel, overlayStyle());
+    drawText(panel, 0, 0, "Runtime Status", .{ .fg = roman_gold, .bg = roman_panel_alt, .bold = true });
+
+    const status = try renderStatusBlock(allocator, ui.snapshot);
+    defer allocator.free(status);
+    _ = drawWrapped(panel, 2, 0, status, .{ .fg = roman_ivory, .bg = roman_panel_alt });
+    drawText(panel, panel.height - 1, 0, "Esc closes", .{ .fg = roman_muted, .bg = roman_panel_alt, .dim = true });
+}
+
+fn renderCommandOverlay(allocator: std.mem.Allocator, root: vaxis.Window, ui: *const VaxisUiSession) !void {
+    const panel_width = @min(@as(usize, root.width) -| 8, 64);
+    const panel_height = palette_commands.len + 4;
+    const panel = root.child(.{
+        .x_off = clampI17((@as(usize, root.width) -| panel_width) / 2),
+        .y_off = clampI17((@as(usize, root.height) -| panel_height) / 2),
+        .width = clampU16(panel_width),
+        .height = clampU16(panel_height),
+        .border = .{
+            .where = .all,
+            .style = .{ .fg = roman_blue, .bg = roman_panel_alt },
+        },
+    });
+    fillStyled(panel, overlayStyle());
+    drawText(panel, 0, 0, "Command Palette", .{ .fg = roman_gold, .bg = roman_panel_alt, .bold = true });
+    for (palette_commands, 0..) |entry, index| {
+        const selected = index == ui.command_palette_index;
+        const line = try std.fmt.allocPrint(allocator, "{s} {s}  {s}", .{ if (selected) ">" else " ", entry.label, entry.description });
+        defer allocator.free(line);
+        drawText(
+            panel,
+            index + 2,
+            0,
+            line,
+            .{
+                .fg = if (selected) roman_blue else roman_ivory,
+                .bg = roman_panel_alt,
+                .bold = selected,
+            },
+        );
+    }
+}
+
+fn renderModelsOverlay(allocator: std.mem.Allocator, root: vaxis.Window, ui: *const VaxisUiSession) !void {
+    const panel_width = @min(@as(usize, root.width) -| 8, 72);
+    const panel_height: usize = 12;
+    const panel = root.child(.{
+        .x_off = clampI17((@as(usize, root.width) -| panel_width) / 2),
+        .y_off = clampI17((@as(usize, root.height) -| panel_height) / 2),
+        .width = clampU16(panel_width),
+        .height = clampU16(panel_height),
+        .border = .{
+            .where = .all,
+            .style = .{ .fg = roman_blue, .bg = roman_panel_alt },
+        },
+    });
+    fillStyled(panel, overlayStyle());
+    drawText(panel, 0, 0, "Model Switcher", .{ .fg = roman_gold, .bg = roman_panel_alt, .bold = true });
+    if (ui.cached_models.len == 0) {
+        drawText(panel, 2, 0, "Fetching provider model roster…", .{ .fg = roman_muted, .bg = roman_panel_alt, .dim = true });
+        if (ui.last_model_error.len > 0) drawText(panel, 4, 0, ui.last_model_error, .{ .fg = roman_danger, .bg = roman_panel_alt });
+        return;
+    }
+    var row: usize = 0;
+    while (row < ui.cached_models.len and row < panel.height - 3) : (row += 1) {
+        const model = ui.cached_models[row];
+        const selected = row == ui.model_overlay_index;
+        const line = try std.fmt.allocPrint(
+            allocator,
+            "{s} {d}. {s}{s}",
+            .{ if (selected) ">" else " ", row + 1, model, if (eql(model, ui.snapshot.model)) "  (current)" else "" },
+        );
+        defer allocator.free(line);
+        drawText(
+            panel,
+            row + 2,
+            0,
+            line,
+            .{
+                .fg = if (selected) roman_blue else roman_ivory,
+                .bg = roman_panel_alt,
+                .bold = selected,
+            },
+        );
+    }
+}
+
+fn renderApprovalOverlay(root: vaxis.Window, ui: *const VaxisUiSession) void {
+    const panel_width = @min(@as(usize, root.width) -| 8, 76);
+    const panel_height: usize = 11;
+    const panel = root.child(.{
+        .x_off = clampI17((@as(usize, root.width) -| panel_width) / 2),
+        .y_off = clampI17((@as(usize, root.height) -| panel_height) / 2),
+        .width = clampU16(panel_width),
+        .height = clampU16(panel_height),
+        .border = .{
+            .where = .all,
+            .style = .{ .fg = roman_gold, .bg = roman_panel_alt },
+        },
+    });
+    fillStyled(panel, overlayStyle());
+    drawText(panel, 0, 0, "Approval Required", .{ .fg = roman_gold, .bg = roman_panel_alt, .bold = true });
+    if (ui.pending_approval) |approval| {
+        drawText(panel, 2, 0, approval.tool_name, .{ .fg = roman_ivory, .bg = roman_panel_alt, .bold = true });
+        _ = drawWrapped(panel, 4, 0, approval.detail, .{ .fg = roman_ivory, .bg = roman_panel_alt });
+    }
+    const approve_style: vaxis.Style = .{
+        .fg = if (ui.approval_choice) roman_panel_alt else roman_ivory,
+        .bg = if (ui.approval_choice) roman_success else roman_panel_alt,
+        .bold = true,
+    };
+    const deny_style: vaxis.Style = .{
+        .fg = if (!ui.approval_choice) roman_panel_alt else roman_ivory,
+        .bg = if (!ui.approval_choice) roman_danger else roman_panel_alt,
+        .bold = true,
+    };
+    const button_row = panel.height - 2;
+    drawSegments(panel, button_row, 0, &.{
+        segmentStyle(approve_style, " Approve "),
+        segmentStyle(.{ .fg = roman_muted, .bg = roman_panel_alt }, "   "),
+        segmentStyle(deny_style, " Deny "),
+    });
+}
+
+fn renderOverlay(allocator: std.mem.Allocator, root: vaxis.Window, ui: *const VaxisUiSession) !void {
+    switch (ui.overlay) {
+        .none => {},
+        .command_palette => try renderCommandOverlay(allocator, root, ui),
+        .model_switcher => try renderModelsOverlay(allocator, root, ui),
+        .approval => renderApprovalOverlay(root, ui),
+        .status => try renderStatusOverlay(allocator, root, ui),
+    }
+}
+
+fn renderVaxisUi(allocator: std.mem.Allocator, vx: *vaxis.Vaxis, ui: *VaxisUiSession) !void {
+    var root = vx.window();
+    fillStyled(root, shellStyle());
+    if (ui.mode == .landing and ui.timeline.items.len == 0 and ui.running_command == null and ui.overlay == .none) {
+        try renderLandingUi(allocator, root, ui);
+    } else {
+        try renderSessionUi(allocator, root, ui);
+    }
+    try renderOverlay(allocator, root, ui);
+    if (ui.focus != .composer or ui.overlay != .none) root.hideCursor();
+}
+
 fn makeTestSnapshot() TuiSnapshot {
     return .{
         .project_name = "Contubernium",
@@ -4499,6 +6205,56 @@ fn initTestTui(allocator: std.mem.Allocator) TuiSession {
 fn testQueueEmit(context: ?*anyopaque, event: RuntimeUiEvent) void {
     const queue: *RuntimeEventQueue = @ptrCast(@alignCast(context.?));
     queue.push(event);
+}
+
+test "parseUiFlavor defaults to vaxis" {
+    const testing = std.testing;
+    try testing.expectEqual(UiFlavor.vaxis, try parseUiFlavor(&.{}));
+}
+
+test "parseUiFlavor accepts legacy flag" {
+    const testing = std.testing;
+    try testing.expectEqual(UiFlavor.legacy, try parseUiFlavor(&.{"--legacy"}));
+}
+
+test "timelineKindForRuntimeLog maps final and danger entries" {
+    const testing = std.testing;
+    try testing.expectEqual(TimelineEntryKind.final, timelineKindForRuntimeLog(.{
+        .kind = .log,
+        .tone = .success,
+        .title = "Final Response",
+    }));
+    try testing.expectEqual(TimelineEntryKind.failure, timelineKindForRuntimeLog(.{
+        .kind = .log,
+        .tone = .danger,
+        .title = "Runtime Error",
+    }));
+}
+
+test "shouldShowRail stays contextual" {
+    const testing = std.testing;
+    var ui = try VaxisUiSession.init(testing.allocator, "/tmp/project");
+    defer ui.deinit();
+
+    try setVaxisSnapshot(&ui, .{
+        .project_name = "Contubernium",
+        .provider_type = "ollama-native",
+        .model = "gpt-oss:20b",
+        .approval_mode = "guarded",
+        .global_status = "running",
+        .runtime_status = "running",
+        .current_actor = "decanus",
+        .active_tool = "",
+        .active_lane = "command",
+        .current_goal = "Investigate the redesign",
+        .last_tool_result = "",
+        .last_error = "",
+        .last_log_path = "",
+        .iteration = 3,
+    });
+
+    try testing.expect(shouldShowRail(&ui, 140));
+    try testing.expect(!shouldShowRail(&ui, 100));
 }
 
 test "visibleInputWindow handles zero width" {
