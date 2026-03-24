@@ -13,7 +13,7 @@ pub const state_json =
     \\  "agent_loop": {
     \\    "status": "awaiting_initial_prompt",
     \\    "iteration": 0,
-    \\    "max_iterations": 12,
+    \\    "max_iterations": 24,
     \\    "active_tool": "",
     \\    "last_decision": "",
     \\    "last_tool_result": "",
@@ -30,7 +30,18 @@ pub const state_json =
     \\    "last_error": "",
     \\    "active_log_path": "",
     \\    "last_actor": "",
-    \\    "repair_attempts": 0
+    \\    "repair_attempts": 0,
+    \\    "context_budget": {
+    \\      "estimated_prompt_chars": 0,
+    \\      "estimated_prompt_tokens": 0,
+    \\      "context_window_tokens": 32768,
+    \\      "response_reserve_tokens": 4096,
+    \\      "remaining_tokens": 28672,
+    \\      "used_percent": 0,
+    \\      "condensation_count": 0,
+    \\      "condensed_history_events": 0,
+    \\      "last_condensed_iteration": 0
+    \\    }
     \\  },
     \\  "agent_tools": {
     \\    "faber": {
@@ -284,7 +295,14 @@ pub const config_json =
     \\    "max_prompt_chars": 32000,
     \\    "max_file_read_bytes": 12000,
     \\    "max_search_hits": 20,
-    \\    "max_tool_result_chars": 6000
+    \\    "max_tool_result_chars": 6000,
+    \\    "estimated_context_window_tokens": 32768,
+    \\    "response_reserve_tokens": 4096,
+    \\    "warn_at_percent": 70,
+    \\    "condense_at_percent": 85,
+    \\    "condensed_keep_recent_events": 4,
+    \\    "max_condensed_summary_chars": 2400,
+    \\    "max_stop_summary_chars": 2400
     \\  }
     \\}
 ;

@@ -9,6 +9,10 @@ const default_config_path = ".contubernium/config.json";
 const default_prompts_dir = ".contubernium/prompts";
 const default_logs_dir = ".contubernium/logs";
 const max_list_files_entries = 400;
+const legacy_default_max_iterations = 12;
+const default_max_iterations = 24;
+const default_context_window_tokens = 32768;
+const default_response_reserve_tokens = 4096;
 
 const UiFlavor = enum {
     vaxis,
@@ -81,6 +85,13 @@ const ContextConfig = struct {
     max_file_read_bytes: usize = 12000,
     max_search_hits: usize = 20,
     max_tool_result_chars: usize = 6000,
+    estimated_context_window_tokens: usize = default_context_window_tokens,
+    response_reserve_tokens: usize = default_response_reserve_tokens,
+    warn_at_percent: usize = 70,
+    condense_at_percent: usize = 85,
+    condensed_keep_recent_events: usize = 4,
+    max_condensed_summary_chars: usize = 2400,
+    max_stop_summary_chars: usize = 2400,
 };
 
 const AppState = struct {
@@ -105,11 +116,23 @@ const Mission = struct {
 const AgentLoop = struct {
     status: []const u8 = "awaiting_initial_prompt",
     iteration: usize = 0,
-    max_iterations: usize = 12,
+    max_iterations: usize = default_max_iterations,
     active_tool: []const u8 = "",
     last_decision: []const u8 = "",
     last_tool_result: []const u8 = "",
     history: []const HistoryEntry = &.{},
+};
+
+const ContextBudgetState = struct {
+    estimated_prompt_chars: usize = 0,
+    estimated_prompt_tokens: usize = 0,
+    context_window_tokens: usize = 0,
+    response_reserve_tokens: usize = 0,
+    remaining_tokens: usize = 0,
+    used_percent: usize = 0,
+    condensation_count: usize = 0,
+    condensed_history_events: usize = 0,
+    last_condensed_iteration: usize = 0,
 };
 
 const RuntimeSession = struct {
@@ -124,6 +147,7 @@ const RuntimeSession = struct {
     active_log_path: []const u8 = "",
     last_actor: []const u8 = "",
     repair_attempts: usize = 0,
+    context_budget: ContextBudgetState = .{},
 };
 
 const HistoryEntry = struct {
@@ -245,6 +269,22 @@ const StepOutcome = enum {
     blocked,
 };
 
+const PromptMode = enum {
+    decanus,
+    specialist,
+};
+
+const PromptBudgetEstimate = struct {
+    prompt_chars: usize,
+    prompt_tokens: usize,
+    usable_prompt_tokens: usize,
+    remaining_tokens: usize,
+    used_percent: usize,
+    should_warn: bool,
+    should_condense: bool,
+    exhausted: bool,
+};
+
 const ToolExecutionOutcome = struct {
     blocked: bool,
     summary: []const u8,
@@ -305,6 +345,15 @@ const TuiSnapshot = struct {
     last_error: []const u8 = "",
     last_log_path: []const u8 = "",
     iteration: usize = 0,
+    max_iterations: usize = default_max_iterations,
+    estimated_prompt_chars: usize = 0,
+    estimated_prompt_tokens: usize = 0,
+    context_window_tokens: usize = default_context_window_tokens,
+    response_reserve_tokens: usize = default_response_reserve_tokens,
+    remaining_context_tokens: usize = default_context_window_tokens - default_response_reserve_tokens,
+    context_used_percent: usize = 0,
+    condensation_count: usize = 0,
+    condensed_history_events: usize = 0,
 };
 
 fn cloneTuiSnapshot(allocator: std.mem.Allocator, snapshot: TuiSnapshot) !TuiSnapshot {
@@ -323,6 +372,15 @@ fn cloneTuiSnapshot(allocator: std.mem.Allocator, snapshot: TuiSnapshot) !TuiSna
         .last_error = try allocator.dupe(u8, snapshot.last_error),
         .last_log_path = try allocator.dupe(u8, snapshot.last_log_path),
         .iteration = snapshot.iteration,
+        .max_iterations = snapshot.max_iterations,
+        .estimated_prompt_chars = snapshot.estimated_prompt_chars,
+        .estimated_prompt_tokens = snapshot.estimated_prompt_tokens,
+        .context_window_tokens = snapshot.context_window_tokens,
+        .response_reserve_tokens = snapshot.response_reserve_tokens,
+        .remaining_context_tokens = snapshot.remaining_context_tokens,
+        .context_used_percent = snapshot.context_used_percent,
+        .condensation_count = snapshot.condensation_count,
+        .condensed_history_events = snapshot.condensed_history_events,
     };
 }
 
@@ -386,6 +444,15 @@ const RuntimeUiEvent = struct {
     last_error: []const u8 = "",
     last_log_path: []const u8 = "",
     iteration: usize = 0,
+    max_iterations: usize = default_max_iterations,
+    estimated_prompt_chars: usize = 0,
+    estimated_prompt_tokens: usize = 0,
+    context_window_tokens: usize = default_context_window_tokens,
+    response_reserve_tokens: usize = default_response_reserve_tokens,
+    remaining_context_tokens: usize = default_context_window_tokens - default_response_reserve_tokens,
+    context_used_percent: usize = 0,
+    condensation_count: usize = 0,
+    condensed_history_events: usize = 0,
 };
 
 const RuntimeEventQueue = struct {
@@ -446,6 +513,15 @@ fn cloneRuntimeUiEvent(allocator: std.mem.Allocator, event: RuntimeUiEvent) !Run
         .last_error = try allocator.dupe(u8, event.last_error),
         .last_log_path = try allocator.dupe(u8, event.last_log_path),
         .iteration = event.iteration,
+        .max_iterations = event.max_iterations,
+        .estimated_prompt_chars = event.estimated_prompt_chars,
+        .estimated_prompt_tokens = event.estimated_prompt_tokens,
+        .context_window_tokens = event.context_window_tokens,
+        .response_reserve_tokens = event.response_reserve_tokens,
+        .remaining_context_tokens = event.remaining_context_tokens,
+        .context_used_percent = event.context_used_percent,
+        .condensation_count = event.condensation_count,
+        .condensed_history_events = event.condensed_history_events,
     };
 }
 
@@ -991,7 +1067,7 @@ fn isUnsignedDecimal(text: []const u8) bool {
 fn renderStatusBlock(allocator: std.mem.Allocator, snapshot: TuiSnapshot) ![]const u8 {
     return try std.fmt.allocPrint(
         allocator,
-        "project: {s}\nprovider: {s}\nmodel: {s}\nactor: {s}\nlane: {s}\nglobal status: {s}\nruntime status: {s}\nturn: {d}\nlast error: {s}",
+        "project: {s}\nprovider: {s}\nmodel: {s}\nactor: {s}\nlane: {s}\nglobal status: {s}\nruntime status: {s}\nturn: {d}/{d}\ncontext est: {d} tokens ({d}% used)\ncontext left: {d}\ncondensed: {d} runs / {d} events\nlast error: {s}",
         .{
             snapshot.project_name,
             snapshot.provider_type,
@@ -1001,6 +1077,12 @@ fn renderStatusBlock(allocator: std.mem.Allocator, snapshot: TuiSnapshot) ![]con
             snapshot.global_status,
             snapshot.runtime_status,
             snapshot.iteration,
+            snapshot.max_iterations,
+            snapshot.estimated_prompt_tokens,
+            snapshot.context_used_percent,
+            snapshot.remaining_context_tokens,
+            snapshot.condensation_count,
+            snapshot.condensed_history_events,
             if (snapshot.last_error.len > 0) snapshot.last_error else "none",
         },
     );
@@ -1027,7 +1109,35 @@ const TerminalSize = struct {
 const input_prompt = "mission> ";
 const input_help = "Enter submit | Up/Down scroll | PgUp/PgDn fast scroll | Ctrl+C interrupt/exit";
 
+fn usablePromptTokenWindow(config: ContextConfig) usize {
+    if (config.estimated_context_window_tokens > config.response_reserve_tokens) {
+        return config.estimated_context_window_tokens - config.response_reserve_tokens;
+    }
+    return config.estimated_context_window_tokens;
+}
+
+fn ensureLoopBudget(state: *AppState) void {
+    if (state.agent_loop.max_iterations == 0 or state.agent_loop.max_iterations == legacy_default_max_iterations) {
+        state.agent_loop.max_iterations = default_max_iterations;
+    }
+}
+
+fn resolvedContextBudget(config: ContextConfig, budget: ContextBudgetState) ContextBudgetState {
+    var resolved = budget;
+    if (resolved.context_window_tokens == 0) {
+        resolved.context_window_tokens = config.estimated_context_window_tokens;
+    }
+    if (resolved.response_reserve_tokens == 0) {
+        resolved.response_reserve_tokens = config.response_reserve_tokens;
+    }
+    if (resolved.remaining_tokens == 0 and resolved.estimated_prompt_tokens == 0) {
+        resolved.remaining_tokens = usablePromptTokenWindow(config);
+    }
+    return resolved;
+}
+
 fn snapshotFromState(config: AppConfig, state: AppState, project_name: []const u8) TuiSnapshot {
+    const budget = resolvedContextBudget(config.context, state.runtime_session.context_budget);
     return .{
         .project_name = project_name,
         .provider_type = config.provider.type,
@@ -1043,6 +1153,15 @@ fn snapshotFromState(config: AppConfig, state: AppState, project_name: []const u
         .last_error = state.runtime_session.last_error,
         .last_log_path = state.runtime_session.active_log_path,
         .iteration = state.agent_loop.iteration,
+        .max_iterations = if (state.agent_loop.max_iterations > 0) state.agent_loop.max_iterations else default_max_iterations,
+        .estimated_prompt_chars = budget.estimated_prompt_chars,
+        .estimated_prompt_tokens = budget.estimated_prompt_tokens,
+        .context_window_tokens = budget.context_window_tokens,
+        .response_reserve_tokens = budget.response_reserve_tokens,
+        .remaining_context_tokens = budget.remaining_tokens,
+        .context_used_percent = budget.used_percent,
+        .condensation_count = budget.condensation_count,
+        .condensed_history_events = budget.condensed_history_events,
     };
 }
 
@@ -1079,6 +1198,15 @@ fn processRuntimeEvents(allocator: std.mem.Allocator, tui: *TuiSession, queue: *
                     .last_error = event.last_error,
                     .last_log_path = event.last_log_path,
                     .iteration = event.iteration,
+                    .max_iterations = if (event.max_iterations > 0) event.max_iterations else tui.snapshot.max_iterations,
+                    .estimated_prompt_chars = if (event.estimated_prompt_chars > 0) event.estimated_prompt_chars else tui.snapshot.estimated_prompt_chars,
+                    .estimated_prompt_tokens = if (event.estimated_prompt_tokens > 0) event.estimated_prompt_tokens else tui.snapshot.estimated_prompt_tokens,
+                    .context_window_tokens = if (event.context_window_tokens > 0) event.context_window_tokens else tui.snapshot.context_window_tokens,
+                    .response_reserve_tokens = if (event.response_reserve_tokens > 0) event.response_reserve_tokens else tui.snapshot.response_reserve_tokens,
+                    .remaining_context_tokens = if (event.remaining_context_tokens > 0 or event.estimated_prompt_tokens > 0) event.remaining_context_tokens else tui.snapshot.remaining_context_tokens,
+                    .context_used_percent = if (event.context_used_percent > 0 or event.estimated_prompt_tokens > 0) event.context_used_percent else tui.snapshot.context_used_percent,
+                    .condensation_count = if (event.condensation_count > 0) event.condensation_count else tui.snapshot.condensation_count,
+                    .condensed_history_events = if (event.condensed_history_events > 0) event.condensed_history_events else tui.snapshot.condensed_history_events,
                 });
                 tui.dirty = true;
             },
@@ -1813,7 +1941,7 @@ fn buildRenderFrame(allocator: std.mem.Allocator, tui: *const TuiSession, size: 
         size.cols,
         try std.fmt.allocPrint(
             temp_allocator,
-            " project {s} | actor {s} | lane {s} | global {s} | runtime {s} | turn {d} ",
+            " project {s} | actor {s} | lane {s} | global {s} | runtime {s} | turn {d}/{d} ",
             .{
                 tui.snapshot.project_name,
                 tui.snapshot.current_actor,
@@ -1821,6 +1949,7 @@ fn buildRenderFrame(allocator: std.mem.Allocator, tui: *const TuiSession, size: 
                 tui.snapshot.global_status,
                 tui.snapshot.runtime_status,
                 tui.snapshot.iteration,
+                tui.snapshot.max_iterations,
             },
         ),
         .agent,
@@ -1830,11 +1959,13 @@ fn buildRenderFrame(allocator: std.mem.Allocator, tui: *const TuiSession, size: 
         size.cols,
         try std.fmt.allocPrint(
             temp_allocator,
-            " provider {s} | model {s} | approval {s} | scroll {d} ",
+            " provider {s} | model {s} | approval {s} | ctx ~{d} left ({d}%) | scroll {d} ",
             .{
                 tui.snapshot.provider_type,
                 tui.snapshot.model,
                 tui.snapshot.approval_mode,
+                tui.snapshot.remaining_context_tokens,
+                tui.snapshot.context_used_percent,
                 tui.scroll_offset,
             },
         ),
@@ -1916,8 +2047,14 @@ fn buildSidebarLines(
     try appendWrappedLinesWithPrefix(allocator, lines, try std.fmt.allocPrint(allocator, "lane: {s}", .{tui.snapshot.active_lane}), width, .info, .plain, "  ");
     try appendWrappedLinesWithPrefix(allocator, lines, try std.fmt.allocPrint(allocator, "global: {s}", .{tui.snapshot.global_status}), width, .info, .plain, "  ");
     try appendWrappedLinesWithPrefix(allocator, lines, try std.fmt.allocPrint(allocator, "runtime: {s}", .{tui.snapshot.runtime_status}), width, .info, .plain, "  ");
-    try appendWrappedLinesWithPrefix(allocator, lines, try std.fmt.allocPrint(allocator, "turn: {d}", .{tui.snapshot.iteration}), width, .info, .plain, "  ");
+    try appendWrappedLinesWithPrefix(allocator, lines, try std.fmt.allocPrint(allocator, "loop: {d}/{d}", .{ tui.snapshot.iteration, tui.snapshot.max_iterations }), width, .info, .plain, "  ");
     try appendWrappedLinesWithPrefix(allocator, lines, try std.fmt.allocPrint(allocator, "tool: {s}", .{if (tui.snapshot.active_tool.len > 0) tui.snapshot.active_tool else "none"}), width, .info, .plain, "  ");
+    try lines.append(allocator, .{});
+    try appendSidebarSectionHeader(allocator, lines, "BUDGET");
+    try appendWrappedLinesWithPrefix(allocator, lines, try std.fmt.allocPrint(allocator, "prompt est: {d} tokens", .{tui.snapshot.estimated_prompt_tokens}), width, .info, .plain, "  ");
+    try appendWrappedLinesWithPrefix(allocator, lines, try std.fmt.allocPrint(allocator, "context left: {d}", .{tui.snapshot.remaining_context_tokens}), width, if (tui.snapshot.context_used_percent >= 85) .danger else if (tui.snapshot.context_used_percent >= 70) .warning else .info, .plain, "  ");
+    try appendWrappedLinesWithPrefix(allocator, lines, try std.fmt.allocPrint(allocator, "context used: {d}%", .{tui.snapshot.context_used_percent}), width, if (tui.snapshot.context_used_percent >= 85) .danger else if (tui.snapshot.context_used_percent >= 70) .warning else .info, .plain, "  ");
+    try appendWrappedLinesWithPrefix(allocator, lines, try std.fmt.allocPrint(allocator, "condensed: {d} runs / {d} events", .{ tui.snapshot.condensation_count, tui.snapshot.condensed_history_events }), width, .info, .plain, "  ");
     try lines.append(allocator, .{});
     try appendSidebarSectionHeader(allocator, lines, "GOAL");
     try appendWrappedLinesWithPrefix(allocator, lines, if (tui.snapshot.current_goal.len > 0) tui.snapshot.current_goal else "idle", width, .info, .plain, "  ");
@@ -2740,6 +2877,7 @@ fn emitStreamFinalize(hooks: RuntimeHooks, actor: []const u8, text: []const u8, 
 }
 
 fn emitStateSnapshot(hooks: RuntimeHooks, config: AppConfig, state: AppState) void {
+    const budget = resolvedContextBudget(config.context, state.runtime_session.context_budget);
     hooks.emit(.{
         .kind = .state_snapshot,
         .project_name = if (!eql(state.project_name, "UNASSIGNED")) state.project_name else "",
@@ -2756,6 +2894,15 @@ fn emitStateSnapshot(hooks: RuntimeHooks, config: AppConfig, state: AppState) vo
         .last_error = state.runtime_session.last_error,
         .last_log_path = state.runtime_session.active_log_path,
         .iteration = state.agent_loop.iteration,
+        .max_iterations = if (state.agent_loop.max_iterations > 0) state.agent_loop.max_iterations else default_max_iterations,
+        .estimated_prompt_chars = budget.estimated_prompt_chars,
+        .estimated_prompt_tokens = budget.estimated_prompt_tokens,
+        .context_window_tokens = budget.context_window_tokens,
+        .response_reserve_tokens = budget.response_reserve_tokens,
+        .remaining_context_tokens = budget.remaining_tokens,
+        .context_used_percent = budget.used_percent,
+        .condensation_count = budget.condensation_count,
+        .condensed_history_events = budget.condensed_history_events,
     });
 }
 
@@ -2795,6 +2942,7 @@ fn friendlyRuntimeError(allocator: std.mem.Allocator, err: anyerror) ![]const u8
 }
 
 fn runLoop(allocator: std.mem.Allocator, config: AppConfig, state: *AppState, hooks: RuntimeHooks) !void {
+    ensureLoopBudget(state);
     while (state.agent_loop.iteration < state.agent_loop.max_iterations) {
         if (hooks.isInterrupted()) {
             markInterrupted(state);
@@ -2813,9 +2961,25 @@ fn runLoop(allocator: std.mem.Allocator, config: AppConfig, state: *AppState, ho
     }
 
     state.global_status = "waiting_on_tool";
-    state.agent_loop.status = "complete";
+    state.agent_loop.status = "blocked";
     state.runtime_session.status = "blocked";
-    state.runtime_session.last_error = "maximum iteration count reached";
+    state.runtime_session.last_error = try progressDocumentationText(
+        allocator,
+        state,
+        "maximum iteration count reached before the mission completed.",
+        config.context.max_stop_summary_chars,
+    );
+    try appendHistory(allocator, state, .{
+        .iteration = state.agent_loop.iteration,
+        .type = "loop_limit_reached",
+        .actor = state.current_actor,
+        .lane = currentLaneForState(state.*),
+        .summary = state.runtime_session.last_error,
+        .artifacts = &.{},
+        .timestamp = try unixTimestampString(allocator),
+    });
+    try saveState(allocator, config.paths.state_file, state.*);
+    emitLog(hooks, .danger, "runtime", "Loop Limit Reached", state.runtime_session.last_error, .plain);
     emitStateSnapshot(hooks, config, state.*);
 }
 
@@ -2859,7 +3023,10 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
         "decanus",
         "shared/decanus-schema.json",
     );
-    const user_prompt = try buildDecanusUserPrompt(allocator, config, state);
+    const user_prompt = buildPromptWithContextBudget(allocator, config, state, hooks, system_prompt, .decanus, "") catch |err| {
+        if (err == error.ContextBudgetExceeded) return .blocked;
+        return err;
+    };
     try writeTurnLog(state.runtime_session.active_log_path, "system_prompt", system_prompt);
     try writeTurnLog(state.runtime_session.active_log_path, "user_prompt", user_prompt);
 
@@ -3034,7 +3201,10 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
 
     const schema_path = "shared/specialist-schema.json";
     const system_prompt = try assembleSystemPrompt(allocator, config.paths.prompts_dir, actor, schema_path);
-    const user_prompt = try buildSpecialistUserPrompt(allocator, config, state, lane);
+    const user_prompt = buildPromptWithContextBudget(allocator, config, state, hooks, system_prompt, .specialist, lane) catch |err| {
+        if (err == error.ContextBudgetExceeded) return .blocked;
+        return err;
+    };
     try writeTurnLog(state.runtime_session.active_log_path, "system_prompt", system_prompt);
     try writeTurnLog(state.runtime_session.active_log_path, "user_prompt", user_prompt);
 
@@ -4174,14 +4344,22 @@ fn resetStateForMission(state: *AppState, mission_prompt: []const u8) void {
     state.agent_loop = .{};
     state.runtime_session = .{};
     state.tasks = .{};
+    ensureLoopBudget(state);
 }
 
 fn initializeRuntimeSession(allocator: std.mem.Allocator, state: *AppState, config: AppConfig) void {
     _ = allocator;
+    ensureLoopBudget(state);
     state.runtime_session.provider = config.provider.type;
     state.runtime_session.model = config.provider.model;
     state.runtime_session.endpoint = config.provider.base_url;
     state.runtime_session.approval_mode = config.policy.approval_mode;
+    state.runtime_session.context_budget.context_window_tokens = config.context.estimated_context_window_tokens;
+    state.runtime_session.context_budget.response_reserve_tokens = config.context.response_reserve_tokens;
+    if (state.runtime_session.context_budget.estimated_prompt_tokens == 0) {
+        state.runtime_session.context_budget.remaining_tokens = usablePromptTokenWindow(config.context);
+        state.runtime_session.context_budget.used_percent = 0;
+    }
     if (state.runtime_session.status.len == 0 or eql(state.runtime_session.status, "idle")) {
         state.runtime_session.status = "ready";
     }
@@ -4272,6 +4450,236 @@ fn recentHistoryText(allocator: std.mem.Allocator, history: []const HistoryEntry
         ));
     }
     return try joinStrings(allocator, lines.items, "\n");
+}
+
+fn estimateTokensFromText(text: []const u8) usize {
+    if (text.len == 0) return 0;
+    return (text.len + 3) / 4;
+}
+
+fn estimatePromptBudget(config: ContextConfig, system_prompt: []const u8, user_prompt: []const u8) PromptBudgetEstimate {
+    const prompt_chars = system_prompt.len + user_prompt.len;
+    const prompt_tokens = estimateTokensFromText(system_prompt) + estimateTokensFromText(user_prompt) + 32;
+    const usable_prompt_tokens = usablePromptTokenWindow(config);
+    const remaining_tokens = usable_prompt_tokens -| prompt_tokens;
+    const used_percent = if (usable_prompt_tokens == 0)
+        100
+    else
+        @min((prompt_tokens * 100 + usable_prompt_tokens - 1) / usable_prompt_tokens, 100);
+    return .{
+        .prompt_chars = prompt_chars,
+        .prompt_tokens = prompt_tokens,
+        .usable_prompt_tokens = usable_prompt_tokens,
+        .remaining_tokens = remaining_tokens,
+        .used_percent = used_percent,
+        .should_warn = used_percent >= config.warn_at_percent,
+        .should_condense = used_percent >= config.condense_at_percent,
+        .exhausted = prompt_tokens >= usable_prompt_tokens,
+    };
+}
+
+fn applyPromptBudgetEstimate(state: *AppState, config: ContextConfig, estimate: PromptBudgetEstimate) void {
+    state.runtime_session.context_budget.estimated_prompt_chars = estimate.prompt_chars;
+    state.runtime_session.context_budget.estimated_prompt_tokens = estimate.prompt_tokens;
+    state.runtime_session.context_budget.context_window_tokens = config.estimated_context_window_tokens;
+    state.runtime_session.context_budget.response_reserve_tokens = config.response_reserve_tokens;
+    state.runtime_session.context_budget.remaining_tokens = estimate.remaining_tokens;
+    state.runtime_session.context_budget.used_percent = estimate.used_percent;
+}
+
+fn buildCondensedHistorySummary(
+    allocator: std.mem.Allocator,
+    entries: []const HistoryEntry,
+    max_chars: usize,
+) ![]const u8 {
+    if (entries.len == 0) return "condensed prior progress";
+
+    var lines: std.ArrayList([]const u8) = .empty;
+    defer lines.deinit(allocator);
+    try lines.append(allocator, try std.fmt.allocPrint(allocator, "condensed {d} earlier events", .{entries.len}));
+
+    var artifacts: std.ArrayList([]const u8) = .empty;
+    defer artifacts.deinit(allocator);
+    for (entries) |entry| {
+        for (entry.artifacts) |artifact| {
+            if (artifact.len == 0 or containsString(artifacts.items, artifact)) continue;
+            try artifacts.append(allocator, artifact);
+        }
+    }
+    if (artifacts.items.len > 0) {
+        try lines.append(allocator, try std.fmt.allocPrint(
+            allocator,
+            "artifacts: {s}",
+            .{try joinStrings(allocator, artifacts.items, ", ")},
+        ));
+    }
+
+    try lines.append(allocator, "milestones:");
+    const milestone_start = if (entries.len > 6) entries.len - 6 else 0;
+    for (entries[milestone_start..]) |entry| {
+        const summary = try compactTextForUi(allocator, entry.summary, 2, 180);
+        try lines.append(allocator, try std.fmt.allocPrint(
+            allocator,
+            "- #{d} {s}/{s}: {s}",
+            .{
+                entry.iteration,
+                if (entry.actor.len > 0) entry.actor else "runtime",
+                if (entry.lane.len > 0) entry.lane else "command",
+                summary,
+            },
+        ));
+    }
+
+    return try truncateText(allocator, try joinStrings(allocator, lines.items, "\n"), max_chars);
+}
+
+fn condenseHistoryForContext(allocator: std.mem.Allocator, config: ContextConfig, state: *AppState) !bool {
+    const keep_recent = @max(@as(usize, 1), config.condensed_keep_recent_events);
+    if (state.agent_loop.history.len <= keep_recent + 1) return false;
+
+    const split_index = state.agent_loop.history.len - keep_recent;
+    const older = state.agent_loop.history[0..split_index];
+    const summary = try buildCondensedHistorySummary(allocator, older, config.max_condensed_summary_chars);
+
+    var history: std.ArrayList(HistoryEntry) = .empty;
+    try history.append(allocator, .{
+        .iteration = older[older.len - 1].iteration,
+        .type = "condensed_context",
+        .actor = "decanus",
+        .lane = "command",
+        .summary = summary,
+        .artifacts = &.{},
+        .timestamp = try unixTimestampString(allocator),
+    });
+    try history.appendSlice(allocator, state.agent_loop.history[split_index..]);
+    state.agent_loop.history = try history.toOwnedSlice(allocator);
+    state.runtime_session.context_budget.condensation_count += 1;
+    state.runtime_session.context_budget.condensed_history_events += older.len;
+    state.runtime_session.context_budget.last_condensed_iteration = state.agent_loop.iteration;
+    return true;
+}
+
+fn progressDocumentationText(
+    allocator: std.mem.Allocator,
+    state: *const AppState,
+    reason: []const u8,
+    max_chars: usize,
+) ![]const u8 {
+    const task_summary = try taskSummaryText(allocator, state.tasks);
+    const recent_history = try recentHistoryText(allocator, state.agent_loop.history, 5);
+    const latest_result = try compactTextForUi(
+        allocator,
+        if (state.agent_loop.last_tool_result.len > 0) state.agent_loop.last_tool_result else "none",
+        5,
+        420,
+    );
+    return try truncateText(
+        allocator,
+        try std.fmt.allocPrint(
+            allocator,
+            "{s}\n\ncurrent goal: {s}\nloop: {d}/{d}\ncurrent actor: {s}\nactive tool: {s}\nlatest result: {s}\ntasks: {s}\nrecent progress:\n{s}",
+            .{
+                reason,
+                if (state.mission.current_goal.len > 0) state.mission.current_goal else "idle",
+                state.agent_loop.iteration,
+                state.agent_loop.max_iterations,
+                state.current_actor,
+                if (state.agent_loop.active_tool.len > 0) state.agent_loop.active_tool else "none",
+                latest_result,
+                task_summary,
+                recent_history,
+            },
+        ),
+        max_chars,
+    );
+}
+
+fn blockForContextLimit(
+    allocator: std.mem.Allocator,
+    config: AppConfig,
+    state: *AppState,
+    hooks: RuntimeHooks,
+    estimate: PromptBudgetEstimate,
+) !void {
+    const message = try progressDocumentationText(
+        allocator,
+        state,
+        try std.fmt.allocPrint(
+            allocator,
+            "estimated prompt budget exhausted before the next model turn ({d} tokens against {d} usable).",
+            .{ estimate.prompt_tokens, estimate.usable_prompt_tokens },
+        ),
+        config.context.max_stop_summary_chars,
+    );
+    state.global_status = "waiting_on_tool";
+    state.agent_loop.status = "blocked";
+    state.runtime_session.status = "blocked";
+    state.runtime_session.last_error = message;
+    try appendHistory(allocator, state, .{
+        .iteration = state.agent_loop.iteration,
+        .type = "context_budget_blocked",
+        .actor = state.current_actor,
+        .lane = currentLaneForState(state.*),
+        .summary = message,
+        .artifacts = &.{},
+        .timestamp = try unixTimestampString(allocator),
+    });
+    emitLog(hooks, .danger, "runtime", "Context Budget Reached", message, .plain);
+    emitStateSnapshot(hooks, config, state.*);
+}
+
+fn buildPromptWithContextBudget(
+    allocator: std.mem.Allocator,
+    config: AppConfig,
+    state: *AppState,
+    hooks: RuntimeHooks,
+    system_prompt: []const u8,
+    mode: PromptMode,
+    lane: []const u8,
+) ![]const u8 {
+    var attempt: usize = 0;
+    while (true) {
+        const user_prompt = switch (mode) {
+            .decanus => try buildDecanusUserPrompt(allocator, config, state),
+            .specialist => try buildSpecialistUserPrompt(allocator, config, state, lane),
+        };
+        const estimate = estimatePromptBudget(config.context, system_prompt, user_prompt);
+        applyPromptBudgetEstimate(state, config.context, estimate);
+        emitStateSnapshot(hooks, config, state.*);
+
+        if (!estimate.should_condense or attempt >= 3) {
+            if (estimate.exhausted) {
+                try blockForContextLimit(allocator, config, state, hooks, estimate);
+                return error.ContextBudgetExceeded;
+            }
+            return user_prompt;
+        }
+
+        const condensed = try condenseHistoryForContext(allocator, config.context, state);
+        if (!condensed) {
+            if (estimate.exhausted) {
+                try blockForContextLimit(allocator, config, state, hooks, estimate);
+                return error.ContextBudgetExceeded;
+            }
+            return user_prompt;
+        }
+
+        emitLog(
+            hooks,
+            .warning,
+            "runtime",
+            "Context Condensed",
+            try std.fmt.allocPrint(
+                allocator,
+                "condensed {d} earlier events and rebuilt the prompt budget",
+                .{
+                    state.runtime_session.context_budget.condensed_history_events,
+                },
+            ),
+            .plain,
+        );
+        attempt += 1;
+    }
 }
 
 fn blockedToolOutcome(allocator: std.mem.Allocator, state: *AppState, reason: []const u8) !ToolExecutionOutcome {
@@ -4854,6 +5262,15 @@ fn processRuntimeEventsVaxis(allocator: std.mem.Allocator, ui: *VaxisUiSession, 
                     .last_error = event.last_error,
                     .last_log_path = event.last_log_path,
                     .iteration = event.iteration,
+                    .max_iterations = if (event.max_iterations > 0) event.max_iterations else ui.snapshot.max_iterations,
+                    .estimated_prompt_chars = if (event.estimated_prompt_chars > 0) event.estimated_prompt_chars else ui.snapshot.estimated_prompt_chars,
+                    .estimated_prompt_tokens = if (event.estimated_prompt_tokens > 0) event.estimated_prompt_tokens else ui.snapshot.estimated_prompt_tokens,
+                    .context_window_tokens = if (event.context_window_tokens > 0) event.context_window_tokens else ui.snapshot.context_window_tokens,
+                    .response_reserve_tokens = if (event.response_reserve_tokens > 0) event.response_reserve_tokens else ui.snapshot.response_reserve_tokens,
+                    .remaining_context_tokens = if (event.remaining_context_tokens > 0 or event.estimated_prompt_tokens > 0) event.remaining_context_tokens else ui.snapshot.remaining_context_tokens,
+                    .context_used_percent = if (event.context_used_percent > 0 or event.estimated_prompt_tokens > 0) event.context_used_percent else ui.snapshot.context_used_percent,
+                    .condensation_count = if (event.condensation_count > 0) event.condensation_count else ui.snapshot.condensation_count,
+                    .condensed_history_events = if (event.condensed_history_events > 0) event.condensed_history_events else ui.snapshot.condensed_history_events,
                 });
                 ui.dirty = true;
             },
@@ -5752,6 +6169,12 @@ fn buildRailLinesVaxis(
     lines: *std.ArrayList(VaxisRenderLine),
     width: usize,
 ) !void {
+    const budget_tone: ChatTone = if (ui.snapshot.context_used_percent >= 85)
+        .danger
+    else if (ui.snapshot.context_used_percent >= 70)
+        .warning
+    else
+        .info;
     try lines.append(allocator, .{ .text = "LIVE CONTEXT", .kind = .tool, .tone = .warning, .bold = true });
     const actor_line = try std.fmt.allocPrint(allocator, "actor  {s}", .{ui.snapshot.current_actor});
     try appendWrappedVaxisLinesWithPrefix(allocator, lines, actor_line, width, .info, .plain, .system, "");
@@ -5761,8 +6184,50 @@ fn buildRailLinesVaxis(
     try appendWrappedVaxisLinesWithPrefix(allocator, lines, global_line, width, .info, .plain, .system, "");
     const runtime_line = try std.fmt.allocPrint(allocator, "runtime {s}", .{ui.snapshot.runtime_status});
     try appendWrappedVaxisLinesWithPrefix(allocator, lines, runtime_line, width, .info, .plain, .system, "");
-    const turn_line = try std.fmt.allocPrint(allocator, "turn   {d}", .{ui.snapshot.iteration});
+    const turn_line = try std.fmt.allocPrint(allocator, "loop   {d}/{d}", .{ ui.snapshot.iteration, ui.snapshot.max_iterations });
     try appendWrappedVaxisLinesWithPrefix(allocator, lines, turn_line, width, .info, .plain, .system, "");
+    try lines.append(allocator, .{});
+    try lines.append(allocator, .{ .text = "BUDGET", .kind = .tool, .tone = .warning, .bold = true });
+    try appendWrappedVaxisLinesWithPrefix(
+        allocator,
+        lines,
+        try std.fmt.allocPrint(allocator, "prompt est  {d} tok", .{ui.snapshot.estimated_prompt_tokens}),
+        width,
+        budget_tone,
+        .plain,
+        .system,
+        "",
+    );
+    try appendWrappedVaxisLinesWithPrefix(
+        allocator,
+        lines,
+        try std.fmt.allocPrint(allocator, "context left {d}", .{ui.snapshot.remaining_context_tokens}),
+        width,
+        budget_tone,
+        .plain,
+        .system,
+        "",
+    );
+    try appendWrappedVaxisLinesWithPrefix(
+        allocator,
+        lines,
+        try std.fmt.allocPrint(allocator, "used   {d}%", .{ui.snapshot.context_used_percent}),
+        width,
+        budget_tone,
+        .plain,
+        .system,
+        "",
+    );
+    try appendWrappedVaxisLinesWithPrefix(
+        allocator,
+        lines,
+        try std.fmt.allocPrint(allocator, "condensed {d}/{d}", .{ ui.snapshot.condensation_count, ui.snapshot.condensed_history_events }),
+        width,
+        .info,
+        .plain,
+        .system,
+        "",
+    );
     try lines.append(allocator, .{});
     try lines.append(allocator, .{ .text = "GOAL", .kind = .tool, .tone = .warning, .bold = true });
     try appendWrappedVaxisLinesWithPrefix(allocator, lines, if (ui.snapshot.current_goal.len > 0) ui.snapshot.current_goal else "idle", width, .info, .plain, .system, "");
@@ -5933,8 +6398,14 @@ fn renderSessionUi(allocator: std.mem.Allocator, root: vaxis.Window, ui: *VaxisU
 
     const meta_text = try std.fmt.allocPrint(
         allocator,
-        "{s}  •  {s}  •  turn {d}",
-        .{ ui.snapshot.provider_type, ui.snapshot.model, ui.snapshot.iteration },
+        "{s}  •  {s}  •  ctx ~{d} left  •  turn {d}/{d}",
+        .{
+            ui.snapshot.provider_type,
+            ui.snapshot.model,
+            ui.snapshot.remaining_context_tokens,
+            ui.snapshot.iteration,
+            ui.snapshot.max_iterations,
+        },
     );
     const meta_col = if (displayWidth(meta_text) + 1 < top_strip.width) @as(usize, top_strip.width) - displayWidth(meta_text) else 0;
     drawText(top_strip, 0, meta_col, meta_text, .{ .fg = roman_muted, .bg = roman_bg });
@@ -6559,6 +7030,63 @@ test "processOllamaPendingLines completes buffered stream output" {
     try testing.expectEqualStrings("lo", events[1].text);
 }
 
+test "initializeRuntimeSession upgrades the legacy loop budget and seeds context defaults" {
+    const testing = std.testing;
+    const config = AppConfig{};
+    var state = AppState{};
+    state.agent_loop.max_iterations = legacy_default_max_iterations;
+
+    initializeRuntimeSession(testing.allocator, &state, config);
+
+    try testing.expectEqual(@as(usize, default_max_iterations), state.agent_loop.max_iterations);
+    try testing.expectEqual(@as(usize, default_context_window_tokens), state.runtime_session.context_budget.context_window_tokens);
+    try testing.expectEqual(@as(usize, default_response_reserve_tokens), state.runtime_session.context_budget.response_reserve_tokens);
+    try testing.expectEqual(@as(usize, default_context_window_tokens - default_response_reserve_tokens), state.runtime_session.context_budget.remaining_tokens);
+}
+
+test "estimatePromptBudget reserves response headroom" {
+    const testing = std.testing;
+    const config = ContextConfig{
+        .estimated_context_window_tokens = 1200,
+        .response_reserve_tokens = 200,
+    };
+
+    const estimate = estimatePromptBudget(config, "system prompt", "user prompt");
+    try testing.expectEqual(@as(usize, 1000), estimate.usable_prompt_tokens);
+    try testing.expect(estimate.prompt_tokens > 0);
+    try testing.expect(estimate.remaining_tokens < estimate.usable_prompt_tokens);
+}
+
+test "condenseHistoryForContext replaces older entries with a retained digest" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+    var state = AppState{};
+    var index: usize = 0;
+    while (index < 6) : (index += 1) {
+        try appendHistory(allocator, &state, .{
+            .iteration = index + 1,
+            .type = "tool_result",
+            .actor = "artifex",
+            .lane = "frontend",
+            .summary = try std.fmt.allocPrint(allocator, "completed slice {d}", .{index + 1}),
+            .artifacts = &.{},
+            .timestamp = "1",
+        });
+    }
+
+    const condensed = try condenseHistoryForContext(allocator, ContextConfig{
+        .condensed_keep_recent_events = 2,
+        .max_condensed_summary_chars = 600,
+    }, &state);
+
+    try testing.expect(condensed);
+    try testing.expectEqual(@as(usize, 3), state.agent_loop.history.len);
+    try testing.expectEqualStrings("condensed_context", state.agent_loop.history[0].type);
+    try testing.expect(std.mem.indexOf(u8, state.agent_loop.history[0].summary, "milestones:") != null);
+    try testing.expectEqual(@as(usize, 1), state.runtime_session.context_budget.condensation_count);
+    try testing.expectEqual(@as(usize, 4), state.runtime_session.context_budget.condensed_history_events);
+}
+
 test "snapshotFromState uses config and loop state" {
     const testing = std.testing;
     const config = AppConfig{};
@@ -6566,9 +7094,21 @@ test "snapshotFromState uses config and loop state" {
     state.current_actor = "artifex";
     state.agent_loop.active_tool = "artifex";
     state.agent_loop.iteration = 4;
+    state.agent_loop.max_iterations = 24;
     state.agent_loop.last_tool_result = "read_file README.md";
     state.runtime_session.status = "running";
     state.runtime_session.model = "custom-model";
+    state.runtime_session.context_budget = .{
+        .estimated_prompt_chars = 1200,
+        .estimated_prompt_tokens = 300,
+        .context_window_tokens = 32768,
+        .response_reserve_tokens = 4096,
+        .remaining_tokens = 28372,
+        .used_percent = 10,
+        .condensation_count = 1,
+        .condensed_history_events = 5,
+        .last_condensed_iteration = 3,
+    };
 
     const snapshot = snapshotFromState(config, state, "Contubernium");
     try testing.expectEqualStrings("Contubernium", snapshot.project_name);
@@ -6576,6 +7116,9 @@ test "snapshotFromState uses config and loop state" {
     try testing.expectEqualStrings("frontend", snapshot.active_lane);
     try testing.expectEqualStrings("read_file README.md", snapshot.last_tool_result);
     try testing.expectEqual(@as(usize, 4), snapshot.iteration);
+    try testing.expectEqual(@as(usize, 24), snapshot.max_iterations);
+    try testing.expectEqual(@as(usize, 300), snapshot.estimated_prompt_tokens);
+    try testing.expectEqual(@as(usize, 28372), snapshot.remaining_context_tokens);
 }
 
 test "setTuiSnapshot clones strings" {
@@ -6638,8 +7181,7 @@ test "processRuntimeEvents keeps snapshot data after freeing events" {
     const frame = try buildRenderFrame(testing.allocator, &tui, .{ .rows = 24, .cols = 140 });
     defer testing.allocator.free(frame.screen);
     try testing.expect(std.mem.indexOf(u8, frame.screen, "actor: artifex") != null);
-    try testing.expect(std.mem.indexOf(u8, frame.screen, "LATEST") != null);
-    try testing.expect(std.mem.indexOf(u8, frame.screen, "read_file README.md") != null);
+    try testing.expect(std.mem.indexOf(u8, frame.screen, "BUDGET") != null);
 }
 
 test "toneForOutcome treats interrupted runs as danger" {
