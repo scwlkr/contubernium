@@ -14,7 +14,14 @@ pub const state_json =
     \\    "status": "awaiting_initial_prompt",
     \\    "iteration": 0,
     \\    "max_iterations": 24,
-    \\    "active_tool": "",
+    \\    "active_tool": null,
+    \\    "last_step": {
+    \\      "iteration": 0,
+    \\      "kind": "think",
+    \\      "actor": "decanus",
+    \\      "lane": "command",
+    \\      "summary": ""
+    \\    },
     \\    "last_decision": "",
     \\    "last_tool_result": "",
     \\    "history": []
@@ -25,11 +32,21 @@ pub const state_json =
     \\    "model": "",
     \\    "endpoint": "",
     \\    "approval_mode": "guarded",
+    \\    "active_approval": {
+    \\      "status": "idle",
+    \\      "kind": "read",
+    \\      "requested_by": "decanus",
+    \\      "lane": "command",
+    \\      "tool_name": "",
+    \\      "detail": "",
+    \\      "reason": "",
+    \\      "target": ""
+    \\    },
     \\    "current_turn_id": "",
     \\    "last_health_check": "",
     \\    "last_error": "",
     \\    "active_log_path": "",
-    \\    "last_actor": "",
+    \\    "last_actor": "decanus",
     \\    "repair_attempts": 0,
     \\    "context_budget": {
     \\      "estimated_prompt_chars": 0,
@@ -117,11 +134,35 @@ pub const state_json =
     \\      "invocation": {
     \\        "status": "idle",
     \\        "requested_by": "decanus",
+    \\        "target": "faber",
+    \\        "lane": "backend",
     \\        "iteration": 0,
     \\        "objective": "",
     \\        "completion_signal": "",
-    \\        "dependencies": [],
-    \\        "result_summary": "",
+    \\        "context": {
+    \\          "project": "",
+    \\          "files": [],
+    \\          "constraints": [],
+    \\          "dependencies": []
+    \\        },
+    \\        "scope": {
+    \\          "allowed_actions": [],
+    \\          "restricted_actions": []
+    \\        },
+    \\        "memory": {
+    \\          "mission": "",
+    \\          "project": "",
+    \\          "relevant": []
+    \\        },
+    \\        "result": {
+    \\          "status": "idle",
+    \\          "summary": "",
+    \\          "changes": [],
+    \\          "findings": [],
+    \\          "blockers": [],
+    \\          "next_recommended_agent": null,
+    \\          "confidence": 0
+    \\        },
     \\        "return_to": "decanus"
     \\      }
     \\    },
@@ -133,11 +174,35 @@ pub const state_json =
     \\      "invocation": {
     \\        "status": "idle",
     \\        "requested_by": "decanus",
+    \\        "target": "artifex",
+    \\        "lane": "frontend",
     \\        "iteration": 0,
     \\        "objective": "",
     \\        "completion_signal": "",
-    \\        "dependencies": [],
-    \\        "result_summary": "",
+    \\        "context": {
+    \\          "project": "",
+    \\          "files": [],
+    \\          "constraints": [],
+    \\          "dependencies": []
+    \\        },
+    \\        "scope": {
+    \\          "allowed_actions": [],
+    \\          "restricted_actions": []
+    \\        },
+    \\        "memory": {
+    \\          "mission": "",
+    \\          "project": "",
+    \\          "relevant": []
+    \\        },
+    \\        "result": {
+    \\          "status": "idle",
+    \\          "summary": "",
+    \\          "changes": [],
+    \\          "findings": [],
+    \\          "blockers": [],
+    \\          "next_recommended_agent": null,
+    \\          "confidence": 0
+    \\        },
     \\        "return_to": "decanus"
     \\      }
     \\    },
@@ -149,11 +214,35 @@ pub const state_json =
     \\      "invocation": {
     \\        "status": "idle",
     \\        "requested_by": "decanus",
+    \\        "target": "architectus",
+    \\        "lane": "systems",
     \\        "iteration": 0,
     \\        "objective": "",
     \\        "completion_signal": "",
-    \\        "dependencies": [],
-    \\        "result_summary": "",
+    \\        "context": {
+    \\          "project": "",
+    \\          "files": [],
+    \\          "constraints": [],
+    \\          "dependencies": []
+    \\        },
+    \\        "scope": {
+    \\          "allowed_actions": [],
+    \\          "restricted_actions": []
+    \\        },
+    \\        "memory": {
+    \\          "mission": "",
+    \\          "project": "",
+    \\          "relevant": []
+    \\        },
+    \\        "result": {
+    \\          "status": "idle",
+    \\          "summary": "",
+    \\          "changes": [],
+    \\          "findings": [],
+    \\          "blockers": [],
+    \\          "next_recommended_agent": null,
+    \\          "confidence": 0
+    \\        },
     \\        "return_to": "decanus"
     \\      }
     \\    },
@@ -165,11 +254,35 @@ pub const state_json =
     \\      "invocation": {
     \\        "status": "idle",
     \\        "requested_by": "decanus",
+    \\        "target": "tesserarius",
+    \\        "lane": "qa",
     \\        "iteration": 0,
     \\        "objective": "",
     \\        "completion_signal": "",
-    \\        "dependencies": [],
-    \\        "result_summary": "",
+    \\        "context": {
+    \\          "project": "",
+    \\          "files": [],
+    \\          "constraints": [],
+    \\          "dependencies": []
+    \\        },
+    \\        "scope": {
+    \\          "allowed_actions": [],
+    \\          "restricted_actions": []
+    \\        },
+    \\        "memory": {
+    \\          "mission": "",
+    \\          "project": "",
+    \\          "relevant": []
+    \\        },
+    \\        "result": {
+    \\          "status": "idle",
+    \\          "summary": "",
+    \\          "changes": [],
+    \\          "findings": [],
+    \\          "blockers": [],
+    \\          "next_recommended_agent": null,
+    \\          "confidence": 0
+    \\        },
     \\        "return_to": "decanus"
     \\      }
     \\    },
@@ -181,11 +294,35 @@ pub const state_json =
     \\      "invocation": {
     \\        "status": "idle",
     \\        "requested_by": "decanus",
+    \\        "target": "explorator",
+    \\        "lane": "research",
     \\        "iteration": 0,
     \\        "objective": "",
     \\        "completion_signal": "",
-    \\        "dependencies": [],
-    \\        "result_summary": "",
+    \\        "context": {
+    \\          "project": "",
+    \\          "files": [],
+    \\          "constraints": [],
+    \\          "dependencies": []
+    \\        },
+    \\        "scope": {
+    \\          "allowed_actions": [],
+    \\          "restricted_actions": []
+    \\        },
+    \\        "memory": {
+    \\          "mission": "",
+    \\          "project": "",
+    \\          "relevant": []
+    \\        },
+    \\        "result": {
+    \\          "status": "idle",
+    \\          "summary": "",
+    \\          "changes": [],
+    \\          "findings": [],
+    \\          "blockers": [],
+    \\          "next_recommended_agent": null,
+    \\          "confidence": 0
+    \\        },
     \\        "return_to": "decanus"
     \\      }
     \\    },
@@ -197,11 +334,35 @@ pub const state_json =
     \\      "invocation": {
     \\        "status": "idle",
     \\        "requested_by": "decanus",
+    \\        "target": "signifer",
+    \\        "lane": "brand",
     \\        "iteration": 0,
     \\        "objective": "",
     \\        "completion_signal": "",
-    \\        "dependencies": [],
-    \\        "result_summary": "",
+    \\        "context": {
+    \\          "project": "",
+    \\          "files": [],
+    \\          "constraints": [],
+    \\          "dependencies": []
+    \\        },
+    \\        "scope": {
+    \\          "allowed_actions": [],
+    \\          "restricted_actions": []
+    \\        },
+    \\        "memory": {
+    \\          "mission": "",
+    \\          "project": "",
+    \\          "relevant": []
+    \\        },
+    \\        "result": {
+    \\          "status": "idle",
+    \\          "summary": "",
+    \\          "changes": [],
+    \\          "findings": [],
+    \\          "blockers": [],
+    \\          "next_recommended_agent": null,
+    \\          "confidence": 0
+    \\        },
     \\        "return_to": "decanus"
     \\      }
     \\    },
@@ -213,11 +374,35 @@ pub const state_json =
     \\      "invocation": {
     \\        "status": "idle",
     \\        "requested_by": "decanus",
+    \\        "target": "praeco",
+    \\        "lane": "media",
     \\        "iteration": 0,
     \\        "objective": "",
     \\        "completion_signal": "",
-    \\        "dependencies": [],
-    \\        "result_summary": "",
+    \\        "context": {
+    \\          "project": "",
+    \\          "files": [],
+    \\          "constraints": [],
+    \\          "dependencies": []
+    \\        },
+    \\        "scope": {
+    \\          "allowed_actions": [],
+    \\          "restricted_actions": []
+    \\        },
+    \\        "memory": {
+    \\          "mission": "",
+    \\          "project": "",
+    \\          "relevant": []
+    \\        },
+    \\        "result": {
+    \\          "status": "idle",
+    \\          "summary": "",
+    \\          "changes": [],
+    \\          "findings": [],
+    \\          "blockers": [],
+    \\          "next_recommended_agent": null,
+    \\          "confidence": 0
+    \\        },
     \\        "return_to": "decanus"
     \\      }
     \\    },
@@ -229,11 +414,35 @@ pub const state_json =
     \\      "invocation": {
     \\        "status": "idle",
     \\        "requested_by": "decanus",
+    \\        "target": "calo",
+    \\        "lane": "docs",
     \\        "iteration": 0,
     \\        "objective": "",
     \\        "completion_signal": "",
-    \\        "dependencies": [],
-    \\        "result_summary": "",
+    \\        "context": {
+    \\          "project": "",
+    \\          "files": [],
+    \\          "constraints": [],
+    \\          "dependencies": []
+    \\        },
+    \\        "scope": {
+    \\          "allowed_actions": [],
+    \\          "restricted_actions": []
+    \\        },
+    \\        "memory": {
+    \\          "mission": "",
+    \\          "project": "",
+    \\          "relevant": []
+    \\        },
+    \\        "result": {
+    \\          "status": "idle",
+    \\          "summary": "",
+    \\          "changes": [],
+    \\          "findings": [],
+    \\          "blockers": [],
+    \\          "next_recommended_agent": null,
+    \\          "confidence": 0
+    \\        },
     \\        "return_to": "decanus"
     \\      }
     \\    },
@@ -245,11 +454,35 @@ pub const state_json =
     \\      "invocation": {
     \\        "status": "idle",
     \\        "requested_by": "decanus",
+    \\        "target": "mulus",
+    \\        "lane": "bulk_ops",
     \\        "iteration": 0,
     \\        "objective": "",
     \\        "completion_signal": "",
-    \\        "dependencies": [],
-    \\        "result_summary": "",
+    \\        "context": {
+    \\          "project": "",
+    \\          "files": [],
+    \\          "constraints": [],
+    \\          "dependencies": []
+    \\        },
+    \\        "scope": {
+    \\          "allowed_actions": [],
+    \\          "restricted_actions": []
+    \\        },
+    \\        "memory": {
+    \\          "mission": "",
+    \\          "project": "",
+    \\          "relevant": []
+    \\        },
+    \\        "result": {
+    \\          "status": "idle",
+    \\          "summary": "",
+    \\          "changes": [],
+    \\          "findings": [],
+    \\          "blockers": [],
+    \\          "next_recommended_agent": null,
+    \\          "confidence": 0
+    \\        },
     \\        "return_to": "decanus"
     \\      }
     \\    }
@@ -373,14 +606,26 @@ pub const decanus_schema =
 
 pub const specialist_schema =
     \\{
-    \\  "action": "complete | tool_request | ask_user | blocked",
+    \\  "action": "optional: complete | tool_request | ask_user | blocked",
     \\  "reasoning": "short explanation",
-    \\  "description": "what changed or what was learned",
-    \\  "result_summary": "short result summary",
-    \\  "artifacts": [
+    \\  "status": "complete | partial | blocked",
+    \\  "summary": "what was done or what was learned",
+    \\  "changes": [
     \\    "changed files or produced outputs"
     \\  ],
-    \\  "follow_up_needed": "optional suggestion for decanus",
+    \\  "findings": [
+    \\    "important observations for decanus"
+    \\  ],
+    \\  "blockers": [
+    \\    "blocking issue if status is blocked"
+    \\  ],
+    \\  "next_recommended_agent": "optional: faber | artifex | architectus | tesserarius | explorator | signifer | praeco | calo | mulus",
+    \\  "confidence": 0.0,
+    \\  "description": "optional legacy detail field",
+    \\  "result_summary": "optional legacy summary field",
+    \\  "artifacts": [
+    \\    "optional legacy change list"
+    \\  ],
     \\  "question": "required when action is ask_user",
     \\  "blocked_reason": "required when action is blocked",
     \\  "tool_requests": [

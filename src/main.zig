@@ -1,5 +1,6 @@
 const std = @import("std");
 const embedded = @import("embedded_assets.zig");
+const protocol = @import("runtime_protocol.zig");
 const vaxis = @import("vaxis");
 
 const max_file_bytes = 16 * 1024 * 1024;
@@ -13,6 +14,24 @@ const legacy_default_max_iterations = 12;
 const default_max_iterations = 24;
 const default_context_window_tokens = 32768;
 const default_response_reserve_tokens = 4096;
+
+const Actor = protocol.Actor;
+const Lane = protocol.Lane;
+const GlobalStatus = protocol.GlobalStatus;
+const LoopStatus = protocol.LoopStatus;
+const RuntimeStatus = protocol.RuntimeStatus;
+const TaskStatus = protocol.TaskStatus;
+const InvocationStatus = protocol.InvocationStatus;
+const InvocationResultStatus = protocol.InvocationResultStatus;
+const ApprovalStatus = protocol.ApprovalStatus;
+const ApprovalKind = protocol.ApprovalKind;
+const LoopStepKind = protocol.LoopStepKind;
+const Mission = protocol.Mission;
+const Invocation = protocol.Invocation;
+const InvocationResult = protocol.InvocationResult;
+const ApprovalRequest = protocol.ApprovalRequest;
+const LoopStep = protocol.LoopStep;
+const StateSnapshot = protocol.StateSnapshot;
 
 const UiFlavor = enum {
     vaxis,
@@ -96,8 +115,8 @@ const ContextConfig = struct {
 
 const AppState = struct {
     project_name: []const u8 = "UNASSIGNED",
-    global_status: []const u8 = "idle",
-    current_actor: []const u8 = "decanus",
+    global_status: GlobalStatus = .idle,
+    current_actor: Actor = .decanus,
     mission: Mission = .{},
     agent_loop: AgentLoop = .{},
     runtime_session: RuntimeSession = .{},
@@ -105,19 +124,12 @@ const AppState = struct {
     tasks: Tasks = .{},
 };
 
-const Mission = struct {
-    initial_prompt: []const u8 = "",
-    current_goal: []const u8 = "",
-    success_criteria: []const []const u8 = &.{},
-    constraints: []const []const u8 = &.{},
-    final_response: []const u8 = "",
-};
-
 const AgentLoop = struct {
-    status: []const u8 = "awaiting_initial_prompt",
+    status: LoopStatus = .awaiting_initial_prompt,
     iteration: usize = 0,
     max_iterations: usize = default_max_iterations,
-    active_tool: []const u8 = "",
+    active_tool: ?Actor = null,
+    last_step: LoopStep = .{},
     last_decision: []const u8 = "",
     last_tool_result: []const u8 = "",
     history: []const HistoryEntry = &.{},
@@ -136,16 +148,17 @@ const ContextBudgetState = struct {
 };
 
 const RuntimeSession = struct {
-    status: []const u8 = "idle",
+    status: RuntimeStatus = .idle,
     provider: []const u8 = "",
     model: []const u8 = "",
     endpoint: []const u8 = "",
     approval_mode: []const u8 = "guarded",
+    active_approval: ApprovalRequest = .{},
     current_turn_id: []const u8 = "",
     last_health_check: []const u8 = "",
     last_error: []const u8 = "",
     active_log_path: []const u8 = "",
-    last_actor: []const u8 = "",
+    last_actor: Actor = .decanus,
     repair_attempts: usize = 0,
     context_budget: ContextBudgetState = .{},
 };
@@ -178,35 +191,24 @@ const AgentTools = struct {
     mulus: AgentTool = .{},
 };
 
-const Invocation = struct {
-    status: []const u8 = "idle",
-    requested_by: []const u8 = "decanus",
-    iteration: usize = 0,
-    objective: []const u8 = "",
-    completion_signal: []const u8 = "",
-    dependencies: []const []const u8 = &.{},
-    result_summary: []const u8 = "",
-    return_to: []const u8 = "decanus",
-};
-
 const TaskLane = struct {
-    status: []const u8 = "pending",
-    assigned_to: []const u8 = "",
+    status: TaskStatus = .pending,
+    assigned_to: Actor = .decanus,
     description: []const u8 = "",
     artifacts: []const []const u8 = &.{},
     invocation: Invocation = .{},
 };
 
 const Tasks = struct {
-    backend: TaskLane = .{ .assigned_to = "faber" },
-    frontend: TaskLane = .{ .assigned_to = "artifex" },
-    systems: TaskLane = .{ .assigned_to = "architectus" },
-    qa: TaskLane = .{ .assigned_to = "tesserarius" },
-    research: TaskLane = .{ .assigned_to = "explorator" },
-    brand: TaskLane = .{ .assigned_to = "signifer" },
-    media: TaskLane = .{ .assigned_to = "praeco" },
-    docs: TaskLane = .{ .assigned_to = "calo" },
-    bulk_ops: TaskLane = .{ .assigned_to = "mulus" },
+    backend: TaskLane = .{ .assigned_to = .faber },
+    frontend: TaskLane = .{ .assigned_to = .artifex },
+    systems: TaskLane = .{ .assigned_to = .architectus },
+    qa: TaskLane = .{ .assigned_to = .tesserarius },
+    research: TaskLane = .{ .assigned_to = .explorator },
+    brand: TaskLane = .{ .assigned_to = .signifer },
+    media: TaskLane = .{ .assigned_to = .praeco },
+    docs: TaskLane = .{ .assigned_to = .calo },
+    bulk_ops: TaskLane = .{ .assigned_to = .mulus },
 };
 
 const ToolRequest = struct {
@@ -236,6 +238,13 @@ const DecanusDecision = struct {
 const SpecialistResult = struct {
     action: []const u8 = "",
     reasoning: []const u8 = "",
+    status: []const u8 = "",
+    summary: []const u8 = "",
+    changes: []const []const u8 = &.{},
+    findings: []const []const u8 = &.{},
+    blockers: []const []const u8 = &.{},
+    next_recommended_agent: []const u8 = "",
+    confidence: f32 = 0.0,
     description: []const u8 = "",
     result_summary: []const u8 = "",
     artifacts: []const []const u8 = &.{},
@@ -1141,18 +1150,18 @@ fn resolvedContextBudget(config: ContextConfig, budget: ContextBudgetState) Cont
     return resolved;
 }
 
-fn snapshotFromState(config: AppConfig, state: AppState, project_name: []const u8) TuiSnapshot {
+fn buildStateSnapshot(config: AppConfig, state: AppState, project_name: []const u8) StateSnapshot {
     const budget = resolvedContextBudget(config.context, state.runtime_session.context_budget);
     return .{
         .project_name = project_name,
-        .provider_type = config.provider.type,
-        .model = if (state.runtime_session.model.len > 0) state.runtime_session.model else config.provider.model,
         .approval_mode = config.policy.approval_mode,
         .global_status = state.global_status,
         .runtime_status = state.runtime_session.status,
+        .loop_status = state.agent_loop.status,
         .current_actor = state.current_actor,
         .active_tool = state.agent_loop.active_tool,
-        .active_lane = currentLaneForState(state),
+        .active_lane = if (state.agent_loop.active_tool) |active_tool| protocol.laneForActor(active_tool) else protocol.laneForActor(state.current_actor),
+        .approval_status = state.runtime_session.active_approval.status,
         .current_goal = state.mission.current_goal,
         .last_tool_result = state.agent_loop.last_tool_result,
         .last_error = state.runtime_session.last_error,
@@ -1167,6 +1176,35 @@ fn snapshotFromState(config: AppConfig, state: AppState, project_name: []const u
         .context_used_percent = budget.used_percent,
         .condensation_count = budget.condensation_count,
         .condensed_history_events = budget.condensed_history_events,
+    };
+}
+
+fn snapshotFromState(config: AppConfig, state: AppState, project_name: []const u8) TuiSnapshot {
+    const snapshot = buildStateSnapshot(config, state, project_name);
+    return .{
+        .project_name = snapshot.project_name,
+        .provider_type = config.provider.type,
+        .model = if (state.runtime_session.model.len > 0) state.runtime_session.model else config.provider.model,
+        .approval_mode = snapshot.approval_mode,
+        .global_status = @tagName(snapshot.global_status),
+        .runtime_status = @tagName(snapshot.runtime_status),
+        .current_actor = actorName(snapshot.current_actor),
+        .active_tool = maybeActorName(snapshot.active_tool),
+        .active_lane = laneName(snapshot.active_lane),
+        .current_goal = snapshot.current_goal,
+        .last_tool_result = snapshot.last_tool_result,
+        .last_error = snapshot.last_error,
+        .last_log_path = snapshot.last_log_path,
+        .iteration = snapshot.iteration,
+        .max_iterations = snapshot.max_iterations,
+        .estimated_prompt_chars = snapshot.estimated_prompt_chars,
+        .estimated_prompt_tokens = snapshot.estimated_prompt_tokens,
+        .context_window_tokens = snapshot.context_window_tokens,
+        .response_reserve_tokens = snapshot.response_reserve_tokens,
+        .remaining_context_tokens = snapshot.remaining_context_tokens,
+        .context_used_percent = snapshot.context_used_percent,
+        .condensation_count = snapshot.condensation_count,
+        .condensed_history_events = snapshot.condensed_history_events,
     };
 }
 
@@ -1784,9 +1822,15 @@ fn summarizeDecanusDecisionForUi(allocator: std.mem.Allocator, decision: Decanus
     }
 
     if (eql(action, "invoke_specialist")) {
-        const lane = if (decision.lane.len > 0) decision.lane else laneForActor(decision.actor);
-        const actor = if (decision.actor.len > 0) decision.actor else actorForLane(lane);
-        try writer.print("\nhandoff: {s} on {s}", .{ actor, lane });
+        const requested_actor = if (decision.actor.len > 0) parseActor(decision.actor) else null;
+        const lane = if (decision.lane.len > 0)
+            std.meta.stringToEnum(Lane, decision.lane) orelse (if (requested_actor) |actor| laneForActor(actor) else .bulk_ops)
+        else if (requested_actor) |actor|
+            laneForActor(actor)
+        else
+            .bulk_ops;
+        const actor = requested_actor orelse actorForLane(lane);
+        try writer.print("\nhandoff: {s} on {s}", .{ actorName(actor), laneName(lane) });
         if (decision.objective.len > 0) {
             const objective = try compactTextForUi(allocator, decision.objective, 4, 360);
             defer allocator.free(objective);
@@ -1828,7 +1872,8 @@ fn summarizeSpecialistResultForUi(allocator: std.mem.Allocator, result: Speciali
     var buffer: std.ArrayList(u8) = .empty;
     errdefer buffer.deinit(allocator);
     const writer = buffer.writer(allocator);
-    const action = if (result.action.len > 0) result.action else "unknown";
+    const action = if (result.action.len > 0) result.action else if (result.status.len > 0) result.status else "unknown";
+    const summary = if (result.summary.len > 0) result.summary else result.result_summary;
 
     try writer.print("action: {s}", .{action});
     if (result.reasoning.len > 0) {
@@ -1846,16 +1891,24 @@ fn summarizeSpecialistResultForUi(allocator: std.mem.Allocator, result: Speciali
         return try buffer.toOwnedSlice(allocator);
     }
 
-    if (eql(action, "complete")) {
+    if (eql(action, "complete") or eql(action, "partial")) {
         if (result.description.len > 0) {
             const description = try compactTextForUi(allocator, result.description, 3, 280);
             defer allocator.free(description);
             try writer.print("\ndescription: {s}", .{description});
         }
-        if (result.result_summary.len > 0) {
-            const summary = try compactTextForUi(allocator, result.result_summary, 6, 520);
-            defer allocator.free(summary);
-            try writer.print("\nsummary:\n{s}", .{summary});
+        if (summary.len > 0) {
+            const compact_summary = try compactTextForUi(allocator, summary, 6, 520);
+            defer allocator.free(compact_summary);
+            try writer.print("\nsummary:\n{s}", .{compact_summary});
+        }
+        if (result.findings.len > 0) {
+            const findings = try joinStrings(allocator, result.findings, "; ");
+            defer allocator.free(findings);
+            try writer.print("\nfindings: {s}", .{findings});
+        }
+        if (result.confidence > 0) {
+            try writer.print("\nconfidence: {d:.2}", .{result.confidence});
         }
         return try buffer.toOwnedSlice(allocator);
     }
@@ -1868,7 +1921,12 @@ fn summarizeSpecialistResultForUi(allocator: std.mem.Allocator, result: Speciali
     }
 
     if (eql(action, "blocked")) {
-        const blocked_reason = if (result.blocked_reason.len > 0) result.blocked_reason else "blocked";
+        const blocked_reason = if (result.blockers.len > 0)
+            result.blockers[0]
+        else if (result.blocked_reason.len > 0)
+            result.blocked_reason
+        else
+            "blocked";
         const reason = try compactTextForUi(allocator, blocked_reason, 4, 320);
         defer allocator.free(reason);
         try writer.print("\nblocked: {s}", .{reason});
@@ -2900,15 +2958,35 @@ fn toUpperAscii(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
     return buffer;
 }
 
+fn actorName(actor: Actor) []const u8 {
+    return @tagName(actor);
+}
+
+fn maybeActorName(actor: ?Actor) []const u8 {
+    if (actor) |value| return actorName(value);
+    return "";
+}
+
+fn laneName(lane: Lane) []const u8 {
+    return @tagName(lane);
+}
+
+fn parseActor(text: []const u8) ?Actor {
+    return std.meta.stringToEnum(Actor, text);
+}
+
+fn parseInvocationResultStatus(text: []const u8) ?InvocationResultStatus {
+    return std.meta.stringToEnum(InvocationResultStatus, text);
+}
+
 fn currentLaneForState(state: AppState) []const u8 {
-    if (state.agent_loop.active_tool.len > 0) return laneForActor(state.agent_loop.active_tool);
-    if (eql(state.current_actor, "decanus")) return "command";
-    return laneForActor(state.current_actor);
+    if (state.agent_loop.active_tool) |active_tool| return laneName(protocol.laneForActor(active_tool));
+    return laneName(protocol.laneForActor(state.current_actor));
 }
 
 fn toneForOutcome(state: AppState) ChatTone {
-    if (eql(state.global_status, "complete")) return .success;
-    if (eql(state.runtime_session.status, "blocked") or eql(state.runtime_session.status, "interrupted")) return .danger;
+    if (state.global_status == .complete) return .success;
+    if (state.runtime_session.status == .blocked or state.runtime_session.status == .interrupted) return .danger;
     return .info;
 }
 
@@ -2948,40 +3026,41 @@ fn emitStreamFinalize(hooks: RuntimeHooks, actor: []const u8, text: []const u8, 
 }
 
 fn emitStateSnapshot(hooks: RuntimeHooks, config: AppConfig, state: AppState) void {
-    const budget = resolvedContextBudget(config.context, state.runtime_session.context_budget);
+    const snapshot = buildStateSnapshot(config, state, if (!eql(state.project_name, "UNASSIGNED")) state.project_name else "");
     hooks.emit(.{
         .kind = .state_snapshot,
-        .project_name = if (!eql(state.project_name, "UNASSIGNED")) state.project_name else "",
+        .project_name = snapshot.project_name,
         .provider_type = config.provider.type,
         .model = if (state.runtime_session.model.len > 0) state.runtime_session.model else config.provider.model,
-        .approval_mode = config.policy.approval_mode,
-        .global_status = state.global_status,
-        .runtime_status = state.runtime_session.status,
-        .current_actor = state.current_actor,
-        .active_tool = state.agent_loop.active_tool,
-        .active_lane = currentLaneForState(state),
-        .current_goal = state.mission.current_goal,
-        .last_tool_result = state.agent_loop.last_tool_result,
-        .last_error = state.runtime_session.last_error,
-        .last_log_path = state.runtime_session.active_log_path,
-        .iteration = state.agent_loop.iteration,
-        .max_iterations = if (state.agent_loop.max_iterations > 0) state.agent_loop.max_iterations else default_max_iterations,
-        .estimated_prompt_chars = budget.estimated_prompt_chars,
-        .estimated_prompt_tokens = budget.estimated_prompt_tokens,
-        .context_window_tokens = budget.context_window_tokens,
-        .response_reserve_tokens = budget.response_reserve_tokens,
-        .remaining_context_tokens = budget.remaining_tokens,
-        .context_used_percent = budget.used_percent,
-        .condensation_count = budget.condensation_count,
-        .condensed_history_events = budget.condensed_history_events,
+        .approval_mode = snapshot.approval_mode,
+        .global_status = @tagName(snapshot.global_status),
+        .runtime_status = @tagName(snapshot.runtime_status),
+        .current_actor = actorName(snapshot.current_actor),
+        .active_tool = maybeActorName(snapshot.active_tool),
+        .active_lane = laneName(snapshot.active_lane),
+        .current_goal = snapshot.current_goal,
+        .last_tool_result = snapshot.last_tool_result,
+        .last_error = snapshot.last_error,
+        .last_log_path = snapshot.last_log_path,
+        .iteration = snapshot.iteration,
+        .max_iterations = snapshot.max_iterations,
+        .estimated_prompt_chars = snapshot.estimated_prompt_chars,
+        .estimated_prompt_tokens = snapshot.estimated_prompt_tokens,
+        .context_window_tokens = snapshot.context_window_tokens,
+        .response_reserve_tokens = snapshot.response_reserve_tokens,
+        .remaining_context_tokens = snapshot.remaining_context_tokens,
+        .context_used_percent = snapshot.context_used_percent,
+        .condensation_count = snapshot.condensation_count,
+        .condensed_history_events = snapshot.condensed_history_events,
     });
 }
 
 fn markInterrupted(state: *AppState) void {
-    state.global_status = "interrupted";
-    state.agent_loop.status = "interrupted";
-    state.runtime_session.status = "interrupted";
+    state.global_status = .interrupted;
+    state.agent_loop.status = .interrupted;
+    state.runtime_session.status = .interrupted;
     state.runtime_session.last_error = "operator interrupted the active loop";
+    setLoopStep(state, .blocked, state.current_actor, laneForActor(state.current_actor), state.runtime_session.last_error);
 }
 
 fn friendlyRuntimeError(allocator: std.mem.Allocator, err: anyerror) ![]const u8 {
@@ -3031,9 +3110,9 @@ fn runLoop(allocator: std.mem.Allocator, config: AppConfig, state: *AppState, ho
         }
     }
 
-    state.global_status = "waiting_on_tool";
-    state.agent_loop.status = "blocked";
-    state.runtime_session.status = "blocked";
+    state.global_status = .waiting_on_tool;
+    state.agent_loop.status = .blocked;
+    state.runtime_session.status = .blocked;
     state.runtime_session.last_error = try progressDocumentationText(
         allocator,
         state,
@@ -3043,7 +3122,7 @@ fn runLoop(allocator: std.mem.Allocator, config: AppConfig, state: *AppState, ho
     try appendHistory(allocator, state, .{
         .iteration = state.agent_loop.iteration,
         .type = "loop_limit_reached",
-        .actor = state.current_actor,
+        .actor = actorName(state.current_actor),
         .lane = currentLaneForState(state.*),
         .summary = state.runtime_session.last_error,
         .artifacts = &.{},
@@ -3067,25 +3146,26 @@ fn executeStep(allocator: std.mem.Allocator, config: AppConfig, state: *AppState
     }
 
     state.agent_loop.iteration += 1;
-    state.runtime_session.status = "running";
+    state.runtime_session.status = .running;
     state.runtime_session.provider = config.provider.type;
     state.runtime_session.model = config.provider.model;
     state.runtime_session.endpoint = config.provider.base_url;
     state.runtime_session.approval_mode = config.policy.approval_mode;
     state.runtime_session.last_actor = state.current_actor;
-    state.runtime_session.current_turn_id = try makeTurnId(allocator, state.current_actor, state.agent_loop.iteration);
+    state.runtime_session.current_turn_id = try makeTurnId(allocator, actorName(state.current_actor), state.agent_loop.iteration);
     state.runtime_session.active_log_path = try logPathForTurn(allocator, config.paths.logs_dir, state.runtime_session.current_turn_id);
     emitStateSnapshot(hooks, config, state.*);
 
-    if (eql(state.current_actor, "decanus")) {
+    if (state.current_actor == .decanus) {
         return try executeDecanusTurn(allocator, config, state, hooks);
     }
     return try executeSpecialistTurn(allocator, config, state, hooks);
 }
 
 fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *AppState, hooks: RuntimeHooks) !StepOutcome {
-    state.global_status = "planning";
-    state.agent_loop.status = "thinking";
+    state.global_status = .planning;
+    state.agent_loop.status = .thinking;
+    setLoopStep(state, .think, .decanus, .command, if (state.mission.current_goal.len > 0) state.mission.current_goal else state.mission.initial_prompt);
     emitStateSnapshot(hooks, config, state.*);
 
     const system_prompt = try assembleSystemPrompt(
@@ -3118,8 +3198,8 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
             return .blocked;
         }
         const message = try std.fmt.allocPrint(allocator, "decanus turn failed: {s}", .{@errorName(err)});
-        state.global_status = "waiting_on_tool";
-        state.runtime_session.status = "blocked";
+        state.global_status = .waiting_on_tool;
+        state.runtime_session.status = .blocked;
         state.runtime_session.last_error = message;
         try writeTurnLog(state.runtime_session.active_log_path, "error", message);
         emitLog(hooks, .danger, "decanus", "Commander Failed", message, .plain);
@@ -3145,7 +3225,7 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
             summarizeToolRequestsForUi(allocator, decision.tool_requests) catch "decanus requested runtime tools",
             .plain,
         );
-        const tool_result = try executeToolRequests(allocator, config, state, "decanus", "", decision.tool_requests, hooks);
+        const tool_result = try executeToolRequests(allocator, config, state, .decanus, .command, decision.tool_requests, hooks);
         state.agent_loop.last_tool_result = tool_result.summary;
         try appendHistory(
             allocator,
@@ -3161,8 +3241,8 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
             },
         );
         if (tool_result.blocked) {
-            state.global_status = "waiting_on_tool";
-            state.runtime_session.status = "blocked";
+            state.global_status = .waiting_on_tool;
+            state.runtime_session.status = .blocked;
             emitStateSnapshot(hooks, config, state.*);
             return .blocked;
         }
@@ -3179,9 +3259,10 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
 
     if (eql(decision.action, "finish")) {
         state.mission.final_response = decision.final_response;
-        state.global_status = "complete";
-        state.agent_loop.status = "complete";
-        state.runtime_session.status = "complete";
+        state.global_status = .complete;
+        state.agent_loop.status = .complete;
+        state.runtime_session.status = .complete;
+        setLoopStep(state, .finish, .decanus, .command, decision.final_response);
         try appendHistory(
             allocator,
             state,
@@ -3201,24 +3282,15 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
     }
 
     if (eql(decision.action, "invoke_specialist")) {
-        const lane = if (decision.lane.len > 0) decision.lane else laneForActor(decision.actor);
-        const actor = if (decision.actor.len > 0) decision.actor else actorForLane(lane);
-        var task = taskForLane(state, lane);
-        task.status = "in_progress";
-        task.description = decision.objective;
-        task.invocation.status = "ready";
-        task.invocation.requested_by = "decanus";
-        task.invocation.iteration = state.agent_loop.iteration;
-        task.invocation.objective = decision.objective;
-        task.invocation.completion_signal = decision.completion_signal;
-        task.invocation.dependencies = decision.dependencies;
-        task.invocation.result_summary = "";
-        task.invocation.return_to = "decanus";
-
-        state.current_actor = actor;
-        state.global_status = "waiting_on_tool";
-        state.agent_loop.status = "running_tool";
-        state.agent_loop.active_tool = actor;
+        const requested_actor = if (decision.actor.len > 0) parseActor(decision.actor) else null;
+        const lane = if (decision.lane.len > 0)
+            std.meta.stringToEnum(Lane, decision.lane) orelse (if (requested_actor) |actor| laneForActor(actor) else .bulk_ops)
+        else if (requested_actor) |actor|
+            laneForActor(actor)
+        else
+            .bulk_ops;
+        const actor = requested_actor orelse actorForLane(lane);
+        prepareInvocation(state, lane, actor, decision.objective, decision.completion_signal, decision.dependencies);
         try appendHistory(
             allocator,
             state,
@@ -3226,7 +3298,7 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
                 .iteration = state.agent_loop.iteration,
                 .type = "tool_call",
                 .actor = "decanus",
-                .lane = lane,
+                .lane = laneName(lane),
                 .summary = decision.objective,
                 .artifacts = &.{},
                 .timestamp = try unixTimestampString(allocator),
@@ -3237,7 +3309,7 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
             .warning,
             "decanus",
             "Handoff",
-            try std.fmt.allocPrint(allocator, "{s} -> {s} on {s}: {s}", .{ "decanus", actor, lane, decision.objective }),
+            try std.fmt.allocPrint(allocator, "{s} -> {s} on {s}: {s}", .{ "decanus", actorName(actor), laneName(lane), decision.objective }),
             .plain,
         );
         emitStateSnapshot(hooks, config, state.*);
@@ -3245,17 +3317,19 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
     }
 
     if (eql(decision.action, "ask_user")) {
-        state.global_status = "waiting_on_tool";
-        state.runtime_session.status = "blocked";
+        state.global_status = .waiting_on_tool;
+        state.runtime_session.status = .blocked;
         state.runtime_session.last_error = decision.question;
+        setLoopStep(state, .blocked, .decanus, .command, decision.question);
         emitLog(hooks, .warning, "decanus", "Question", decision.question, .plain);
         emitStateSnapshot(hooks, config, state.*);
         return .blocked;
     }
 
-    state.global_status = "waiting_on_tool";
-    state.runtime_session.status = "blocked";
+    state.global_status = .waiting_on_tool;
+    state.runtime_session.status = .blocked;
     state.runtime_session.last_error = if (decision.blocked_reason.len > 0) decision.blocked_reason else "decanus returned a blocked state";
+    setLoopStep(state, .blocked, .decanus, .command, state.runtime_session.last_error);
     emitLog(hooks, .danger, "decanus", "Blocked", state.runtime_session.last_error, .plain);
     emitStateSnapshot(hooks, config, state.*);
     return .blocked;
@@ -3265,14 +3339,15 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
     const actor = state.current_actor;
     const lane = laneForActor(actor);
     var task = taskForLane(state, lane);
-    task.invocation.status = "running";
-    state.global_status = "waiting_on_tool";
-    state.agent_loop.status = "running_tool";
+    task.invocation.status = .running;
+    state.global_status = .waiting_on_tool;
+    state.agent_loop.status = .running_tool;
+    setLoopStep(state, .execute, actor, lane, task.invocation.objective);
     emitStateSnapshot(hooks, config, state.*);
 
     const schema_path = "shared/specialist-schema.json";
-    const system_prompt = try assembleSystemPrompt(allocator, config.paths.prompts_dir, actor, schema_path);
-    const user_prompt = buildPromptWithContextBudget(allocator, config, state, hooks, system_prompt, .specialist, lane) catch |err| {
+    const system_prompt = try assembleSystemPrompt(allocator, config.paths.prompts_dir, actorName(actor), schema_path);
+    const user_prompt = buildPromptWithContextBudget(allocator, config, state, hooks, system_prompt, .specialist, laneName(lane)) catch |err| {
         if (err == error.ContextBudgetExceeded) return .blocked;
         return err;
     };
@@ -3284,7 +3359,7 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
         config.provider,
         system_prompt,
         user_prompt,
-        actor,
+        actorName(actor),
         config.provider.max_retries,
         SpecialistResult,
         state,
@@ -3292,28 +3367,28 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
     ) catch |err| {
         if (err == error.Interrupted) {
             markInterrupted(state);
-            task.invocation.status = "blocked";
+            task.invocation.status = .blocked;
             emitStateSnapshot(hooks, config, state.*);
             return .blocked;
         }
-        const message = try std.fmt.allocPrint(allocator, "{s} turn failed: {s}", .{ actor, @errorName(err) });
-        task.invocation.status = "blocked";
-        state.runtime_session.status = "blocked";
+        const message = try std.fmt.allocPrint(allocator, "{s} turn failed: {s}", .{ actorName(actor), @errorName(err) });
+        task.invocation.status = .blocked;
+        state.runtime_session.status = .blocked;
         state.runtime_session.last_error = message;
         try writeTurnLog(state.runtime_session.active_log_path, "error", message);
-        emitLog(hooks, .danger, actor, "Specialist Failed", message, .plain);
+        emitLog(hooks, .danger, actorName(actor), "Specialist Failed", message, .plain);
         return .blocked;
     };
     const result = response.value;
     try writeTurnLog(state.runtime_session.active_log_path, "model_output", response.raw_text);
     const result_summary = summarizeSpecialistResultForUi(allocator, result) catch prettyPrintJson(allocator, response.raw_text) catch response.raw_text;
-    emitStreamFinalize(hooks, actor, result_summary, .summary);
+    emitStreamFinalize(hooks, actorName(actor), result_summary, .summary);
 
     if (result.tool_requests.len > 0 or eql(result.action, "tool_request")) {
         emitLog(
             hooks,
             .tool,
-            actor,
+            actorName(actor),
             "Runtime Tool",
             summarizeToolRequestsForUi(allocator, result.tool_requests) catch "specialist requested runtime tools",
             .plain,
@@ -3321,16 +3396,16 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
         const tool_result = try executeToolRequests(allocator, config, state, actor, lane, result.tool_requests, hooks);
         state.agent_loop.last_tool_result = tool_result.summary;
         if (tool_result.blocked) {
-            task.invocation.status = "blocked";
-            state.runtime_session.status = "blocked";
+            task.invocation.status = .blocked;
+            state.runtime_session.status = .blocked;
             emitStateSnapshot(hooks, config, state.*);
             return .blocked;
         }
-        task.invocation.status = "running";
+        task.invocation.status = .running;
         emitLog(
             hooks,
             .tool,
-            actor,
+            actorName(actor),
             "Tool Result",
             compactTextForUi(allocator, tool_result.summary, 12, 900) catch tool_result.summary,
             .plain,
@@ -3338,49 +3413,40 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
         return .advanced;
     }
 
-    if (eql(result.action, "complete")) {
-        task.status = "complete";
-        task.description = result.description;
-        task.artifacts = result.artifacts;
-        task.invocation.status = "complete";
-        task.invocation.result_summary = result.result_summary;
-        state.current_actor = "decanus";
-        state.global_status = "planning";
-        state.agent_loop.status = "thinking";
-        state.agent_loop.active_tool = "";
-        state.agent_loop.last_tool_result = result.result_summary;
-        state.runtime_session.status = "idle";
+    if (eql(result.action, "complete") or eql(result.status, "complete") or eql(result.status, "partial")) {
+        const invocation_result = try materializeInvocationResult(allocator, result, .complete);
+        finalizeInvocation(state, lane, actor, invocation_result, result.description);
         try appendHistory(
             allocator,
             state,
             .{
                 .iteration = state.agent_loop.iteration,
                 .type = "tool_result",
-                .actor = actor,
-                .lane = lane,
-                .summary = result.result_summary,
-                .artifacts = result.artifacts,
+                .actor = actorName(actor),
+                .lane = laneName(lane),
+                .summary = invocation_result.summary,
+                .artifacts = invocation_result.changes,
                 .timestamp = try unixTimestampString(allocator),
             },
         );
-        emitLog(hooks, .success, actor, "Lane Complete", result.result_summary, .plain);
+        emitLog(hooks, .success, actorName(actor), "Lane Complete", invocation_result.summary, .plain);
         emitStateSnapshot(hooks, config, state.*);
         return .advanced;
     }
 
     if (eql(result.action, "ask_user")) {
-        task.invocation.status = "blocked";
-        state.runtime_session.status = "blocked";
+        const invocation_result = try materializeInvocationResult(allocator, result, .blocked);
+        finalizeInvocation(state, lane, actor, invocation_result, result.description);
         state.runtime_session.last_error = result.question;
-        emitLog(hooks, .warning, actor, "Question", result.question, .plain);
+        emitLog(hooks, .warning, actorName(actor), "Question", result.question, .plain);
         emitStateSnapshot(hooks, config, state.*);
         return .blocked;
     }
 
-    task.invocation.status = "blocked";
-    state.runtime_session.status = "blocked";
-    state.runtime_session.last_error = if (result.blocked_reason.len > 0) result.blocked_reason else "specialist returned a blocked state";
-    emitLog(hooks, .danger, actor, "Blocked", state.runtime_session.last_error, .plain);
+    const invocation_result = try materializeInvocationResult(allocator, result, .blocked);
+    finalizeInvocation(state, lane, actor, invocation_result, result.description);
+    state.runtime_session.last_error = if (invocation_result.blockers.len > 0) invocation_result.blockers[0] else "specialist returned a blocked state";
+    emitLog(hooks, .danger, actorName(actor), "Blocked", state.runtime_session.last_error, .plain);
     emitStateSnapshot(hooks, config, state.*);
     return .blocked;
 }
@@ -3389,8 +3455,8 @@ fn executeToolRequests(
     allocator: std.mem.Allocator,
     config: AppConfig,
     state: *AppState,
-    actor: []const u8,
-    lane: []const u8,
+    actor: Actor,
+    lane: Lane,
     requests: []const ToolRequest,
     hooks: RuntimeHooks,
 ) !ToolExecutionOutcome {
@@ -3402,10 +3468,10 @@ fn executeToolRequests(
     for (requests) |request| {
         const tool_name = canonicalToolName(request.tool);
         if (tool_name.len == 0) continue;
-        emitLog(hooks, .tool, actor, tool_name, toolRequestDisplay(allocator, request) catch tool_name, .plain);
+        emitLog(hooks, .tool, actorName(actor), tool_name, toolRequestDisplay(allocator, request) catch tool_name, .plain);
 
         if (eql(tool_name, "list_files")) {
-            if (!config.policy.allow_read_tools_without_confirmation and !try confirmTool(allocator, hooks, tool_name, request.description)) {
+            if (!config.policy.allow_read_tools_without_confirmation and !try confirmTool(allocator, config, state, hooks, actor, lane, tool_name, request.description, request.path)) {
                 return try blockedToolOutcome(allocator, state, "list_files denied by operator");
             }
             const output = try listWorkspaceFiles(allocator, request.path);
@@ -3414,7 +3480,7 @@ fn executeToolRequests(
         }
 
         if (eql(tool_name, "read_file")) {
-            if (!config.policy.allow_read_tools_without_confirmation and !try confirmTool(allocator, hooks, tool_name, request.description)) {
+            if (!config.policy.allow_read_tools_without_confirmation and !try confirmTool(allocator, config, state, hooks, actor, lane, tool_name, request.description, request.path)) {
                 return try blockedToolOutcome(allocator, state, "read_file denied by operator");
             }
             const path = if (request.path.len > 0) request.path else return error.MissingPath;
@@ -3424,7 +3490,7 @@ fn executeToolRequests(
         }
 
         if (eql(tool_name, "search_text")) {
-            if (!config.policy.allow_read_tools_without_confirmation and !try confirmTool(allocator, hooks, tool_name, request.description)) {
+            if (!config.policy.allow_read_tools_without_confirmation and !try confirmTool(allocator, config, state, hooks, actor, lane, tool_name, request.description, request.path)) {
                 return try blockedToolOutcome(allocator, state, "search_text denied by operator");
             }
             const path = if (request.path.len > 0) request.path else ".";
@@ -3438,7 +3504,7 @@ fn executeToolRequests(
             if (commandIsBlocked(config.policy.blocked_command_patterns, request.command)) {
                 return try blockedToolOutcome(allocator, state, "run_command blocked by policy");
             }
-            if (!config.policy.allow_shell_without_confirmation and !try confirmTool(allocator, hooks, tool_name, request.command)) {
+            if (!config.policy.allow_shell_without_confirmation and !try confirmTool(allocator, config, state, hooks, actor, lane, tool_name, request.command, request.command)) {
                 return try blockedToolOutcome(allocator, state, "run_command denied by operator");
             }
             const output = try runShellCommand(allocator, request.command);
@@ -3451,7 +3517,7 @@ fn executeToolRequests(
             if (!pathIsSafeForWrite(path)) {
                 return try blockedToolOutcome(allocator, state, "write_file path outside workspace policy");
             }
-            if (!config.policy.allow_workspace_writes_without_confirmation and !try confirmTool(allocator, hooks, tool_name, path)) {
+            if (!config.policy.allow_workspace_writes_without_confirmation and !try confirmTool(allocator, config, state, hooks, actor, lane, tool_name, path, path)) {
                 return try blockedToolOutcome(allocator, state, "write_file denied by operator");
             }
             try writeFile(path, request.content);
@@ -3461,17 +3527,17 @@ fn executeToolRequests(
 
         if (eql(tool_name, "ask_user")) {
             const question = if (request.description.len > 0) request.description else "tool requested user input";
-            state.runtime_session.status = "blocked";
+            state.runtime_session.status = .blocked;
             state.runtime_session.last_error = question;
             try summaries.append(allocator, try std.fmt.allocPrint(allocator, "ask_user {s}", .{question}));
-            emitLog(hooks, .warning, actor, "Question", question, .plain);
+            emitLog(hooks, .warning, actorName(actor), "Question", question, .plain);
             return .{
                 .blocked = true,
                 .summary = try joinStrings(allocator, summaries.items, "\n"),
             };
         }
 
-        try summaries.append(allocator, try std.fmt.allocPrint(allocator, "unknown tool `{s}` requested by {s} on lane {s}", .{ request.tool, actor, lane }));
+        try summaries.append(allocator, try std.fmt.allocPrint(allocator, "unknown tool `{s}` requested by {s} on lane {s}", .{ request.tool, actorName(actor), laneName(lane) }));
     }
 
     return .{
@@ -3565,8 +3631,8 @@ fn buildDecanusUserPrompt(allocator: std.mem.Allocator, config: AppConfig, state
             try joinStrings(allocator, state.mission.constraints, ", "),
             try joinStrings(allocator, state.mission.success_criteria, ", "),
             state.agent_loop.iteration,
-            state.agent_loop.status,
-            state.agent_loop.active_tool,
+            @tagName(state.agent_loop.status),
+            maybeActorName(state.agent_loop.active_tool),
             state.agent_loop.last_decision,
             state.agent_loop.last_tool_result,
             task_summary,
@@ -3578,7 +3644,8 @@ fn buildDecanusUserPrompt(allocator: std.mem.Allocator, config: AppConfig, state
 }
 
 fn buildSpecialistUserPrompt(allocator: std.mem.Allocator, config: AppConfig, state: *const AppState, lane: []const u8) ![]const u8 {
-    const task = taskForLaneConst(state, lane);
+    const lane_value = std.meta.stringToEnum(Lane, lane) orelse .bulk_ops;
+    const task = taskForLaneConst(state, lane_value);
     const history = try recentHistoryText(allocator, state.agent_loop.history, config.context.max_history_events);
     var buffer: std.ArrayList(u8) = .empty;
     const writer = buffer.writer(allocator);
@@ -3600,7 +3667,15 @@ fn buildSpecialistUserPrompt(allocator: std.mem.Allocator, config: AppConfig, st
         \\Status: {s}
         \\Objective: {s}
         \\Completion signal: {s}
-        \\Dependencies: {s}
+        \\Context.project: {s}
+        \\Context.files: {s}
+        \\Context.constraints: {s}
+        \\Context.dependencies: {s}
+        \\Scope.allowed_actions: {s}
+        \\Scope.restricted_actions: {s}
+        \\Memory.mission: {s}
+        \\Memory.project: {s}
+        \\Memory.relevant: {s}
         \\
         \\Last tool result:
         \\{s}
@@ -3616,10 +3691,18 @@ fn buildSpecialistUserPrompt(allocator: std.mem.Allocator, config: AppConfig, st
             state.mission.initial_prompt,
             state.mission.current_goal,
             lane,
-            task.invocation.status,
+            @tagName(task.invocation.status),
             task.invocation.objective,
             task.invocation.completion_signal,
-            try joinStrings(allocator, task.invocation.dependencies, ", "),
+            task.invocation.context.project,
+            try joinStrings(allocator, task.invocation.context.files, ", "),
+            try joinStrings(allocator, task.invocation.context.constraints, ", "),
+            try joinStrings(allocator, task.invocation.context.dependencies, ", "),
+            try joinStrings(allocator, task.invocation.scope.allowed_actions, ", "),
+            try joinStrings(allocator, task.invocation.scope.restricted_actions, ", "),
+            task.invocation.memory.mission,
+            task.invocation.memory.project,
+            try joinStrings(allocator, task.invocation.memory.relevant, ", "),
             state.agent_loop.last_tool_result,
             history,
         },
@@ -3721,23 +3804,23 @@ fn runDoctorCheck(allocator: std.mem.Allocator) ![]const u8 {
 }
 
 fn missionOutcomeSummary(allocator: std.mem.Allocator, state: AppState) ![]const u8 {
-    if (state.mission.final_response.len > 0 and eql(state.global_status, "complete")) {
+    if (state.mission.final_response.len > 0 and state.global_status == .complete) {
         return try std.fmt.allocPrint(allocator, "complete\n\n{s}", .{state.mission.final_response});
     }
-    if (state.runtime_session.last_error.len > 0 and eql(state.runtime_session.status, "blocked")) {
+    if (state.runtime_session.last_error.len > 0 and state.runtime_session.status == .blocked) {
         return try std.fmt.allocPrint(allocator, "blocked\n\n{s}", .{state.runtime_session.last_error});
     }
-    if (state.agent_loop.active_tool.len > 0) {
+    if (state.agent_loop.active_tool) |active_tool| {
         return try std.fmt.allocPrint(
             allocator,
             "in progress\n\ncurrent actor: {s}\nactive tool: {s}\niteration: {d}",
-            .{ state.current_actor, state.agent_loop.active_tool, state.agent_loop.iteration },
+            .{ actorName(state.current_actor), actorName(active_tool), state.agent_loop.iteration },
         );
     }
     return try std.fmt.allocPrint(
         allocator,
         "status: {s}\ncurrent actor: {s}\niteration: {d}",
-        .{ state.global_status, state.current_actor, state.agent_loop.iteration },
+        .{ @tagName(state.global_status), actorName(state.current_actor), state.agent_loop.iteration },
     );
 }
 
@@ -4405,14 +4488,21 @@ fn writeFile(path: []const u8, content: []const u8) !void {
 }
 
 fn resetStateForMission(state: *AppState, mission_prompt: []const u8) void {
-    state.global_status = "planning";
-    state.current_actor = "decanus";
+    state.global_status = .planning;
+    state.current_actor = .decanus;
     state.mission.initial_prompt = mission_prompt;
     state.mission.current_goal = mission_prompt;
     state.mission.success_criteria = &.{};
     state.mission.constraints = &.{};
     state.mission.final_response = "";
     state.agent_loop = .{};
+    state.agent_loop.last_step = .{
+        .iteration = 0,
+        .kind = .think,
+        .actor = .decanus,
+        .lane = .command,
+        .summary = "mission initialized",
+    };
     state.runtime_session = .{};
     state.tasks = .{};
     ensureLoopBudget(state);
@@ -4431,8 +4521,8 @@ fn initializeRuntimeSession(allocator: std.mem.Allocator, state: *AppState, conf
         state.runtime_session.context_budget.remaining_tokens = usablePromptTokenWindow(config.context);
         state.runtime_session.context_budget.used_percent = 0;
     }
-    if (state.runtime_session.status.len == 0 or eql(state.runtime_session.status, "idle")) {
-        state.runtime_session.status = "ready";
+    if (state.runtime_session.status == .idle) {
+        state.runtime_session.status = .ready;
     }
 }
 
@@ -4443,52 +4533,198 @@ fn appendHistory(allocator: std.mem.Allocator, state: *AppState, entry: HistoryE
     state.agent_loop.history = try history.toOwnedSlice(allocator);
 }
 
-fn taskForLane(state: *AppState, lane: []const u8) *TaskLane {
-    if (eql(lane, "backend")) return &state.tasks.backend;
-    if (eql(lane, "frontend")) return &state.tasks.frontend;
-    if (eql(lane, "systems")) return &state.tasks.systems;
-    if (eql(lane, "qa")) return &state.tasks.qa;
-    if (eql(lane, "research")) return &state.tasks.research;
-    if (eql(lane, "brand")) return &state.tasks.brand;
-    if (eql(lane, "media")) return &state.tasks.media;
-    if (eql(lane, "docs")) return &state.tasks.docs;
-    return &state.tasks.bulk_ops;
+fn taskForLane(state: *AppState, lane: Lane) *TaskLane {
+    return switch (lane) {
+        .backend => &state.tasks.backend,
+        .frontend => &state.tasks.frontend,
+        .systems => &state.tasks.systems,
+        .qa => &state.tasks.qa,
+        .research => &state.tasks.research,
+        .brand => &state.tasks.brand,
+        .media => &state.tasks.media,
+        .docs => &state.tasks.docs,
+        .bulk_ops => &state.tasks.bulk_ops,
+        .command => &state.tasks.bulk_ops,
+    };
 }
 
-fn taskForLaneConst(state: *const AppState, lane: []const u8) *const TaskLane {
-    if (eql(lane, "backend")) return &state.tasks.backend;
-    if (eql(lane, "frontend")) return &state.tasks.frontend;
-    if (eql(lane, "systems")) return &state.tasks.systems;
-    if (eql(lane, "qa")) return &state.tasks.qa;
-    if (eql(lane, "research")) return &state.tasks.research;
-    if (eql(lane, "brand")) return &state.tasks.brand;
-    if (eql(lane, "media")) return &state.tasks.media;
-    if (eql(lane, "docs")) return &state.tasks.docs;
-    return &state.tasks.bulk_ops;
+fn taskForLaneConst(state: *const AppState, lane: Lane) *const TaskLane {
+    return switch (lane) {
+        .backend => &state.tasks.backend,
+        .frontend => &state.tasks.frontend,
+        .systems => &state.tasks.systems,
+        .qa => &state.tasks.qa,
+        .research => &state.tasks.research,
+        .brand => &state.tasks.brand,
+        .media => &state.tasks.media,
+        .docs => &state.tasks.docs,
+        .bulk_ops => &state.tasks.bulk_ops,
+        .command => &state.tasks.bulk_ops,
+    };
 }
 
-fn laneForActor(actor: []const u8) []const u8 {
-    if (eql(actor, "faber")) return "backend";
-    if (eql(actor, "artifex")) return "frontend";
-    if (eql(actor, "architectus")) return "systems";
-    if (eql(actor, "tesserarius")) return "qa";
-    if (eql(actor, "explorator")) return "research";
-    if (eql(actor, "signifer")) return "brand";
-    if (eql(actor, "praeco")) return "media";
-    if (eql(actor, "calo")) return "docs";
-    return "bulk_ops";
+fn laneForActor(actor: Actor) Lane {
+    return protocol.laneForActor(actor);
 }
 
-fn actorForLane(lane: []const u8) []const u8 {
-    if (eql(lane, "backend")) return "faber";
-    if (eql(lane, "frontend")) return "artifex";
-    if (eql(lane, "systems")) return "architectus";
-    if (eql(lane, "qa")) return "tesserarius";
-    if (eql(lane, "research")) return "explorator";
-    if (eql(lane, "brand")) return "signifer";
-    if (eql(lane, "media")) return "praeco";
-    if (eql(lane, "docs")) return "calo";
-    return "mulus";
+fn actorForLane(lane: Lane) Actor {
+    return protocol.actorForLane(lane);
+}
+
+fn setLoopStep(state: *AppState, kind: LoopStepKind, actor: Actor, lane: Lane, summary: []const u8) void {
+    state.agent_loop.last_step = .{
+        .iteration = state.agent_loop.iteration,
+        .kind = kind,
+        .actor = actor,
+        .lane = lane,
+        .summary = summary,
+    };
+}
+
+fn beginApprovalRequest(
+    state: *AppState,
+    actor: Actor,
+    lane: Lane,
+    tool_name: []const u8,
+    detail: []const u8,
+    reason: []const u8,
+    target: []const u8,
+) void {
+    state.runtime_session.active_approval = .{
+        .status = .pending,
+        .kind = protocol.approvalKindForToolName(tool_name),
+        .requested_by = actor,
+        .lane = lane,
+        .tool_name = tool_name,
+        .detail = detail,
+        .reason = reason,
+        .target = target,
+    };
+    state.runtime_session.status = .awaiting_approval;
+    setLoopStep(state, .wait_for_approval, actor, lane, tool_name);
+}
+
+fn resolveApprovalRequest(state: *AppState, approved: bool) void {
+    state.runtime_session.active_approval.status = if (approved) .approved else .denied;
+    if (state.runtime_session.status == .awaiting_approval) {
+        state.runtime_session.status = .running;
+    }
+}
+
+fn singleItemSlice(allocator: std.mem.Allocator, value: []const u8) ![]const []const u8 {
+    var items = try allocator.alloc([]const u8, 1);
+    items[0] = value;
+    return items;
+}
+
+fn invocationResultStatusFromText(text: []const u8, fallback: InvocationResultStatus) InvocationResultStatus {
+    if (text.len == 0) return fallback;
+    return parseInvocationResultStatus(text) orelse fallback;
+}
+
+fn materializeInvocationResult(
+    allocator: std.mem.Allocator,
+    result: SpecialistResult,
+    fallback_status: InvocationResultStatus,
+) !InvocationResult {
+    const resolved_status = invocationResultStatusFromText(result.status, fallback_status);
+    const resolved_summary = if (result.summary.len > 0)
+        result.summary
+    else if (result.result_summary.len > 0)
+        result.result_summary
+    else
+        result.description;
+
+    const resolved_changes = if (result.changes.len > 0) result.changes else result.artifacts;
+    const resolved_findings = if (result.findings.len > 0)
+        result.findings
+    else if (result.description.len > 0 and !eql(result.description, resolved_summary))
+        try singleItemSlice(allocator, result.description)
+    else
+        &.{};
+
+    const resolved_blockers = if (result.blockers.len > 0)
+        result.blockers
+    else if (result.blocked_reason.len > 0)
+        try singleItemSlice(allocator, result.blocked_reason)
+    else if (result.question.len > 0)
+        try singleItemSlice(allocator, result.question)
+    else
+        &.{};
+
+    return .{
+        .status = resolved_status,
+        .summary = resolved_summary,
+        .changes = resolved_changes,
+        .findings = resolved_findings,
+        .blockers = resolved_blockers,
+        .next_recommended_agent = if (result.next_recommended_agent.len > 0) parseActor(result.next_recommended_agent) else null,
+        .confidence = result.confidence,
+    };
+}
+
+fn prepareInvocation(
+    state: *AppState,
+    lane: Lane,
+    actor: Actor,
+    objective: []const u8,
+    completion_signal: []const u8,
+    dependencies: []const []const u8,
+) void {
+    const task = taskForLane(state, lane);
+    task.status = .in_progress;
+    task.description = objective;
+    task.invocation = .{
+        .status = .ready,
+        .requested_by = .decanus,
+        .target = actor,
+        .lane = lane,
+        .iteration = state.agent_loop.iteration,
+        .objective = objective,
+        .completion_signal = completion_signal,
+        .context = .{
+            .project = state.project_name,
+            .constraints = state.mission.constraints,
+            .dependencies = dependencies,
+        },
+        .scope = .{
+            .allowed_actions = protocol.allowedActionsForActor(actor),
+            .restricted_actions = protocol.restrictedActionsForActor(actor),
+        },
+        .memory = .{
+            .mission = if (state.mission.current_goal.len > 0) state.mission.current_goal else state.mission.initial_prompt,
+            .project = state.agent_loop.last_tool_result,
+            .relevant = dependencies,
+        },
+        .return_to = .decanus,
+    };
+    state.current_actor = actor;
+    state.global_status = .waiting_on_tool;
+    state.agent_loop.status = .running_tool;
+    state.agent_loop.active_tool = actor;
+    setLoopStep(state, .invoke, .decanus, lane, objective);
+}
+
+fn finalizeInvocation(
+    state: *AppState,
+    lane: Lane,
+    actor: Actor,
+    result: InvocationResult,
+    description: []const u8,
+) void {
+    const task = taskForLane(state, lane);
+    task.status = if (result.status == .blocked) .blocked else .complete;
+    task.description = if (description.len > 0) description else result.summary;
+    task.artifacts = result.changes;
+    task.invocation.result = result;
+    task.invocation.status = protocol.invocationStatusForResult(result.status);
+    state.current_actor = .decanus;
+    state.global_status = if (result.status == .blocked) .waiting_on_tool else .planning;
+    state.agent_loop.status = if (result.status == .blocked) .blocked else .thinking;
+    state.agent_loop.active_tool = null;
+    state.agent_loop.last_tool_result = result.summary;
+    state.runtime_session.status = if (result.status == .blocked) .blocked else .idle;
+    setLoopStep(state, if (result.status == .blocked) .blocked else .result, actor, lane, result.summary);
 }
 
 fn taskSummaryText(allocator: std.mem.Allocator, tasks: Tasks) ![]const u8 {
@@ -4496,15 +4732,15 @@ fn taskSummaryText(allocator: std.mem.Allocator, tasks: Tasks) ![]const u8 {
         allocator,
         "backend={s}, frontend={s}, systems={s}, qa={s}, research={s}, brand={s}, media={s}, docs={s}, bulk_ops={s}",
         .{
-            tasks.backend.status,
-            tasks.frontend.status,
-            tasks.systems.status,
-            tasks.qa.status,
-            tasks.research.status,
-            tasks.brand.status,
-            tasks.media.status,
-            tasks.docs.status,
-            tasks.bulk_ops.status,
+            @tagName(tasks.backend.status),
+            @tagName(tasks.frontend.status),
+            @tagName(tasks.systems.status),
+            @tagName(tasks.qa.status),
+            @tagName(tasks.research.status),
+            @tagName(tasks.brand.status),
+            @tagName(tasks.media.status),
+            @tagName(tasks.docs.status),
+            @tagName(tasks.bulk_ops.status),
         },
     );
 }
@@ -4654,8 +4890,8 @@ fn progressDocumentationText(
                 if (state.mission.current_goal.len > 0) state.mission.current_goal else "idle",
                 state.agent_loop.iteration,
                 state.agent_loop.max_iterations,
-                state.current_actor,
-                if (state.agent_loop.active_tool.len > 0) state.agent_loop.active_tool else "none",
+                actorName(state.current_actor),
+                if (state.agent_loop.active_tool) |active_tool| actorName(active_tool) else "none",
                 latest_result,
                 task_summary,
                 recent_history,
@@ -4682,14 +4918,14 @@ fn blockForContextLimit(
         ),
         config.context.max_stop_summary_chars,
     );
-    state.global_status = "waiting_on_tool";
-    state.agent_loop.status = "blocked";
-    state.runtime_session.status = "blocked";
+    state.global_status = .waiting_on_tool;
+    state.agent_loop.status = .blocked;
+    state.runtime_session.status = .blocked;
     state.runtime_session.last_error = message;
     try appendHistory(allocator, state, .{
         .iteration = state.agent_loop.iteration,
         .type = "context_budget_blocked",
-        .actor = state.current_actor,
+        .actor = actorName(state.current_actor),
         .lane = currentLaneForState(state.*),
         .summary = message,
         .artifacts = &.{},
@@ -4754,7 +4990,7 @@ fn buildPromptWithContextBudget(
 }
 
 fn blockedToolOutcome(allocator: std.mem.Allocator, state: *AppState, reason: []const u8) !ToolExecutionOutcome {
-    state.runtime_session.status = "blocked";
+    state.runtime_session.status = .blocked;
     state.runtime_session.last_error = reason;
     return .{
         .blocked = true,
@@ -4769,14 +5005,30 @@ fn toolRequestDisplay(allocator: std.mem.Allocator, request: ToolRequest) ![]con
     return try buffer.toOwnedSlice(allocator);
 }
 
-fn confirmTool(allocator: std.mem.Allocator, hooks: RuntimeHooks, tool_name: []const u8, detail: []const u8) !bool {
+fn confirmTool(
+    allocator: std.mem.Allocator,
+    config: AppConfig,
+    state: *AppState,
+    hooks: RuntimeHooks,
+    actor: Actor,
+    lane: Lane,
+    tool_name: []const u8,
+    detail: []const u8,
+    target: []const u8,
+) !bool {
+    beginApprovalRequest(state, actor, lane, tool_name, detail, detail, target);
+    emitStateSnapshot(hooks, config, state.*);
     if (hooks.requestApproval(tool_name, detail)) |decision| {
+        resolveApprovalRequest(state, decision);
+        emitStateSnapshot(hooks, config, state.*);
         return decision;
     }
     try stdoutPrint("allow {s}? {s} [y/N]: ", .{ tool_name, detail });
     const input = try std.fs.File.stdin().deprecatedReader().readUntilDelimiterOrEofAlloc(allocator, '\n', 1024);
-    if (input == null) return false;
-    return eql(trimAscii(input.?), "y") or eql(trimAscii(input.?), "yes");
+    const approved = input != null and (eql(trimAscii(input.?), "y") or eql(trimAscii(input.?), "yes"));
+    resolveApprovalRequest(state, approved);
+    emitStateSnapshot(hooks, config, state.*);
+    return approved;
 }
 
 fn copyFileIfMissing(allocator: std.mem.Allocator, source_path: []const u8, target_path: []const u8) !void {
@@ -6883,7 +7135,7 @@ test "visibleInputWindow keeps cursor visible at tail" {
 test "currentLaneForState returns command for decanus" {
     const testing = std.testing;
     var state = AppState{};
-    state.current_actor = "decanus";
+    state.current_actor = .decanus;
     try testing.expectEqualStrings("command", currentLaneForState(state));
 }
 
@@ -7270,12 +7522,12 @@ test "snapshotFromState uses config and loop state" {
     const testing = std.testing;
     const config = AppConfig{};
     var state = AppState{};
-    state.current_actor = "artifex";
-    state.agent_loop.active_tool = "artifex";
+    state.current_actor = .artifex;
+    state.agent_loop.active_tool = .artifex;
     state.agent_loop.iteration = 4;
     state.agent_loop.max_iterations = 24;
     state.agent_loop.last_tool_result = "read_file README.md";
-    state.runtime_session.status = "running";
+    state.runtime_session.status = .running;
     state.runtime_session.model = "custom-model";
     state.runtime_session.context_budget = .{
         .estimated_prompt_chars = 1200,
@@ -7366,7 +7618,7 @@ test "processRuntimeEvents keeps snapshot data after freeing events" {
 test "toneForOutcome treats interrupted runs as danger" {
     const testing = std.testing;
     var state = AppState{};
-    state.runtime_session.status = "interrupted";
+    state.runtime_session.status = .interrupted;
     try testing.expectEqual(ChatTone.danger, toneForOutcome(state));
 }
 
