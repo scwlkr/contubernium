@@ -1,15 +1,3 @@
-You’re close—but right now this is a list, not a system you can build against.
-
-What you need is:
-	•	structure (what owns what)
-	•	boundaries (what cannot bleed across layers)
-	•	execution order (what gets built first vs later)
-	•	and “definition of done” per feature
-
-I’m going to refactor this into a usable FEATURES.md that actually drives development.
-
-⸻
-
 🏛️ CONTUBERNIUM — FEATURES (v2, build-ready)
 
 0. System Philosophy (lock this first)

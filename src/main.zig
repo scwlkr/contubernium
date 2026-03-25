@@ -299,6 +299,49 @@ const ToolExecutionOutcome = struct {
     summary: []const u8,
 };
 
+const RuntimeRunLog = struct {
+    format_version: usize = 1,
+    run_id: []const u8 = "",
+    command: []const u8 = "",
+    created_at: []const u8 = "",
+    updated_at: []const u8 = "",
+    project_name: []const u8 = "",
+    provider: []const u8 = "",
+    model: []const u8 = "",
+    approval_mode: []const u8 = "",
+    mission_prompt: []const u8 = "",
+    events: []const RuntimeLogEvent = &.{},
+};
+
+const RuntimeLogEvent = struct {
+    timestamp: []const u8 = "",
+    iteration: usize = 0,
+    turn_id: []const u8 = "",
+    actor: []const u8 = "",
+    lane: []const u8 = "",
+    action: []const u8 = "",
+    status: []const u8 = "",
+    tool: []const u8 = "",
+    summary: []const u8 = "",
+    input: []const u8 = "",
+    output: []const u8 = "",
+    error_text: []const u8 = "",
+    snapshot: ?StateSnapshot = null,
+};
+
+const RuntimeLogEventSpec = struct {
+    actor: Actor = .decanus,
+    lane: Lane = .command,
+    action: []const u8,
+    status: []const u8 = "info",
+    tool: []const u8 = "",
+    summary: []const u8 = "",
+    input: []const u8 = "",
+    output: []const u8 = "",
+    error_text: []const u8 = "",
+    include_snapshot: bool = false,
+};
+
 const ChatTone = enum {
     info,
     success,
@@ -1016,6 +1059,16 @@ fn runMissionInternal(allocator: std.mem.Allocator, mission_prompt: []const u8, 
 
     resetStateForMission(&state, mission_prompt);
     initializeRuntimeSession(allocator, &state, config);
+    try initializeRuntimeRunLog(allocator, config, &state, "mission");
+    try logRuntimeEvent(allocator, config, &state, .{
+        .actor = .decanus,
+        .lane = .command,
+        .action = "run_started",
+        .status = "running",
+        .summary = "mission initialized",
+        .input = mission_prompt,
+        .include_snapshot = true,
+    });
     try saveState(allocator, config.paths.state_file, state);
     emitStateSnapshot(hooks, config, state);
 
@@ -1332,6 +1385,18 @@ fn workerMain(task: *WorkerTask) void {
                 return;
             };
             initializeRuntimeSession(task.allocator, &state, config);
+            initializeRuntimeRunLog(task.allocator, config, &state, "resume") catch |err| {
+                emitLog(hooks, .danger, "", "Resume Failed", friendlyRuntimeError(task.allocator, err) catch @errorName(err), .plain);
+                return;
+            };
+            logRuntimeEvent(task.allocator, config, &state, .{
+                .actor = .decanus,
+                .lane = .command,
+                .action = "run_started",
+                .status = "running",
+                .summary = "resume requested",
+                .include_snapshot = true,
+            }) catch {};
             runLoop(task.allocator, config, &state, hooks) catch |err| {
                 emitLog(hooks, .danger, "", "Resume Failed", friendlyRuntimeError(task.allocator, err) catch @errorName(err), .plain);
                 return;
@@ -3096,6 +3161,15 @@ fn runLoop(allocator: std.mem.Allocator, config: AppConfig, state: *AppState, ho
     while (state.agent_loop.iteration < state.agent_loop.max_iterations) {
         if (hooks.isInterrupted()) {
             markInterrupted(state);
+            try logRuntimeEvent(allocator, config, state, .{
+                .actor = state.current_actor,
+                .lane = laneForActor(state.current_actor),
+                .action = "run_interrupted",
+                .status = "blocked",
+                .summary = "operator interrupted the active loop",
+                .error_text = state.runtime_session.last_error,
+                .include_snapshot = true,
+            });
             emitStateSnapshot(hooks, config, state.*);
             return;
         }
@@ -3128,6 +3202,15 @@ fn runLoop(allocator: std.mem.Allocator, config: AppConfig, state: *AppState, ho
         .artifacts = &.{},
         .timestamp = try unixTimestampString(allocator),
     });
+    try logRuntimeEvent(allocator, config, state, .{
+        .actor = state.current_actor,
+        .lane = laneForActor(state.current_actor),
+        .action = "loop_limit_reached",
+        .status = "blocked",
+        .summary = state.runtime_session.last_error,
+        .error_text = state.runtime_session.last_error,
+        .include_snapshot = true,
+    });
     try saveState(allocator, config.paths.state_file, state.*);
     emitLog(hooks, .danger, "runtime", "Loop Limit Reached", state.runtime_session.last_error, .plain);
     emitStateSnapshot(hooks, config, state.*);
@@ -3141,6 +3224,15 @@ fn executeStep(allocator: std.mem.Allocator, config: AppConfig, state: *AppState
 
     if (hooks.isInterrupted()) {
         markInterrupted(state);
+        try logRuntimeEvent(allocator, config, state, .{
+            .actor = state.current_actor,
+            .lane = laneForActor(state.current_actor),
+            .action = "run_interrupted",
+            .status = "blocked",
+            .summary = "operator interrupted the active loop",
+            .error_text = state.runtime_session.last_error,
+            .include_snapshot = true,
+        });
         emitStateSnapshot(hooks, config, state.*);
         return .blocked;
     }
@@ -3153,7 +3245,6 @@ fn executeStep(allocator: std.mem.Allocator, config: AppConfig, state: *AppState
     state.runtime_session.approval_mode = config.policy.approval_mode;
     state.runtime_session.last_actor = state.current_actor;
     state.runtime_session.current_turn_id = try makeTurnId(allocator, actorName(state.current_actor), state.agent_loop.iteration);
-    state.runtime_session.active_log_path = try logPathForTurn(allocator, config.paths.logs_dir, state.runtime_session.current_turn_id);
     emitStateSnapshot(hooks, config, state.*);
 
     if (state.current_actor == .decanus) {
@@ -3167,6 +3258,14 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
     state.agent_loop.status = .thinking;
     setLoopStep(state, .think, .decanus, .command, if (state.mission.current_goal.len > 0) state.mission.current_goal else state.mission.initial_prompt);
     emitStateSnapshot(hooks, config, state.*);
+    try logRuntimeEvent(allocator, config, state, .{
+        .actor = .decanus,
+        .lane = .command,
+        .action = "turn_started",
+        .status = "running",
+        .summary = if (state.mission.current_goal.len > 0) state.mission.current_goal else state.mission.initial_prompt,
+        .include_snapshot = true,
+    });
 
     const system_prompt = try assembleSystemPrompt(
         allocator,
@@ -3178,12 +3277,26 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
         if (err == error.ContextBudgetExceeded) return .blocked;
         return err;
     };
-    try writeTurnLog(state.runtime_session.active_log_path, "system_prompt", system_prompt);
-    try writeTurnLog(state.runtime_session.active_log_path, "user_prompt", user_prompt);
+    try logRuntimeEvent(allocator, config, state, .{
+        .actor = .decanus,
+        .lane = .command,
+        .action = "system_prompt",
+        .status = "captured",
+        .summary = "assembled decanus system prompt",
+        .output = system_prompt,
+    });
+    try logRuntimeEvent(allocator, config, state, .{
+        .actor = .decanus,
+        .lane = .command,
+        .action = "user_prompt",
+        .status = "captured",
+        .summary = "assembled decanus user prompt",
+        .output = user_prompt,
+    });
 
     const response = structuredChatWithRepair(
         allocator,
-        config.provider,
+        config,
         system_prompt,
         user_prompt,
         "decanus",
@@ -3194,6 +3307,15 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
     ) catch |err| {
         if (err == error.Interrupted) {
             markInterrupted(state);
+            try logRuntimeEvent(allocator, config, state, .{
+                .actor = .decanus,
+                .lane = .command,
+                .action = "turn_interrupted",
+                .status = "blocked",
+                .summary = "decanus turn interrupted",
+                .error_text = state.runtime_session.last_error,
+                .include_snapshot = true,
+            });
             emitStateSnapshot(hooks, config, state.*);
             return .blocked;
         }
@@ -3201,13 +3323,36 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
         state.global_status = .waiting_on_tool;
         state.runtime_session.status = .blocked;
         state.runtime_session.last_error = message;
-        try writeTurnLog(state.runtime_session.active_log_path, "error", message);
+        try logRuntimeEvent(allocator, config, state, .{
+            .actor = .decanus,
+            .lane = .command,
+            .action = "turn_failed",
+            .status = "error",
+            .summary = "decanus turn failed",
+            .error_text = message,
+            .include_snapshot = true,
+        });
         emitLog(hooks, .danger, "decanus", "Commander Failed", message, .plain);
         return .blocked;
     };
     const decision = response.value;
-    try writeTurnLog(state.runtime_session.active_log_path, "model_output", response.raw_text);
+    try logRuntimeEvent(allocator, config, state, .{
+        .actor = .decanus,
+        .lane = .command,
+        .action = "model_output",
+        .status = "success",
+        .summary = "raw decanus response",
+        .output = response.raw_text,
+    });
     const decision_summary = summarizeDecanusDecisionForUi(allocator, decision) catch prettyPrintJson(allocator, response.raw_text) catch response.raw_text;
+    try logRuntimeEvent(allocator, config, state, .{
+        .actor = .decanus,
+        .lane = .command,
+        .action = "parsed_output",
+        .status = "success",
+        .summary = decision_summary,
+        .output = prettyPrintJson(allocator, response.raw_text) catch response.raw_text,
+    });
     emitStreamFinalize(hooks, "decanus", decision_summary, .summary);
 
     if (decision.current_goal.len > 0) {
@@ -3243,9 +3388,26 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
         if (tool_result.blocked) {
             state.global_status = .waiting_on_tool;
             state.runtime_session.status = .blocked;
+            try logRuntimeEvent(allocator, config, state, .{
+                .actor = .decanus,
+                .lane = .command,
+                .action = "turn_blocked",
+                .status = "blocked",
+                .summary = tool_result.summary,
+                .error_text = state.runtime_session.last_error,
+                .include_snapshot = true,
+            });
             emitStateSnapshot(hooks, config, state.*);
             return .blocked;
         }
+        try logRuntimeEvent(allocator, config, state, .{
+            .actor = .decanus,
+            .lane = .command,
+            .action = "turn_advanced",
+            .status = "success",
+            .summary = tool_result.summary,
+            .include_snapshot = true,
+        });
         emitLog(
             hooks,
             .tool,
@@ -3276,6 +3438,15 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
                 .timestamp = try unixTimestampString(allocator),
             },
         );
+        try logRuntimeEvent(allocator, config, state, .{
+            .actor = .decanus,
+            .lane = .command,
+            .action = "run_completed",
+            .status = "complete",
+            .summary = decision.final_response,
+            .output = decision.final_response,
+            .include_snapshot = true,
+        });
         emitLog(hooks, .success, "decanus", "Final Response", decision.final_response, .plain);
         emitStateSnapshot(hooks, config, state.*);
         return .complete;
@@ -3312,6 +3483,16 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
             try std.fmt.allocPrint(allocator, "{s} -> {s} on {s}: {s}", .{ "decanus", actorName(actor), laneName(lane), decision.objective }),
             .plain,
         );
+        try logRuntimeEvent(allocator, config, state, .{
+            .actor = .decanus,
+            .lane = lane,
+            .action = "specialist_invoked",
+            .status = "ready",
+            .tool = actorName(actor),
+            .summary = decision.objective,
+            .input = decision.completion_signal,
+            .include_snapshot = true,
+        });
         emitStateSnapshot(hooks, config, state.*);
         return .advanced;
     }
@@ -3321,6 +3502,15 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
         state.runtime_session.status = .blocked;
         state.runtime_session.last_error = decision.question;
         setLoopStep(state, .blocked, .decanus, .command, decision.question);
+        try logRuntimeEvent(allocator, config, state, .{
+            .actor = .decanus,
+            .lane = .command,
+            .action = "turn_blocked",
+            .status = "blocked",
+            .summary = decision.question,
+            .error_text = decision.question,
+            .include_snapshot = true,
+        });
         emitLog(hooks, .warning, "decanus", "Question", decision.question, .plain);
         emitStateSnapshot(hooks, config, state.*);
         return .blocked;
@@ -3330,6 +3520,15 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
     state.runtime_session.status = .blocked;
     state.runtime_session.last_error = if (decision.blocked_reason.len > 0) decision.blocked_reason else "decanus returned a blocked state";
     setLoopStep(state, .blocked, .decanus, .command, state.runtime_session.last_error);
+    try logRuntimeEvent(allocator, config, state, .{
+        .actor = .decanus,
+        .lane = .command,
+        .action = "turn_blocked",
+        .status = "blocked",
+        .summary = state.runtime_session.last_error,
+        .error_text = state.runtime_session.last_error,
+        .include_snapshot = true,
+    });
     emitLog(hooks, .danger, "decanus", "Blocked", state.runtime_session.last_error, .plain);
     emitStateSnapshot(hooks, config, state.*);
     return .blocked;
@@ -3344,6 +3543,14 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
     state.agent_loop.status = .running_tool;
     setLoopStep(state, .execute, actor, lane, task.invocation.objective);
     emitStateSnapshot(hooks, config, state.*);
+    try logRuntimeEvent(allocator, config, state, .{
+        .actor = actor,
+        .lane = lane,
+        .action = "turn_started",
+        .status = "running",
+        .summary = task.invocation.objective,
+        .include_snapshot = true,
+    });
 
     const schema_path = "shared/specialist-schema.json";
     const system_prompt = try assembleSystemPrompt(allocator, config.paths.prompts_dir, actorName(actor), schema_path);
@@ -3351,12 +3558,26 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
         if (err == error.ContextBudgetExceeded) return .blocked;
         return err;
     };
-    try writeTurnLog(state.runtime_session.active_log_path, "system_prompt", system_prompt);
-    try writeTurnLog(state.runtime_session.active_log_path, "user_prompt", user_prompt);
+    try logRuntimeEvent(allocator, config, state, .{
+        .actor = actor,
+        .lane = lane,
+        .action = "system_prompt",
+        .status = "captured",
+        .summary = "assembled specialist system prompt",
+        .output = system_prompt,
+    });
+    try logRuntimeEvent(allocator, config, state, .{
+        .actor = actor,
+        .lane = lane,
+        .action = "user_prompt",
+        .status = "captured",
+        .summary = "assembled specialist user prompt",
+        .output = user_prompt,
+    });
 
     const response = structuredChatWithRepair(
         allocator,
-        config.provider,
+        config,
         system_prompt,
         user_prompt,
         actorName(actor),
@@ -3368,6 +3589,15 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
         if (err == error.Interrupted) {
             markInterrupted(state);
             task.invocation.status = .blocked;
+            try logRuntimeEvent(allocator, config, state, .{
+                .actor = actor,
+                .lane = lane,
+                .action = "turn_interrupted",
+                .status = "blocked",
+                .summary = "specialist turn interrupted",
+                .error_text = state.runtime_session.last_error,
+                .include_snapshot = true,
+            });
             emitStateSnapshot(hooks, config, state.*);
             return .blocked;
         }
@@ -3375,13 +3605,36 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
         task.invocation.status = .blocked;
         state.runtime_session.status = .blocked;
         state.runtime_session.last_error = message;
-        try writeTurnLog(state.runtime_session.active_log_path, "error", message);
+        try logRuntimeEvent(allocator, config, state, .{
+            .actor = actor,
+            .lane = lane,
+            .action = "turn_failed",
+            .status = "error",
+            .summary = "specialist turn failed",
+            .error_text = message,
+            .include_snapshot = true,
+        });
         emitLog(hooks, .danger, actorName(actor), "Specialist Failed", message, .plain);
         return .blocked;
     };
     const result = response.value;
-    try writeTurnLog(state.runtime_session.active_log_path, "model_output", response.raw_text);
+    try logRuntimeEvent(allocator, config, state, .{
+        .actor = actor,
+        .lane = lane,
+        .action = "model_output",
+        .status = "success",
+        .summary = "raw specialist response",
+        .output = response.raw_text,
+    });
     const result_summary = summarizeSpecialistResultForUi(allocator, result) catch prettyPrintJson(allocator, response.raw_text) catch response.raw_text;
+    try logRuntimeEvent(allocator, config, state, .{
+        .actor = actor,
+        .lane = lane,
+        .action = "parsed_output",
+        .status = "success",
+        .summary = result_summary,
+        .output = prettyPrintJson(allocator, response.raw_text) catch response.raw_text,
+    });
     emitStreamFinalize(hooks, actorName(actor), result_summary, .summary);
 
     if (result.tool_requests.len > 0 or eql(result.action, "tool_request")) {
@@ -3398,10 +3651,27 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
         if (tool_result.blocked) {
             task.invocation.status = .blocked;
             state.runtime_session.status = .blocked;
+            try logRuntimeEvent(allocator, config, state, .{
+                .actor = actor,
+                .lane = lane,
+                .action = "turn_blocked",
+                .status = "blocked",
+                .summary = tool_result.summary,
+                .error_text = state.runtime_session.last_error,
+                .include_snapshot = true,
+            });
             emitStateSnapshot(hooks, config, state.*);
             return .blocked;
         }
         task.invocation.status = .running;
+        try logRuntimeEvent(allocator, config, state, .{
+            .actor = actor,
+            .lane = lane,
+            .action = "turn_advanced",
+            .status = "success",
+            .summary = tool_result.summary,
+            .include_snapshot = true,
+        });
         emitLog(
             hooks,
             .tool,
@@ -3429,6 +3699,15 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
                 .timestamp = try unixTimestampString(allocator),
             },
         );
+        try logRuntimeEvent(allocator, config, state, .{
+            .actor = actor,
+            .lane = lane,
+            .action = "turn_completed",
+            .status = "complete",
+            .summary = invocation_result.summary,
+            .output = invocation_result.summary,
+            .include_snapshot = true,
+        });
         emitLog(hooks, .success, actorName(actor), "Lane Complete", invocation_result.summary, .plain);
         emitStateSnapshot(hooks, config, state.*);
         return .advanced;
@@ -3438,6 +3717,15 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
         const invocation_result = try materializeInvocationResult(allocator, result, .blocked);
         finalizeInvocation(state, lane, actor, invocation_result, result.description);
         state.runtime_session.last_error = result.question;
+        try logRuntimeEvent(allocator, config, state, .{
+            .actor = actor,
+            .lane = lane,
+            .action = "turn_blocked",
+            .status = "blocked",
+            .summary = result.question,
+            .error_text = result.question,
+            .include_snapshot = true,
+        });
         emitLog(hooks, .warning, actorName(actor), "Question", result.question, .plain);
         emitStateSnapshot(hooks, config, state.*);
         return .blocked;
@@ -3446,6 +3734,15 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
     const invocation_result = try materializeInvocationResult(allocator, result, .blocked);
     finalizeInvocation(state, lane, actor, invocation_result, result.description);
     state.runtime_session.last_error = if (invocation_result.blockers.len > 0) invocation_result.blockers[0] else "specialist returned a blocked state";
+    try logRuntimeEvent(allocator, config, state, .{
+        .actor = actor,
+        .lane = lane,
+        .action = "turn_blocked",
+        .status = "blocked",
+        .summary = state.runtime_session.last_error,
+        .error_text = state.runtime_session.last_error,
+        .include_snapshot = true,
+    });
     emitLog(hooks, .danger, actorName(actor), "Blocked", state.runtime_session.last_error, .plain);
     emitStateSnapshot(hooks, config, state.*);
     return .blocked;
@@ -3468,60 +3765,190 @@ fn executeToolRequests(
     for (requests) |request| {
         const tool_name = canonicalToolName(request.tool);
         if (tool_name.len == 0) continue;
-        emitLog(hooks, .tool, actorName(actor), tool_name, toolRequestDisplay(allocator, request) catch tool_name, .plain);
+        const request_summary = toolRequestDisplay(allocator, request) catch tool_name;
+        emitLog(hooks, .tool, actorName(actor), tool_name, request_summary, .plain);
+        try logRuntimeEvent(allocator, config, state, .{
+            .actor = actor,
+            .lane = lane,
+            .action = "tool_request",
+            .status = "requested",
+            .tool = tool_name,
+            .summary = request_summary,
+            .input = request_summary,
+        });
 
         if (eql(tool_name, "list_files")) {
             if (!config.policy.allow_read_tools_without_confirmation and !try confirmTool(allocator, config, state, hooks, actor, lane, tool_name, request.description, request.path)) {
+                try logRuntimeEvent(allocator, config, state, .{
+                    .actor = actor,
+                    .lane = lane,
+                    .action = "tool_result",
+                    .status = "blocked",
+                    .tool = tool_name,
+                    .summary = "list_files denied by operator",
+                    .error_text = "list_files denied by operator",
+                    .include_snapshot = true,
+                });
                 return try blockedToolOutcome(allocator, state, "list_files denied by operator");
             }
             const output = try listWorkspaceFiles(allocator, request.path);
-            try summaries.append(allocator, try summarizeCommandResult(allocator, "list_files", output, config.context.max_tool_result_chars));
+            const summary = try summarizeCommandResult(allocator, "list_files", output, config.context.max_tool_result_chars);
+            try summaries.append(allocator, summary);
+            try logRuntimeEvent(allocator, config, state, .{
+                .actor = actor,
+                .lane = lane,
+                .action = "tool_result",
+                .status = "success",
+                .tool = tool_name,
+                .summary = summary,
+                .output = summary,
+            });
             continue;
         }
 
         if (eql(tool_name, "read_file")) {
             if (!config.policy.allow_read_tools_without_confirmation and !try confirmTool(allocator, config, state, hooks, actor, lane, tool_name, request.description, request.path)) {
+                try logRuntimeEvent(allocator, config, state, .{
+                    .actor = actor,
+                    .lane = lane,
+                    .action = "tool_result",
+                    .status = "blocked",
+                    .tool = tool_name,
+                    .summary = "read_file denied by operator",
+                    .error_text = "read_file denied by operator",
+                    .include_snapshot = true,
+                });
                 return try blockedToolOutcome(allocator, state, "read_file denied by operator");
             }
             const path = if (request.path.len > 0) request.path else return error.MissingPath;
             const content = try readFileLimited(allocator, path, config.context.max_file_read_bytes);
-            try summaries.append(allocator, try truncateText(allocator, try std.fmt.allocPrint(allocator, "read_file {s}\n{s}", .{ path, content }), config.context.max_tool_result_chars));
+            const summary = try truncateText(allocator, try std.fmt.allocPrint(allocator, "read_file {s}\n{s}", .{ path, content }), config.context.max_tool_result_chars);
+            try summaries.append(allocator, summary);
+            try logRuntimeEvent(allocator, config, state, .{
+                .actor = actor,
+                .lane = lane,
+                .action = "tool_result",
+                .status = "success",
+                .tool = tool_name,
+                .summary = summary,
+                .output = summary,
+            });
             continue;
         }
 
         if (eql(tool_name, "search_text")) {
             if (!config.policy.allow_read_tools_without_confirmation and !try confirmTool(allocator, config, state, hooks, actor, lane, tool_name, request.description, request.path)) {
+                try logRuntimeEvent(allocator, config, state, .{
+                    .actor = actor,
+                    .lane = lane,
+                    .action = "tool_result",
+                    .status = "blocked",
+                    .tool = tool_name,
+                    .summary = "search_text denied by operator",
+                    .error_text = "search_text denied by operator",
+                    .include_snapshot = true,
+                });
                 return try blockedToolOutcome(allocator, state, "search_text denied by operator");
             }
             const path = if (request.path.len > 0) request.path else ".";
             const pattern = if (request.pattern.len > 0) request.pattern else return error.MissingPattern;
             const output = try searchText(allocator, pattern, path, config.context.max_search_hits);
-            try summaries.append(allocator, try truncateText(allocator, try std.fmt.allocPrint(allocator, "search_text {s} in {s}\n{s}", .{ pattern, path, output }), config.context.max_tool_result_chars));
+            const summary = try truncateText(allocator, try std.fmt.allocPrint(allocator, "search_text {s} in {s}\n{s}", .{ pattern, path, output }), config.context.max_tool_result_chars);
+            try summaries.append(allocator, summary);
+            try logRuntimeEvent(allocator, config, state, .{
+                .actor = actor,
+                .lane = lane,
+                .action = "tool_result",
+                .status = "success",
+                .tool = tool_name,
+                .summary = summary,
+                .output = summary,
+            });
             continue;
         }
 
         if (eql(tool_name, "run_command")) {
             if (commandIsBlocked(config.policy.blocked_command_patterns, request.command)) {
+                try logRuntimeEvent(allocator, config, state, .{
+                    .actor = actor,
+                    .lane = lane,
+                    .action = "tool_result",
+                    .status = "blocked",
+                    .tool = tool_name,
+                    .summary = "run_command blocked by policy",
+                    .error_text = "run_command blocked by policy",
+                    .include_snapshot = true,
+                });
                 return try blockedToolOutcome(allocator, state, "run_command blocked by policy");
             }
             if (!config.policy.allow_shell_without_confirmation and !try confirmTool(allocator, config, state, hooks, actor, lane, tool_name, request.command, request.command)) {
+                try logRuntimeEvent(allocator, config, state, .{
+                    .actor = actor,
+                    .lane = lane,
+                    .action = "tool_result",
+                    .status = "blocked",
+                    .tool = tool_name,
+                    .summary = "run_command denied by operator",
+                    .error_text = "run_command denied by operator",
+                    .include_snapshot = true,
+                });
                 return try blockedToolOutcome(allocator, state, "run_command denied by operator");
             }
             const output = try runShellCommand(allocator, request.command);
-            try summaries.append(allocator, try summarizeCommandResult(allocator, "run_command", output, config.context.max_tool_result_chars));
+            const summary = try summarizeCommandResult(allocator, "run_command", output, config.context.max_tool_result_chars);
+            try summaries.append(allocator, summary);
+            try logRuntimeEvent(allocator, config, state, .{
+                .actor = actor,
+                .lane = lane,
+                .action = "tool_result",
+                .status = "success",
+                .tool = tool_name,
+                .summary = summary,
+                .output = summary,
+            });
             continue;
         }
 
         if (eql(tool_name, "write_file")) {
             const path = if (request.path.len > 0) request.path else return error.MissingPath;
             if (!pathIsSafeForWrite(path)) {
+                try logRuntimeEvent(allocator, config, state, .{
+                    .actor = actor,
+                    .lane = lane,
+                    .action = "tool_result",
+                    .status = "blocked",
+                    .tool = tool_name,
+                    .summary = "write_file path outside workspace policy",
+                    .error_text = "write_file path outside workspace policy",
+                    .include_snapshot = true,
+                });
                 return try blockedToolOutcome(allocator, state, "write_file path outside workspace policy");
             }
             if (!config.policy.allow_workspace_writes_without_confirmation and !try confirmTool(allocator, config, state, hooks, actor, lane, tool_name, path, path)) {
+                try logRuntimeEvent(allocator, config, state, .{
+                    .actor = actor,
+                    .lane = lane,
+                    .action = "tool_result",
+                    .status = "blocked",
+                    .tool = tool_name,
+                    .summary = "write_file denied by operator",
+                    .error_text = "write_file denied by operator",
+                    .include_snapshot = true,
+                });
                 return try blockedToolOutcome(allocator, state, "write_file denied by operator");
             }
             try writeFile(path, request.content);
-            try summaries.append(allocator, try std.fmt.allocPrint(allocator, "write_file {s} ({d} bytes)", .{ path, request.content.len }));
+            const summary = try std.fmt.allocPrint(allocator, "write_file {s} ({d} bytes)", .{ path, request.content.len });
+            try summaries.append(allocator, summary);
+            try logRuntimeEvent(allocator, config, state, .{
+                .actor = actor,
+                .lane = lane,
+                .action = "tool_result",
+                .status = "success",
+                .tool = tool_name,
+                .summary = summary,
+                .output = summary,
+            });
             continue;
         }
 
@@ -3530,6 +3957,16 @@ fn executeToolRequests(
             state.runtime_session.status = .blocked;
             state.runtime_session.last_error = question;
             try summaries.append(allocator, try std.fmt.allocPrint(allocator, "ask_user {s}", .{question}));
+            try logRuntimeEvent(allocator, config, state, .{
+                .actor = actor,
+                .lane = lane,
+                .action = "tool_result",
+                .status = "blocked",
+                .tool = tool_name,
+                .summary = question,
+                .error_text = question,
+                .include_snapshot = true,
+            });
             emitLog(hooks, .warning, actorName(actor), "Question", question, .plain);
             return .{
                 .blocked = true,
@@ -3537,7 +3974,17 @@ fn executeToolRequests(
             };
         }
 
-        try summaries.append(allocator, try std.fmt.allocPrint(allocator, "unknown tool `{s}` requested by {s} on lane {s}", .{ request.tool, actorName(actor), laneName(lane) }));
+        const summary = try std.fmt.allocPrint(allocator, "unknown tool `{s}` requested by {s} on lane {s}", .{ request.tool, actorName(actor), laneName(lane) });
+        try summaries.append(allocator, summary);
+        try logRuntimeEvent(allocator, config, state, .{
+            .actor = actor,
+            .lane = lane,
+            .action = "tool_result",
+            .status = "error",
+            .tool = request.tool,
+            .summary = summary,
+            .error_text = summary,
+        });
     }
 
     return .{
@@ -3548,7 +3995,7 @@ fn executeToolRequests(
 
 fn structuredChatWithRepair(
     allocator: std.mem.Allocator,
-    provider: ProviderConfig,
+    config: AppConfig,
     system_prompt: []const u8,
     user_prompt: []const u8,
     actor: []const u8,
@@ -3559,14 +4006,31 @@ fn structuredChatWithRepair(
 ) !struct { value: T, raw_text: []const u8 } {
     var attempt: usize = 0;
     var repair_user_prompt = user_prompt;
+    const resolved_actor = parseActor(actor) orelse .decanus;
+    const resolved_lane = laneForActor(resolved_actor);
 
     while (true) {
         if (hooks.isInterrupted()) return error.Interrupted;
         emitStreamStart(hooks, actor);
-        const response = try providerStructuredChat(allocator, provider, system_prompt, repair_user_prompt, actor, hooks);
-        try writeTurnLog(state.runtime_session.active_log_path, "provider_transport", response.transport_text);
+        const response = try providerStructuredChat(allocator, config.provider, system_prompt, repair_user_prompt, actor, hooks);
+        try logRuntimeEvent(allocator, config, state, .{
+            .actor = resolved_actor,
+            .lane = resolved_lane,
+            .action = "provider_transport",
+            .status = "success",
+            .summary = "provider transport captured",
+            .output = response.transport_text,
+        });
         const parsed = parseModelJson(T, allocator, response.raw_text) catch |err| {
-            try writeTurnLog(state.runtime_session.active_log_path, "invalid_model_output", response.raw_text);
+            try logRuntimeEvent(allocator, config, state, .{
+                .actor = resolved_actor,
+                .lane = resolved_lane,
+                .action = "invalid_model_output",
+                .status = "error",
+                .summary = "model returned invalid JSON",
+                .output = response.raw_text,
+                .error_text = if (response.raw_text.len == 0) "model returned an empty response" else "model returned invalid JSON",
+            });
             emitStreamFinalize(hooks, actor, response.raw_text, .json);
             if (attempt >= max_retries) return err;
             attempt += 1;
@@ -3578,6 +4042,15 @@ fn structuredChatWithRepair(
                 "{s}\n\nYour previous response was invalid JSON. Return valid JSON only. Do not use markdown fences. Preserve the intended structure.",
                 .{user_prompt},
             );
+            try logRuntimeEvent(allocator, config, state, .{
+                .actor = resolved_actor,
+                .lane = resolved_lane,
+                .action = "repair_retry",
+                .status = "retrying",
+                .summary = state.runtime_session.last_error,
+                .input = repair_user_prompt,
+                .error_text = state.runtime_session.last_error,
+            });
             continue;
         };
         state.runtime_session.repair_attempts = attempt;
@@ -3751,6 +4224,7 @@ fn saveState(allocator: std.mem.Allocator, path: []const u8, state: AppState) !v
         "{f}",
         .{std.json.fmt(state, .{ .whitespace = .indent_2 })},
     );
+    defer allocator.free(rendered);
     var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
     defer file.close();
     try file.writeAll(rendered);
@@ -3762,6 +4236,24 @@ fn saveConfig(allocator: std.mem.Allocator, path: []const u8, config: AppConfig)
         "{f}",
         .{std.json.fmt(config, .{ .whitespace = .indent_2 })},
     );
+    defer allocator.free(rendered);
+    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(rendered);
+}
+
+fn loadRuntimeRunLog(allocator: std.mem.Allocator, path: []const u8) !RuntimeRunLog {
+    const data = try std.fs.cwd().readFileAlloc(allocator, path, max_file_bytes);
+    return try parseJson(RuntimeRunLog, allocator, data);
+}
+
+fn saveRuntimeRunLog(allocator: std.mem.Allocator, path: []const u8, log: RuntimeRunLog) !void {
+    const rendered = try std.fmt.allocPrint(
+        allocator,
+        "{f}",
+        .{std.json.fmt(log, .{ .whitespace = .indent_2 })},
+    );
+    defer allocator.free(rendered);
     var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
     defer file.close();
     try file.writeAll(rendered);
@@ -4931,6 +5423,15 @@ fn blockForContextLimit(
         .artifacts = &.{},
         .timestamp = try unixTimestampString(allocator),
     });
+    try logRuntimeEvent(allocator, config, state, .{
+        .actor = state.current_actor,
+        .lane = laneForActor(state.current_actor),
+        .action = "context_budget_blocked",
+        .status = "blocked",
+        .summary = message,
+        .error_text = message,
+        .include_snapshot = true,
+    });
     emitLog(hooks, .danger, "runtime", "Context Budget Reached", message, .plain);
     emitStateSnapshot(hooks, config, state.*);
 }
@@ -4985,6 +5486,20 @@ fn buildPromptWithContextBudget(
             ),
             .plain,
         );
+        try logRuntimeEvent(allocator, config, state, .{
+            .actor = state.current_actor,
+            .lane = laneForActor(state.current_actor),
+            .action = "context_condensed",
+            .status = "success",
+            .summary = try std.fmt.allocPrint(
+                allocator,
+                "condensed {d} earlier events and rebuilt the prompt budget",
+                .{
+                    state.runtime_session.context_budget.condensed_history_events,
+                },
+            ),
+            .include_snapshot = true,
+        });
         attempt += 1;
     }
 }
@@ -5018,9 +5533,28 @@ fn confirmTool(
 ) !bool {
     beginApprovalRequest(state, actor, lane, tool_name, detail, detail, target);
     emitStateSnapshot(hooks, config, state.*);
+    try logRuntimeEvent(allocator, config, state, .{
+        .actor = actor,
+        .lane = lane,
+        .action = "approval_requested",
+        .status = "pending",
+        .tool = tool_name,
+        .summary = detail,
+        .input = target,
+        .include_snapshot = true,
+    });
     if (hooks.requestApproval(tool_name, detail)) |decision| {
         resolveApprovalRequest(state, decision);
         emitStateSnapshot(hooks, config, state.*);
+        try logRuntimeEvent(allocator, config, state, .{
+            .actor = actor,
+            .lane = lane,
+            .action = "approval_resolved",
+            .status = if (decision) "approved" else "denied",
+            .tool = tool_name,
+            .summary = detail,
+            .include_snapshot = true,
+        });
         return decision;
     }
     try stdoutPrint("allow {s}? {s} [y/N]: ", .{ tool_name, detail });
@@ -5028,6 +5562,15 @@ fn confirmTool(
     const approved = input != null and (eql(trimAscii(input.?), "y") or eql(trimAscii(input.?), "yes"));
     resolveApprovalRequest(state, approved);
     emitStateSnapshot(hooks, config, state.*);
+    try logRuntimeEvent(allocator, config, state, .{
+        .actor = actor,
+        .lane = lane,
+        .action = "approval_resolved",
+        .status = if (approved) "approved" else "denied",
+        .tool = tool_name,
+        .summary = detail,
+        .include_snapshot = true,
+    });
     return approved;
 }
 
@@ -5133,16 +5676,85 @@ fn makeTurnId(allocator: std.mem.Allocator, actor: []const u8, iteration: usize)
     return try std.fmt.allocPrint(allocator, "{d}-{d}-{s}", .{ std.time.timestamp(), iteration, actor });
 }
 
-fn logPathForTurn(allocator: std.mem.Allocator, logs_dir: []const u8, turn_id: []const u8) ![]const u8 {
-    try std.fs.cwd().makePath(logs_dir);
-    return try std.fmt.allocPrint(allocator, "{s}/{s}.log", .{ logs_dir, turn_id });
+fn makeRunId(allocator: std.mem.Allocator) ![]const u8 {
+    return try std.fmt.allocPrint(allocator, "run-{d}", .{std.time.milliTimestamp()});
 }
 
-fn writeTurnLog(path: []const u8, section: []const u8, content: []const u8) !void {
-    var file = try std.fs.cwd().createFile(path, .{ .truncate = false });
-    defer file.close();
-    try file.seekFromEnd(0);
-    try file.deprecatedWriter().print("[{s}]\n{s}\n\n", .{ section, content });
+fn logPathForRun(allocator: std.mem.Allocator, logs_dir: []const u8, run_id: []const u8) ![]const u8 {
+    try std.fs.cwd().makePath(logs_dir);
+    return try std.fmt.allocPrint(allocator, "{s}/{s}.json", .{ logs_dir, run_id });
+}
+
+fn initializeRuntimeRunLog(
+    allocator: std.mem.Allocator,
+    config: AppConfig,
+    state: *AppState,
+    command: []const u8,
+) !void {
+    const run_id = try makeRunId(allocator);
+    state.runtime_session.active_log_path = try logPathForRun(allocator, config.paths.logs_dir, run_id);
+
+    const timestamp = try unixTimestampString(allocator);
+    const log = RuntimeRunLog{
+        .run_id = run_id,
+        .command = command,
+        .created_at = timestamp,
+        .updated_at = timestamp,
+        .project_name = state.project_name,
+        .provider = config.provider.type,
+        .model = config.provider.model,
+        .approval_mode = config.policy.approval_mode,
+        .mission_prompt = state.mission.initial_prompt,
+        .events = &.{},
+    };
+    try saveRuntimeRunLog(allocator, state.runtime_session.active_log_path, log);
+}
+
+fn appendRuntimeRunLogEvent(allocator: std.mem.Allocator, path: []const u8, event: RuntimeLogEvent) !void {
+    if (path.len == 0) return;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    var log = try loadRuntimeRunLog(scratch, path);
+    var events: std.ArrayList(RuntimeLogEvent) = .empty;
+    try events.appendSlice(scratch, log.events);
+    try events.append(scratch, event);
+    log.updated_at = event.timestamp;
+    log.events = try events.toOwnedSlice(scratch);
+    try saveRuntimeRunLog(scratch, path, log);
+}
+
+fn logRuntimeEvent(
+    allocator: std.mem.Allocator,
+    config: AppConfig,
+    state: *const AppState,
+    spec: RuntimeLogEventSpec,
+) !void {
+    if (state.runtime_session.active_log_path.len == 0) return;
+
+    const project_name = if (!eql(state.project_name, "UNASSIGNED")) state.project_name else "";
+    const snapshot = if (spec.include_snapshot)
+        buildStateSnapshot(config, state.*, project_name)
+    else
+        null;
+
+    try appendRuntimeRunLogEvent(allocator, state.runtime_session.active_log_path, .{
+        .timestamp = try unixTimestampString(allocator),
+        .iteration = state.agent_loop.iteration,
+        .turn_id = state.runtime_session.current_turn_id,
+        .actor = actorName(spec.actor),
+        .lane = laneName(spec.lane),
+        .action = spec.action,
+        .status = spec.status,
+        .tool = spec.tool,
+        .summary = spec.summary,
+        .input = spec.input,
+        .output = spec.output,
+        .error_text = spec.error_text,
+        .snapshot = snapshot,
+    });
 }
 
 fn truncateText(allocator: std.mem.Allocator, text: []const u8, max_chars: usize) ![]const u8 {
@@ -7486,6 +8098,50 @@ test "estimatePromptBudget reserves response headroom" {
     try testing.expectEqual(@as(usize, 1000), estimate.usable_prompt_tokens);
     try testing.expect(estimate.prompt_tokens > 0);
     try testing.expect(estimate.remaining_tokens < estimate.usable_prompt_tokens);
+}
+
+test "runtime run log stores structured events" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const root = try tmp.dir.realpathAlloc(scratch, ".");
+
+    const path = try std.fs.path.join(scratch, &.{ root, "run-log.json" });
+
+    try saveRuntimeRunLog(scratch, path, .{
+        .run_id = "run-1",
+        .command = "mission",
+        .created_at = "1",
+        .updated_at = "1",
+        .project_name = "Contubernium",
+        .provider = "ollama-native",
+        .model = "qwen2.5-coder:7b",
+        .approval_mode = "guarded",
+        .mission_prompt = "implement phase 1 logging",
+        .events = &.{},
+    });
+
+    try appendRuntimeRunLogEvent(scratch, path, .{
+        .timestamp = "2",
+        .iteration = 1,
+        .turn_id = "turn-1",
+        .actor = "decanus",
+        .lane = "command",
+        .action = "turn_started",
+        .status = "running",
+        .summary = "phase 1 logging",
+    });
+
+    const loaded = try loadRuntimeRunLog(scratch, path);
+    try testing.expectEqualStrings("run-1", loaded.run_id);
+    try testing.expectEqual(@as(usize, 1), loaded.events.len);
+    try testing.expectEqualStrings("turn_started", loaded.events[0].action);
+    try testing.expectEqualStrings("running", loaded.events[0].status);
+    try testing.expectEqualStrings("phase 1 logging", loaded.events[0].summary);
 }
 
 test "condenseHistoryForContext replaces older entries with a retained digest" {
