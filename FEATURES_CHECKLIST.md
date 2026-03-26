@@ -6,7 +6,7 @@ This checklist tracks implementation progress against [FEATURES.md](docs/FEATURE
 
 - [x] 1. Logging system
 - [x] 2. Error system
-- [ ] 3. State manager
+- [x] 3. State manager
 - [ ] 4. Basic agent loop (no agents yet)
 - [ ] 5. Tool execution layer
 - [ ] 6. Single agent (Decanus only)
@@ -39,9 +39,22 @@ Done:
 - [x] Included structured failure payloads in runtime log events so failures are inspectable beyond plain text
 
 Still to do later:
-- [ ] Phase 3: audit and refine canonical state-manager ownership against `state.json`
 - [ ] Phase 4: isolate and confirm the basic agent loop independently from specialist behavior
 - [ ] Phase 5: tighten the tool execution layer around typed mediation and validation
 - [ ] Phase 6: constrain execution to Decanus-only behavior where later-phase logic currently reaches beyond that target
 - [ ] Phase 7: hook the external memory layers fully into the runtime flow
 - [ ] Phase 8: refine the TUI only after the underlying runtime stack is confirmed
+
+## Phase 3: State manager
+
+Reference:
+- [FEATURES.md](docs/FEATURES.md) section `1.3 State Manager`
+- [FEATURES.md](docs/FEATURES.md) section `3.1 state.json (volatile)`
+- [PHASE_HANDOFF.md](PHASE_HANDOFF.md) section `Architectural Decisions Already Made`
+
+Done:
+- [x] Centralized mission, turn, approval, invocation, blocking, and completion transitions behind a dedicated runtime state-manager layer in `src/main.zig`
+- [x] Kept `.contubernium/state.json` as the canonical runtime state file while making the state shape explicit for mission, current actor, loop state, runtime session, and intermediate results
+- [x] Added canonical `agent_loop.intermediate_results` tracking without regressing existing `last_tool_result` and history compatibility surfaces
+- [x] Preserved phase-1 structured logs and phase-2 structured failures while routing blocked and completion paths through the state manager
+- [x] Added focused tests for reset, approval, blocked, invocation, and intermediate-result transitions

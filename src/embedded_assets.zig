@@ -24,6 +24,7 @@ pub const state_json =
     \\    },
     \\    "last_decision": "",
     \\    "last_tool_result": "",
+    \\    "intermediate_results": [],
     \\    "history": []
     \\  },
     \\  "runtime_session": {

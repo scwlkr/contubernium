@@ -132,6 +132,7 @@ const AgentLoop = struct {
     last_step: LoopStep = .{},
     last_decision: []const u8 = "",
     last_tool_result: []const u8 = "",
+    intermediate_results: []const IntermediateResult = &.{},
     history: []const HistoryEntry = &.{},
 };
 
@@ -198,6 +199,14 @@ const HistoryEntry = struct {
     summary: []const u8 = "",
     artifacts: []const []const u8 = &.{},
     timestamp: []const u8 = "",
+};
+
+const IntermediateResult = struct {
+    iteration: usize = 0,
+    actor: Actor = .decanus,
+    lane: Lane = .command,
+    kind: []const u8 = "",
+    summary: []const u8 = "",
 };
 
 const AgentTool = struct {
@@ -319,6 +328,289 @@ const PromptBudgetEstimate = struct {
     should_warn: bool,
     should_condense: bool,
     exhausted: bool,
+};
+
+const StateManager = struct {
+    state: *AppState,
+
+    fn init(state: *AppState) StateManager {
+        return .{ .state = state };
+    }
+
+    fn clearFailure(self: StateManager) void {
+        self.state.runtime_session.last_error = "";
+        self.state.runtime_session.last_failure = .{};
+    }
+
+    fn recordFailure(self: StateManager, failure: RuntimeFailure) void {
+        self.state.runtime_session.last_error = failure.message;
+        self.state.runtime_session.last_failure = failure;
+    }
+
+    fn resetForMission(self: StateManager, mission_prompt: []const u8) void {
+        self.state.global_status = .planning;
+        self.state.current_actor = .decanus;
+        self.state.mission.initial_prompt = mission_prompt;
+        self.state.mission.current_goal = mission_prompt;
+        self.state.mission.success_criteria = &.{};
+        self.state.mission.constraints = &.{};
+        self.state.mission.final_response = "";
+        self.state.agent_loop = .{};
+        self.state.agent_loop.last_step = .{
+            .iteration = 0,
+            .kind = .think,
+            .actor = .decanus,
+            .lane = .command,
+            .summary = "mission initialized",
+        };
+        self.state.runtime_session = .{};
+        self.state.tasks = .{};
+        ensureLoopBudget(self.state);
+    }
+
+    fn initializeRuntimeSession(self: StateManager, config: AppConfig) void {
+        ensureLoopBudget(self.state);
+        self.state.runtime_session.provider = config.provider.type;
+        self.state.runtime_session.model = config.provider.model;
+        self.state.runtime_session.endpoint = config.provider.base_url;
+        self.state.runtime_session.approval_mode = config.policy.approval_mode;
+        self.state.runtime_session.context_budget.context_window_tokens = config.context.estimated_context_window_tokens;
+        self.state.runtime_session.context_budget.response_reserve_tokens = config.context.response_reserve_tokens;
+        if (self.state.runtime_session.context_budget.estimated_prompt_tokens == 0) {
+            self.state.runtime_session.context_budget.remaining_tokens = usablePromptTokenWindow(config.context);
+            self.state.runtime_session.context_budget.used_percent = 0;
+        }
+        if (self.state.runtime_session.status == .idle) {
+            self.state.runtime_session.status = .ready;
+        }
+    }
+
+    fn beginTurn(self: StateManager, allocator: std.mem.Allocator, config: AppConfig) !void {
+        self.state.agent_loop.iteration += 1;
+        self.state.runtime_session.status = .running;
+        self.clearFailure();
+        self.state.runtime_session.provider = config.provider.type;
+        self.state.runtime_session.model = config.provider.model;
+        self.state.runtime_session.endpoint = config.provider.base_url;
+        self.state.runtime_session.approval_mode = config.policy.approval_mode;
+        self.state.runtime_session.last_actor = self.state.current_actor;
+        self.state.runtime_session.current_turn_id = try makeTurnId(
+            allocator,
+            actorName(self.state.current_actor),
+            self.state.agent_loop.iteration,
+        );
+    }
+
+    fn beginCommanderThinking(self: StateManager) void {
+        self.state.global_status = .planning;
+        self.state.agent_loop.status = .thinking;
+        setLoopStep(
+            self.state,
+            .think,
+            .decanus,
+            .command,
+            if (self.state.mission.current_goal.len > 0) self.state.mission.current_goal else self.state.mission.initial_prompt,
+        );
+    }
+
+    fn beginSpecialistExecution(self: StateManager, actor: Actor, lane: Lane, objective: []const u8) void {
+        const task = taskForLane(self.state, lane);
+        task.invocation.status = .running;
+        self.state.global_status = .waiting_on_tool;
+        self.state.agent_loop.status = .running_tool;
+        setLoopStep(self.state, .execute, actor, lane, objective);
+    }
+
+    fn markBlocked(self: StateManager, actor: Actor, lane: Lane, summary: []const u8) void {
+        self.state.global_status = .waiting_on_tool;
+        self.state.agent_loop.status = .blocked;
+        self.state.runtime_session.status = .blocked;
+        setLoopStep(self.state, .blocked, actor, lane, summary);
+    }
+
+    fn markMissionComplete(self: StateManager, actor: Actor, lane: Lane, final_response: []const u8) void {
+        self.state.mission.final_response = final_response;
+        self.state.global_status = .complete;
+        self.state.agent_loop.status = .complete;
+        self.state.runtime_session.status = .complete;
+        setLoopStep(self.state, .finish, actor, lane, final_response);
+    }
+
+    fn markInterrupted(self: StateManager) void {
+        self.state.global_status = .interrupted;
+        self.state.agent_loop.status = .interrupted;
+        self.state.runtime_session.status = .interrupted;
+        self.recordFailure(buildRuntimeFailure(
+            self.state,
+            self.state.current_actor,
+            laneForActor(self.state.current_actor),
+            "LOOP_INTERRUPTED",
+            "operator interrupted the active loop",
+            .{},
+        ));
+        setLoopStep(
+            self.state,
+            .blocked,
+            self.state.current_actor,
+            laneForActor(self.state.current_actor),
+            self.state.runtime_session.last_error,
+        );
+    }
+
+    fn setCurrentGoal(self: StateManager, goal: []const u8) void {
+        if (goal.len == 0) return;
+        self.state.mission.current_goal = goal;
+    }
+
+    fn setLastDecision(self: StateManager, decision: []const u8) void {
+        self.state.agent_loop.last_decision = decision;
+    }
+
+    fn recordToolResult(self: StateManager, summary: []const u8) void {
+        self.state.agent_loop.last_tool_result = summary;
+    }
+
+    fn appendIntermediateResult(
+        self: StateManager,
+        allocator: std.mem.Allocator,
+        kind: []const u8,
+        actor: Actor,
+        lane: Lane,
+        summary: []const u8,
+    ) !void {
+        var results: std.ArrayList(IntermediateResult) = .empty;
+        const previous = self.state.agent_loop.intermediate_results;
+        try results.appendSlice(allocator, previous);
+        try results.append(allocator, .{
+            .iteration = self.state.agent_loop.iteration,
+            .actor = actor,
+            .lane = lane,
+            .kind = kind,
+            .summary = summary,
+        });
+        self.state.agent_loop.intermediate_results = try results.toOwnedSlice(allocator);
+        if (previous.len > 0) allocator.free(previous);
+    }
+
+    fn beginApprovalRequest(
+        self: StateManager,
+        actor: Actor,
+        lane: Lane,
+        tool_name: []const u8,
+        detail: []const u8,
+        reason: []const u8,
+        target: []const u8,
+    ) void {
+        self.state.runtime_session.active_approval = .{
+            .status = .pending,
+            .kind = protocol.approvalKindForToolName(tool_name),
+            .requested_by = actor,
+            .lane = lane,
+            .tool_name = tool_name,
+            .detail = detail,
+            .reason = reason,
+            .target = target,
+        };
+        self.state.runtime_session.status = .awaiting_approval;
+        setLoopStep(self.state, .wait_for_approval, actor, lane, tool_name);
+    }
+
+    fn resolveApprovalRequest(self: StateManager, approved: bool) void {
+        self.state.runtime_session.active_approval.status = if (approved) .approved else .denied;
+        if (self.state.runtime_session.status == .awaiting_approval) {
+            self.state.runtime_session.status = .running;
+        }
+    }
+
+    fn prepareInvocation(
+        self: StateManager,
+        lane: Lane,
+        actor: Actor,
+        objective: []const u8,
+        completion_signal: []const u8,
+        dependencies: []const []const u8,
+    ) void {
+        const task = taskForLane(self.state, lane);
+        task.status = .in_progress;
+        task.description = objective;
+        task.invocation = .{
+            .status = .ready,
+            .requested_by = .decanus,
+            .target = actor,
+            .lane = lane,
+            .iteration = self.state.agent_loop.iteration,
+            .objective = objective,
+            .completion_signal = completion_signal,
+            .context = .{
+                .project = self.state.project_name,
+                .constraints = self.state.mission.constraints,
+                .dependencies = dependencies,
+            },
+            .scope = .{
+                .allowed_actions = protocol.allowedActionsForActor(actor),
+                .restricted_actions = protocol.restrictedActionsForActor(actor),
+            },
+            .memory = .{
+                .mission = if (self.state.mission.current_goal.len > 0) self.state.mission.current_goal else self.state.mission.initial_prompt,
+                .project = self.state.agent_loop.last_tool_result,
+                .relevant = dependencies,
+            },
+            .return_to = .decanus,
+        };
+        self.state.current_actor = actor;
+        self.state.global_status = .waiting_on_tool;
+        self.state.agent_loop.status = .running_tool;
+        self.state.agent_loop.active_tool = actor;
+        setLoopStep(self.state, .invoke, .decanus, lane, objective);
+    }
+
+    fn finalizeInvocation(
+        self: StateManager,
+        lane: Lane,
+        actor: Actor,
+        result: InvocationResult,
+        description: []const u8,
+    ) void {
+        const task = taskForLane(self.state, lane);
+        task.status = if (result.status == .blocked) .blocked else .complete;
+        task.description = if (description.len > 0) description else result.summary;
+        task.artifacts = result.changes;
+        task.invocation.result = result;
+        task.invocation.status = protocol.invocationStatusForResult(result.status);
+        self.state.current_actor = .decanus;
+        self.state.global_status = if (result.status == .blocked) .waiting_on_tool else .planning;
+        self.state.agent_loop.status = if (result.status == .blocked) .blocked else .thinking;
+        self.state.agent_loop.active_tool = null;
+        self.state.agent_loop.last_tool_result = result.summary;
+        self.state.runtime_session.status = if (result.status == .blocked) .blocked else .idle;
+        setLoopStep(self.state, if (result.status == .blocked) .blocked else .result, actor, lane, result.summary);
+    }
+
+    fn applyPromptBudgetEstimate(self: StateManager, config: ContextConfig, estimate: PromptBudgetEstimate) void {
+        self.state.runtime_session.context_budget.estimated_prompt_chars = estimate.prompt_chars;
+        self.state.runtime_session.context_budget.estimated_prompt_tokens = estimate.prompt_tokens;
+        self.state.runtime_session.context_budget.context_window_tokens = config.estimated_context_window_tokens;
+        self.state.runtime_session.context_budget.response_reserve_tokens = config.response_reserve_tokens;
+        self.state.runtime_session.context_budget.remaining_tokens = estimate.remaining_tokens;
+        self.state.runtime_session.context_budget.used_percent = estimate.used_percent;
+    }
+
+    fn noteHealthCheck(self: StateManager, now: []const u8, config: AppConfig) void {
+        self.state.runtime_session.last_health_check = now;
+        self.state.runtime_session.provider = config.provider.type;
+        self.state.runtime_session.model = config.provider.model;
+        self.state.runtime_session.endpoint = config.provider.base_url;
+        self.state.runtime_session.approval_mode = config.policy.approval_mode;
+        self.clearFailure();
+    }
+
+    fn setActiveLogPath(self: StateManager, path: []const u8) void {
+        self.state.runtime_session.active_log_path = path;
+    }
+
+    fn setRepairAttempts(self: StateManager, attempts: usize) void {
+        self.state.runtime_session.repair_attempts = attempts;
+    }
 };
 
 const ToolExecutionOutcome = struct {
@@ -3099,14 +3391,16 @@ fn buildRuntimeFailure(
     };
 }
 
+fn stateManager(state: *AppState) StateManager {
+    return StateManager.init(state);
+}
+
 fn recordRuntimeFailure(state: *AppState, failure: RuntimeFailure) void {
-    state.runtime_session.last_error = failure.message;
-    state.runtime_session.last_failure = failure;
+    stateManager(state).recordFailure(failure);
 }
 
 fn clearRuntimeFailure(state: *AppState) void {
-    state.runtime_session.last_error = "";
-    state.runtime_session.last_failure = .{};
+    stateManager(state).clearFailure();
 }
 
 fn currentLaneForState(state: AppState) []const u8 {
@@ -3186,18 +3480,7 @@ fn emitStateSnapshot(hooks: RuntimeHooks, config: AppConfig, state: AppState) vo
 }
 
 fn markInterrupted(state: *AppState) void {
-    state.global_status = .interrupted;
-    state.agent_loop.status = .interrupted;
-    state.runtime_session.status = .interrupted;
-    recordRuntimeFailure(state, buildRuntimeFailure(
-        state,
-        state.current_actor,
-        laneForActor(state.current_actor),
-        "LOOP_INTERRUPTED",
-        "operator interrupted the active loop",
-        .{},
-    ));
-    setLoopStep(state, .blocked, state.current_actor, laneForActor(state.current_actor), state.runtime_session.last_error);
+    stateManager(state).markInterrupted();
 }
 
 fn friendlyRuntimeError(allocator: std.mem.Allocator, err: anyerror) ![]const u8 {
@@ -3274,9 +3557,6 @@ fn runLoop(allocator: std.mem.Allocator, config: AppConfig, state: *AppState, ho
         }
     }
 
-    state.global_status = .waiting_on_tool;
-    state.agent_loop.status = .blocked;
-    state.runtime_session.status = .blocked;
     const loop_limit_message = try progressDocumentationText(
         allocator,
         state,
@@ -3292,6 +3572,7 @@ fn runLoop(allocator: std.mem.Allocator, config: AppConfig, state: *AppState, ho
         .{},
     );
     recordRuntimeFailure(state, loop_limit_failure);
+    stateManager(state).markBlocked(state.current_actor, laneForActor(state.current_actor), state.runtime_session.last_error);
     try appendHistory(allocator, state, .{
         .iteration = state.agent_loop.iteration,
         .type = "loop_limit_reached",
@@ -3338,15 +3619,7 @@ fn executeStep(allocator: std.mem.Allocator, config: AppConfig, state: *AppState
         return .blocked;
     }
 
-    state.agent_loop.iteration += 1;
-    state.runtime_session.status = .running;
-    clearRuntimeFailure(state);
-    state.runtime_session.provider = config.provider.type;
-    state.runtime_session.model = config.provider.model;
-    state.runtime_session.endpoint = config.provider.base_url;
-    state.runtime_session.approval_mode = config.policy.approval_mode;
-    state.runtime_session.last_actor = state.current_actor;
-    state.runtime_session.current_turn_id = try makeTurnId(allocator, actorName(state.current_actor), state.agent_loop.iteration);
+    try stateManager(state).beginTurn(allocator, config);
     emitStateSnapshot(hooks, config, state.*);
 
     if (state.current_actor == .decanus) {
@@ -3356,9 +3629,7 @@ fn executeStep(allocator: std.mem.Allocator, config: AppConfig, state: *AppState
 }
 
 fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *AppState, hooks: RuntimeHooks) !StepOutcome {
-    state.global_status = .planning;
-    state.agent_loop.status = .thinking;
-    setLoopStep(state, .think, .decanus, .command, if (state.mission.current_goal.len > 0) state.mission.current_goal else state.mission.initial_prompt);
+    stateManager(state).beginCommanderThinking();
     emitStateSnapshot(hooks, config, state.*);
     try logRuntimeEvent(allocator, config, state, .{
         .actor = .decanus,
@@ -3426,9 +3697,8 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
         const failure = buildRuntimeFailure(state, .decanus, .command, "DECANUS_TURN_FAILED", message, .{
             .detail = @errorName(err),
         });
-        state.global_status = .waiting_on_tool;
-        state.runtime_session.status = .blocked;
         recordRuntimeFailure(state, failure);
+        stateManager(state).markBlocked(.decanus, .command, message);
         try logRuntimeEvent(allocator, config, state, .{
             .actor = .decanus,
             .lane = .command,
@@ -3462,10 +3732,8 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
     });
     emitStreamFinalize(hooks, "decanus", decision_summary, .summary);
 
-    if (decision.current_goal.len > 0) {
-        state.mission.current_goal = decision.current_goal;
-    }
-    state.agent_loop.last_decision = decision.action;
+    stateManager(state).setCurrentGoal(decision.current_goal);
+    stateManager(state).setLastDecision(decision.action);
     emitStateSnapshot(hooks, config, state.*);
 
     if (decision.tool_requests.len > 0 or eql(decision.action, "tool_request")) {
@@ -3478,7 +3746,8 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
             .plain,
         );
         const tool_result = try executeToolRequests(allocator, config, state, .decanus, .command, decision.tool_requests, hooks);
-        state.agent_loop.last_tool_result = tool_result.summary;
+        stateManager(state).recordToolResult(tool_result.summary);
+        try stateManager(state).appendIntermediateResult(allocator, "runtime_tool_result", .decanus, .command, tool_result.summary);
         try appendHistory(
             allocator,
             state,
@@ -3493,8 +3762,7 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
             },
         );
         if (tool_result.blocked) {
-            state.global_status = .waiting_on_tool;
-            state.runtime_session.status = .blocked;
+            stateManager(state).markBlocked(.decanus, .command, tool_result.summary);
             try logRuntimeEvent(allocator, config, state, .{
                 .actor = .decanus,
                 .lane = .command,
@@ -3528,11 +3796,7 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
     }
 
     if (eql(decision.action, "finish")) {
-        state.mission.final_response = decision.final_response;
-        state.global_status = .complete;
-        state.agent_loop.status = .complete;
-        state.runtime_session.status = .complete;
-        setLoopStep(state, .finish, .decanus, .command, decision.final_response);
+        stateManager(state).markMissionComplete(.decanus, .command, decision.final_response);
         try appendHistory(
             allocator,
             state,
@@ -3609,10 +3873,8 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
         const failure = buildRuntimeFailure(state, .decanus, .command, "USER_INPUT_REQUIRED", decision.question, .{
             .detail = "decanus requested user input",
         });
-        state.global_status = .waiting_on_tool;
-        state.runtime_session.status = .blocked;
         recordRuntimeFailure(state, failure);
-        setLoopStep(state, .blocked, .decanus, .command, decision.question);
+        stateManager(state).markBlocked(.decanus, .command, decision.question);
         try logRuntimeEvent(allocator, config, state, .{
             .actor = .decanus,
             .lane = .command,
@@ -3632,10 +3894,8 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
     const blocked_failure = buildRuntimeFailure(state, .decanus, .command, "DECANUS_BLOCKED", blocked_message, .{
         .detail = "decanus returned a blocked state",
     });
-    state.global_status = .waiting_on_tool;
-    state.runtime_session.status = .blocked;
     recordRuntimeFailure(state, blocked_failure);
-    setLoopStep(state, .blocked, .decanus, .command, state.runtime_session.last_error);
+    stateManager(state).markBlocked(.decanus, .command, state.runtime_session.last_error);
     try logRuntimeEvent(allocator, config, state, .{
         .actor = .decanus,
         .lane = .command,
@@ -3655,10 +3915,7 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
     const actor = state.current_actor;
     const lane = laneForActor(actor);
     var task = taskForLane(state, lane);
-    task.invocation.status = .running;
-    state.global_status = .waiting_on_tool;
-    state.agent_loop.status = .running_tool;
-    setLoopStep(state, .execute, actor, lane, task.invocation.objective);
+    stateManager(state).beginSpecialistExecution(actor, lane, task.invocation.objective);
     emitStateSnapshot(hooks, config, state.*);
     try logRuntimeEvent(allocator, config, state, .{
         .actor = actor,
@@ -3724,8 +3981,8 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
             .detail = @errorName(err),
         });
         task.invocation.status = .blocked;
-        state.runtime_session.status = .blocked;
         recordRuntimeFailure(state, failure);
+        stateManager(state).markBlocked(actor, lane, message);
         try logRuntimeEvent(allocator, config, state, .{
             .actor = actor,
             .lane = lane,
@@ -3769,10 +4026,11 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
             .plain,
         );
         const tool_result = try executeToolRequests(allocator, config, state, actor, lane, result.tool_requests, hooks);
-        state.agent_loop.last_tool_result = tool_result.summary;
+        stateManager(state).recordToolResult(tool_result.summary);
+        try stateManager(state).appendIntermediateResult(allocator, "runtime_tool_result", actor, lane, tool_result.summary);
         if (tool_result.blocked) {
             task.invocation.status = .blocked;
-            state.runtime_session.status = .blocked;
+            stateManager(state).markBlocked(actor, lane, tool_result.summary);
             try logRuntimeEvent(allocator, config, state, .{
                 .actor = actor,
                 .lane = lane,
@@ -3809,6 +4067,7 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
     if (eql(result.action, "complete") or eql(result.status, "complete") or eql(result.status, "partial")) {
         const invocation_result = try materializeInvocationResult(allocator, result, .complete);
         finalizeInvocation(state, lane, actor, invocation_result, result.description);
+        try stateManager(state).appendIntermediateResult(allocator, "invocation_result", actor, lane, invocation_result.summary);
         try appendHistory(
             allocator,
             state,
@@ -3843,6 +4102,7 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
         });
         finalizeInvocation(state, lane, actor, invocation_result, result.description);
         recordRuntimeFailure(state, failure);
+        stateManager(state).markBlocked(actor, lane, result.question);
         try logRuntimeEvent(allocator, config, state, .{
             .actor = actor,
             .lane = lane,
@@ -3865,6 +4125,7 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
     });
     finalizeInvocation(state, lane, actor, invocation_result, result.description);
     recordRuntimeFailure(state, blocked_failure);
+    stateManager(state).markBlocked(actor, lane, state.runtime_session.last_error);
     try logRuntimeEvent(allocator, config, state, .{
         .actor = actor,
         .lane = lane,
@@ -4125,8 +4386,8 @@ fn executeToolRequests(
                 .tool = tool_name,
                 .detail = "tool requested user input",
             });
-            state.runtime_session.status = .blocked;
             recordRuntimeFailure(state, failure);
+            stateManager(state).markBlocked(actor, lane, question);
             try summaries.append(allocator, try std.fmt.allocPrint(allocator, "ask_user {s}", .{question}));
             try logRuntimeEvent(allocator, config, state, .{
                 .actor = actor,
@@ -4222,7 +4483,7 @@ fn structuredChatWithRepair(
             emitStreamFinalize(hooks, actor, response.raw_text, .json);
             if (attempt >= max_retries) return err;
             attempt += 1;
-            state.runtime_session.repair_attempts = attempt;
+            stateManager(state).setRepairAttempts(attempt);
             emitLog(hooks, .warning, actor, "Repair Retry", state.runtime_session.last_error, .plain);
             repair_user_prompt = try std.fmt.allocPrint(
                 allocator,
@@ -4241,7 +4502,7 @@ fn structuredChatWithRepair(
             });
             continue;
         };
-        state.runtime_session.repair_attempts = attempt;
+        stateManager(state).setRepairAttempts(attempt);
         return .{ .value = parsed, .raw_text = response.raw_text };
     }
 }
@@ -4468,12 +4729,7 @@ fn runDoctorCheck(allocator: std.mem.Allocator) ![]const u8 {
     if (!eql(parsed.status, "ok")) return error.StructuredOutputFailed;
 
     const now = try unixTimestampString(allocator);
-    state.runtime_session.last_health_check = now;
-    state.runtime_session.provider = config.provider.type;
-    state.runtime_session.model = config.provider.model;
-    state.runtime_session.endpoint = config.provider.base_url;
-    state.runtime_session.approval_mode = config.policy.approval_mode;
-    clearRuntimeFailure(&state);
+    stateManager(&state).noteHealthCheck(now, config);
     try saveState(allocator, config.paths.state_file, state);
 
     return try std.fmt.allocPrint(
@@ -5168,49 +5424,21 @@ fn writeFile(path: []const u8, content: []const u8) !void {
 }
 
 fn resetStateForMission(state: *AppState, mission_prompt: []const u8) void {
-    state.global_status = .planning;
-    state.current_actor = .decanus;
-    state.mission.initial_prompt = mission_prompt;
-    state.mission.current_goal = mission_prompt;
-    state.mission.success_criteria = &.{};
-    state.mission.constraints = &.{};
-    state.mission.final_response = "";
-    state.agent_loop = .{};
-    state.agent_loop.last_step = .{
-        .iteration = 0,
-        .kind = .think,
-        .actor = .decanus,
-        .lane = .command,
-        .summary = "mission initialized",
-    };
-    state.runtime_session = .{};
-    state.tasks = .{};
-    ensureLoopBudget(state);
+    stateManager(state).resetForMission(mission_prompt);
 }
 
 fn initializeRuntimeSession(allocator: std.mem.Allocator, state: *AppState, config: AppConfig) void {
     _ = allocator;
-    ensureLoopBudget(state);
-    state.runtime_session.provider = config.provider.type;
-    state.runtime_session.model = config.provider.model;
-    state.runtime_session.endpoint = config.provider.base_url;
-    state.runtime_session.approval_mode = config.policy.approval_mode;
-    state.runtime_session.context_budget.context_window_tokens = config.context.estimated_context_window_tokens;
-    state.runtime_session.context_budget.response_reserve_tokens = config.context.response_reserve_tokens;
-    if (state.runtime_session.context_budget.estimated_prompt_tokens == 0) {
-        state.runtime_session.context_budget.remaining_tokens = usablePromptTokenWindow(config.context);
-        state.runtime_session.context_budget.used_percent = 0;
-    }
-    if (state.runtime_session.status == .idle) {
-        state.runtime_session.status = .ready;
-    }
+    stateManager(state).initializeRuntimeSession(config);
 }
 
 fn appendHistory(allocator: std.mem.Allocator, state: *AppState, entry: HistoryEntry) !void {
     var history: std.ArrayList(HistoryEntry) = .empty;
-    try history.appendSlice(allocator, state.agent_loop.history);
+    const previous = state.agent_loop.history;
+    try history.appendSlice(allocator, previous);
     try history.append(allocator, entry);
     state.agent_loop.history = try history.toOwnedSlice(allocator);
+    if (previous.len > 0) allocator.free(previous);
 }
 
 fn taskForLane(state: *AppState, lane: Lane) *TaskLane {
@@ -5270,25 +5498,11 @@ fn beginApprovalRequest(
     reason: []const u8,
     target: []const u8,
 ) void {
-    state.runtime_session.active_approval = .{
-        .status = .pending,
-        .kind = protocol.approvalKindForToolName(tool_name),
-        .requested_by = actor,
-        .lane = lane,
-        .tool_name = tool_name,
-        .detail = detail,
-        .reason = reason,
-        .target = target,
-    };
-    state.runtime_session.status = .awaiting_approval;
-    setLoopStep(state, .wait_for_approval, actor, lane, tool_name);
+    stateManager(state).beginApprovalRequest(actor, lane, tool_name, detail, reason, target);
 }
 
 fn resolveApprovalRequest(state: *AppState, approved: bool) void {
-    state.runtime_session.active_approval.status = if (approved) .approved else .denied;
-    if (state.runtime_session.status == .awaiting_approval) {
-        state.runtime_session.status = .running;
-    }
+    stateManager(state).resolveApprovalRequest(approved);
 }
 
 fn singleItemSlice(allocator: std.mem.Allocator, value: []const u8) ![]const []const u8 {
@@ -5351,38 +5565,7 @@ fn prepareInvocation(
     completion_signal: []const u8,
     dependencies: []const []const u8,
 ) void {
-    const task = taskForLane(state, lane);
-    task.status = .in_progress;
-    task.description = objective;
-    task.invocation = .{
-        .status = .ready,
-        .requested_by = .decanus,
-        .target = actor,
-        .lane = lane,
-        .iteration = state.agent_loop.iteration,
-        .objective = objective,
-        .completion_signal = completion_signal,
-        .context = .{
-            .project = state.project_name,
-            .constraints = state.mission.constraints,
-            .dependencies = dependencies,
-        },
-        .scope = .{
-            .allowed_actions = protocol.allowedActionsForActor(actor),
-            .restricted_actions = protocol.restrictedActionsForActor(actor),
-        },
-        .memory = .{
-            .mission = if (state.mission.current_goal.len > 0) state.mission.current_goal else state.mission.initial_prompt,
-            .project = state.agent_loop.last_tool_result,
-            .relevant = dependencies,
-        },
-        .return_to = .decanus,
-    };
-    state.current_actor = actor;
-    state.global_status = .waiting_on_tool;
-    state.agent_loop.status = .running_tool;
-    state.agent_loop.active_tool = actor;
-    setLoopStep(state, .invoke, .decanus, lane, objective);
+    stateManager(state).prepareInvocation(lane, actor, objective, completion_signal, dependencies);
 }
 
 fn finalizeInvocation(
@@ -5392,19 +5575,7 @@ fn finalizeInvocation(
     result: InvocationResult,
     description: []const u8,
 ) void {
-    const task = taskForLane(state, lane);
-    task.status = if (result.status == .blocked) .blocked else .complete;
-    task.description = if (description.len > 0) description else result.summary;
-    task.artifacts = result.changes;
-    task.invocation.result = result;
-    task.invocation.status = protocol.invocationStatusForResult(result.status);
-    state.current_actor = .decanus;
-    state.global_status = if (result.status == .blocked) .waiting_on_tool else .planning;
-    state.agent_loop.status = if (result.status == .blocked) .blocked else .thinking;
-    state.agent_loop.active_tool = null;
-    state.agent_loop.last_tool_result = result.summary;
-    state.runtime_session.status = if (result.status == .blocked) .blocked else .idle;
-    setLoopStep(state, if (result.status == .blocked) .blocked else .result, actor, lane, result.summary);
+    stateManager(state).finalizeInvocation(lane, actor, result, description);
 }
 
 fn taskSummaryText(allocator: std.mem.Allocator, tasks: Tasks) ![]const u8 {
@@ -5466,12 +5637,7 @@ fn estimatePromptBudget(config: ContextConfig, system_prompt: []const u8, user_p
 }
 
 fn applyPromptBudgetEstimate(state: *AppState, config: ContextConfig, estimate: PromptBudgetEstimate) void {
-    state.runtime_session.context_budget.estimated_prompt_chars = estimate.prompt_chars;
-    state.runtime_session.context_budget.estimated_prompt_tokens = estimate.prompt_tokens;
-    state.runtime_session.context_budget.context_window_tokens = config.estimated_context_window_tokens;
-    state.runtime_session.context_budget.response_reserve_tokens = config.response_reserve_tokens;
-    state.runtime_session.context_budget.remaining_tokens = estimate.remaining_tokens;
-    state.runtime_session.context_budget.used_percent = estimate.used_percent;
+    stateManager(state).applyPromptBudgetEstimate(config, estimate);
 }
 
 fn buildCondensedHistorySummary(
@@ -5524,8 +5690,9 @@ fn condenseHistoryForContext(allocator: std.mem.Allocator, config: ContextConfig
     const keep_recent = @max(@as(usize, 1), config.condensed_keep_recent_events);
     if (state.agent_loop.history.len <= keep_recent + 1) return false;
 
-    const split_index = state.agent_loop.history.len - keep_recent;
-    const older = state.agent_loop.history[0..split_index];
+    const previous = state.agent_loop.history;
+    const split_index = previous.len - keep_recent;
+    const older = previous[0..split_index];
     const summary = try buildCondensedHistorySummary(allocator, older, config.max_condensed_summary_chars);
 
     var history: std.ArrayList(HistoryEntry) = .empty;
@@ -5538,8 +5705,9 @@ fn condenseHistoryForContext(allocator: std.mem.Allocator, config: ContextConfig
         .artifacts = &.{},
         .timestamp = try unixTimestampString(allocator),
     });
-    try history.appendSlice(allocator, state.agent_loop.history[split_index..]);
+    try history.appendSlice(allocator, previous[split_index..]);
     state.agent_loop.history = try history.toOwnedSlice(allocator);
+    allocator.free(previous);
     state.runtime_session.context_budget.condensation_count += 1;
     state.runtime_session.context_budget.condensed_history_events += older.len;
     state.runtime_session.context_budget.last_condensed_iteration = state.agent_loop.iteration;
@@ -5598,11 +5766,9 @@ fn blockForContextLimit(
         ),
         config.context.max_stop_summary_chars,
     );
-    state.global_status = .waiting_on_tool;
-    state.agent_loop.status = .blocked;
-    state.runtime_session.status = .blocked;
     const failure = buildRuntimeFailure(state, state.current_actor, laneForActor(state.current_actor), "CONTEXT_BUDGET_EXCEEDED", message, .{});
     recordRuntimeFailure(state, failure);
+    stateManager(state).markBlocked(state.current_actor, laneForActor(state.current_actor), message);
     try appendHistory(allocator, state, .{
         .iteration = state.agent_loop.iteration,
         .type = "context_budget_blocked",
@@ -5695,8 +5861,8 @@ fn buildPromptWithContextBudget(
 }
 
 fn blockedToolOutcome(allocator: std.mem.Allocator, state: *AppState, failure: RuntimeFailure) !ToolExecutionOutcome {
-    state.runtime_session.status = .blocked;
     recordRuntimeFailure(state, failure);
+    stateManager(state).markBlocked(state.current_actor, laneForActor(state.current_actor), failure.message);
     return .{
         .blocked = true,
         .summary = try std.fmt.allocPrint(allocator, "blocked: {s}", .{failure.message}),
@@ -5882,7 +6048,7 @@ fn initializeRuntimeRunLog(
     command: []const u8,
 ) !void {
     const run_id = try makeRunId(allocator);
-    state.runtime_session.active_log_path = try logPathForRun(allocator, config.paths.logs_dir, run_id);
+    stateManager(state).setActiveLogPath(try logPathForRun(allocator, config.paths.logs_dir, run_id));
 
     const timestamp = try unixTimestampString(allocator);
     const log = RuntimeRunLog{
@@ -8276,6 +8442,123 @@ test "initializeRuntimeSession upgrades the legacy loop budget and seeds context
     try testing.expectEqual(@as(usize, default_context_window_tokens), state.runtime_session.context_budget.context_window_tokens);
     try testing.expectEqual(@as(usize, default_response_reserve_tokens), state.runtime_session.context_budget.response_reserve_tokens);
     try testing.expectEqual(@as(usize, default_context_window_tokens - default_response_reserve_tokens), state.runtime_session.context_budget.remaining_tokens);
+}
+
+test "resetStateForMission resets canonical phase 3 state surfaces" {
+    const testing = std.testing;
+    var state = AppState{};
+    state.current_actor = .artifex;
+    state.global_status = .waiting_on_tool;
+    state.mission.final_response = "stale response";
+    state.agent_loop.iteration = 9;
+    state.agent_loop.last_tool_result = "stale";
+    state.agent_loop.intermediate_results = &.{
+        .{
+            .iteration = 1,
+            .actor = .decanus,
+            .lane = .command,
+            .kind = "runtime_tool_result",
+            .summary = "stale intermediate result",
+        },
+    };
+    state.runtime_session.status = .blocked;
+    state.tasks.backend.status = .complete;
+
+    resetStateForMission(&state, "implement phase 3");
+
+    try testing.expectEqual(GlobalStatus.planning, state.global_status);
+    try testing.expectEqual(Actor.decanus, state.current_actor);
+    try testing.expectEqualStrings("implement phase 3", state.mission.initial_prompt);
+    try testing.expectEqualStrings("implement phase 3", state.mission.current_goal);
+    try testing.expectEqualStrings("", state.mission.final_response);
+    try testing.expectEqual(LoopStatus.awaiting_initial_prompt, state.agent_loop.status);
+    try testing.expectEqual(@as(usize, 0), state.agent_loop.iteration);
+    try testing.expectEqual(@as(usize, 0), state.agent_loop.intermediate_results.len);
+    try testing.expectEqual(RuntimeStatus.idle, state.runtime_session.status);
+    try testing.expectEqual(TaskStatus.pending, state.tasks.backend.status);
+}
+
+test "approval transitions update canonical state ownership" {
+    const testing = std.testing;
+    var state = AppState{};
+
+    beginApprovalRequest(&state, .decanus, .command, "run_command", "zig build test", "zig build test", "zig build test");
+    try testing.expectEqual(RuntimeStatus.awaiting_approval, state.runtime_session.status);
+    try testing.expectEqual(ApprovalStatus.pending, state.runtime_session.active_approval.status);
+    try testing.expectEqual(ApprovalKind.shell, state.runtime_session.active_approval.kind);
+    try testing.expectEqual(LoopStepKind.wait_for_approval, state.agent_loop.last_step.kind);
+
+    resolveApprovalRequest(&state, true);
+    try testing.expectEqual(ApprovalStatus.approved, state.runtime_session.active_approval.status);
+    try testing.expectEqual(RuntimeStatus.running, state.runtime_session.status);
+}
+
+test "blocked transition keeps loop and runtime state aligned" {
+    const testing = std.testing;
+    var state = AppState{};
+    state.current_actor = .decanus;
+
+    stateManager(&state).markBlocked(.decanus, .command, "waiting on operator");
+
+    try testing.expectEqual(GlobalStatus.waiting_on_tool, state.global_status);
+    try testing.expectEqual(LoopStatus.blocked, state.agent_loop.status);
+    try testing.expectEqual(RuntimeStatus.blocked, state.runtime_session.status);
+    try testing.expectEqual(LoopStepKind.blocked, state.agent_loop.last_step.kind);
+    try testing.expectEqualStrings("waiting on operator", state.agent_loop.last_step.summary);
+}
+
+test "invocation transitions keep state manager surfaces aligned" {
+    const testing = std.testing;
+    var state = AppState{};
+    state.project_name = "Contubernium";
+    state.agent_loop.iteration = 3;
+    state.mission.initial_prompt = "ship phase 3";
+    state.mission.current_goal = "centralize state transitions";
+    state.mission.constraints = &.{"keep compatibility"};
+    state.agent_loop.last_tool_result = "read_file src/main.zig";
+
+    prepareInvocation(&state, .backend, .faber, "implement state helpers", "return structured result", &.{"src/main.zig"});
+
+    try testing.expectEqual(Actor.faber, state.current_actor);
+    try testing.expectEqual(GlobalStatus.waiting_on_tool, state.global_status);
+    try testing.expectEqual(LoopStatus.running_tool, state.agent_loop.status);
+    try testing.expectEqual(Actor.faber, state.agent_loop.active_tool.?);
+    try testing.expectEqual(TaskStatus.in_progress, state.tasks.backend.status);
+    try testing.expectEqual(InvocationStatus.ready, state.tasks.backend.invocation.status);
+    try testing.expectEqualStrings("centralize state transitions", state.tasks.backend.invocation.memory.mission);
+    try testing.expectEqualStrings("read_file src/main.zig", state.tasks.backend.invocation.memory.project);
+
+    finalizeInvocation(&state, .backend, .faber, .{
+        .status = .complete,
+        .summary = "implemented state helpers",
+        .changes = &.{"src/main.zig"},
+    }, "");
+
+    try testing.expectEqual(Actor.decanus, state.current_actor);
+    try testing.expectEqual(GlobalStatus.planning, state.global_status);
+    try testing.expectEqual(LoopStatus.thinking, state.agent_loop.status);
+    try testing.expect(state.agent_loop.active_tool == null);
+    try testing.expectEqual(RuntimeStatus.idle, state.runtime_session.status);
+    try testing.expectEqual(TaskStatus.complete, state.tasks.backend.status);
+    try testing.expectEqual(InvocationStatus.complete, state.tasks.backend.invocation.status);
+    try testing.expectEqualStrings("implemented state helpers", state.agent_loop.last_tool_result);
+}
+
+test "intermediate results are recorded canonically in state" {
+    const testing = std.testing;
+    var state = AppState{};
+    state.agent_loop.iteration = 4;
+    defer if (state.agent_loop.intermediate_results.len > 0) testing.allocator.free(state.agent_loop.intermediate_results);
+
+    try stateManager(&state).appendIntermediateResult(testing.allocator, "runtime_tool_result", .decanus, .command, "read_file docs/FEATURES.md");
+    try stateManager(&state).appendIntermediateResult(testing.allocator, "invocation_result", .faber, .backend, "state manager complete");
+
+    try testing.expectEqual(@as(usize, 2), state.agent_loop.intermediate_results.len);
+    try testing.expectEqualStrings("runtime_tool_result", state.agent_loop.intermediate_results[0].kind);
+    try testing.expectEqualStrings("read_file docs/FEATURES.md", state.agent_loop.intermediate_results[0].summary);
+    try testing.expectEqual(Actor.faber, state.agent_loop.intermediate_results[1].actor);
+    try testing.expectEqual(Lane.backend, state.agent_loop.intermediate_results[1].lane);
+    try testing.expectEqualStrings("state manager complete", state.agent_loop.intermediate_results[1].summary);
 }
 
 test "estimatePromptBudget reserves response headroom" {
