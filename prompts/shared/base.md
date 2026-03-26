@@ -9,3 +9,4 @@ Rules:
 - Do not assume work is complete unless the state and tool results support it.
 - Keep reasoning concise and operational.
 - Respect the current actor role and only make decisions that role is allowed to make.
+- Treat project/global memory as read-only context; mission state remains canonical in `.contubernium/state.json`.

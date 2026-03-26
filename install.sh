@@ -3,6 +3,7 @@ set -euo pipefail
 
 DEFAULT_REPO_URL="https://github.com/scwlkr/contubernium.git"
 DEFAULT_REPO_REF="main"
+CONTUBERNIUM_HOME="${CONTUBERNIUM_HOME:-$HOME/.contubernium}"
 
 require_command() {
     local command_name="$1"
@@ -76,13 +77,12 @@ is_repo_root() {
 }
 
 prepare_managed_source() {
-    local install_root="${CONTUBERNIUM_INSTALL_ROOT:-$HOME/.local/share/contubernium}"
-    local source_dir="$install_root/source"
+    local source_dir="$CONTUBERNIUM_HOME/source"
     local repo_url="${CONTUBERNIUM_REPO_URL:-$DEFAULT_REPO_URL}"
     local repo_ref="${CONTUBERNIUM_REF:-$DEFAULT_REPO_REF}"
 
     require_command git
-    mkdir -p "$install_root"
+    mkdir -p "$CONTUBERNIUM_HOME"
 
     if [[ -d "$source_dir/.git" ]]; then
         echo "Updating managed source checkout in $source_dir" >&2
@@ -126,6 +126,36 @@ pick_source_dir() {
     prepare_managed_source
 }
 
+copy_tree() {
+    local source_dir="$1"
+    local target_dir="$2"
+    mkdir -p "$target_dir"
+    cp -R "$source_dir/." "$target_dir/"
+}
+
+install_global_assets() {
+    local source_dir="$1"
+    local home_dir="$2"
+    local templates_dir="$home_dir/templates"
+
+    mkdir -p "$home_dir" "$templates_dir"
+    copy_tree "$source_dir/.agents" "$home_dir/agents"
+    copy_tree "$source_dir/prompts" "$home_dir/prompts"
+
+    install -m 0644 "$source_dir/templates/contubernium_state.template.json" "$templates_dir/state.json"
+    install -m 0644 "$source_dir/templates/contubernium.config.template.json" "$templates_dir/config.json"
+    install -m 0644 "$source_dir/templates/project.template.md" "$templates_dir/project.md"
+    install -m 0644 "$source_dir/templates/global.template.md" "$templates_dir/global.md"
+
+    if [[ ! -f "$home_dir/global.md" ]]; then
+        install -m 0644 "$source_dir/templates/global.template.md" "$home_dir/global.md"
+    fi
+
+    if [[ -d "$home_dir/agents/skills" ]]; then
+        rm -rf "$home_dir/agents/skills"
+    fi
+}
+
 INSTALL_DIR="$(pick_install_dir)"
 SOURCE_DIR="$(pick_source_dir)"
 
@@ -139,8 +169,10 @@ echo "Building Contubernium from $SOURCE_DIR"
 
 mkdir -p "$INSTALL_DIR"
 install -m 0755 "$SOURCE_DIR/zig-out/bin/contubernium" "$INSTALL_DIR/contubernium"
+install_global_assets "$SOURCE_DIR" "$CONTUBERNIUM_HOME"
 
 echo "Installed contubernium to $INSTALL_DIR/contubernium"
+echo "Installed Contubernium home to $CONTUBERNIUM_HOME"
 
 if path_contains "$INSTALL_DIR"; then
     echo "$INSTALL_DIR is already on PATH"
@@ -153,3 +185,8 @@ else
     fi
     echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
 fi
+
+echo "Next steps:"
+echo "  1. Start Ollama or your configured local backend."
+echo "  2. Run 'contubernium init' inside a project."
+echo "  3. Edit '.contubernium/config.json' for provider settings if needed."

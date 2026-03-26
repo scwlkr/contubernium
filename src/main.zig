@@ -5,16 +5,21 @@ const vaxis = @import("vaxis");
 
 const max_file_bytes = 16 * 1024 * 1024;
 const runtime_dir_name = ".contubernium";
+const agents_dir_name = ".agents";
 const default_state_path = ".contubernium/state.json";
 const default_config_path = ".contubernium/config.json";
 const default_prompts_dir = ".contubernium/prompts";
 const default_logs_dir = ".contubernium/logs";
+const default_project_memory_path = ".contubernium/project.md";
+const default_global_memory_path = ".contubernium/global.md";
 const max_list_files_entries = 400;
 const legacy_default_max_iterations = 12;
 const default_max_iterations = 24;
 const default_context_window_tokens = 32768;
 const default_response_reserve_tokens = 4096;
 const default_tool_timeout_ms = 120000;
+const default_max_project_memory_chars = 4000;
+const default_max_global_memory_chars = 4000;
 
 const Actor = protocol.Actor;
 const Lane = protocol.Lane;
@@ -47,6 +52,8 @@ const EmbeddedAsset = struct {
 const embedded_assets = [_]EmbeddedAsset{
     .{ .relative_path = "state.json", .content = embedded.state_json },
     .{ .relative_path = "config.json", .content = embedded.config_json },
+    .{ .relative_path = "project.md", .content = embedded.project_memory_md },
+    .{ .relative_path = "global.md", .content = embedded.global_memory_md },
     .{ .relative_path = "prompts/shared/base.md", .content = embedded.base_prompt },
     .{ .relative_path = "prompts/shared/tool-policy.md", .content = embedded.tool_policy_prompt },
     .{ .relative_path = "prompts/shared/decanus-schema.json", .content = embedded.decanus_schema },
@@ -86,6 +93,8 @@ const PathsConfig = struct {
     state_file: []const u8 = default_state_path,
     prompts_dir: []const u8 = default_prompts_dir,
     logs_dir: []const u8 = default_logs_dir,
+    project_memory_file: []const u8 = default_project_memory_path,
+    global_memory_file: []const u8 = default_global_memory_path,
 };
 
 const PolicyConfig = struct {
@@ -106,6 +115,8 @@ const ContextConfig = struct {
     max_file_read_bytes: usize = 12000,
     max_search_hits: usize = 20,
     max_tool_result_chars: usize = 6000,
+    max_project_memory_chars: usize = default_max_project_memory_chars,
+    max_global_memory_chars: usize = default_max_global_memory_chars,
     estimated_context_window_tokens: usize = default_context_window_tokens,
     response_reserve_tokens: usize = default_response_reserve_tokens,
     warn_at_percent: usize = 70,
@@ -367,6 +378,40 @@ const PromptBudgetEstimate = struct {
     should_warn: bool,
     should_condense: bool,
     exhausted: bool,
+};
+
+const RuntimeMemorySpec = struct {
+    kind: []const u8,
+    path: []const u8,
+    max_chars: usize,
+};
+
+const RuntimeMemoryLayer = struct {
+    kind: []const u8,
+    path: []const u8,
+    content: []const u8 = "",
+    source_chars: usize = 0,
+    truncated: bool = false,
+    owns_content: bool = false,
+
+    fn deinit(self: RuntimeMemoryLayer, allocator: std.mem.Allocator) void {
+        if (self.owns_content) allocator.free(self.content);
+    }
+};
+
+const RuntimeMemorySnapshot = struct {
+    project: RuntimeMemoryLayer,
+    global: RuntimeMemoryLayer,
+
+    fn deinit(self: RuntimeMemorySnapshot, allocator: std.mem.Allocator) void {
+        self.project.deinit(allocator);
+        self.global.deinit(allocator);
+    }
+};
+
+const PromptBuildResult = struct {
+    user_prompt: []const u8,
+    memory: RuntimeMemorySnapshot,
 };
 
 const StateManager = struct {
@@ -1335,7 +1380,7 @@ fn printUsage() !void {
         \\  contubernium resume
         \\  contubernium ui [--vaxis|--legacy]
         \\
-        \\`contubernium` scaffolds .contubernium in the current directory if needed
+        \\`contubernium` scaffolds .contubernium and .agents in the current directory if needed
         \\and starts the interactive UI.
         \\`contubernium init` only writes the runtime scaffold.
         \\
@@ -1344,7 +1389,7 @@ fn printUsage() !void {
 
 fn cmdInit(allocator: std.mem.Allocator) !void {
     try scaffoldProject(allocator);
-    try stdoutPrint("initialized project runtime in {s}\n", .{runtime_dir_name});
+    try stdoutPrint("initialized project runtime in {s} and {s}\n", .{ runtime_dir_name, agents_dir_name });
 }
 
 fn cmdDoctor(allocator: std.mem.Allocator) !void {
@@ -3908,10 +3953,19 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
         "decanus",
         "shared/decanus-schema.json",
     );
-    const user_prompt = buildPromptWithContextBudget(allocator, config, state, hooks, system_prompt, .decanus, "") catch |err| {
-        if (err == error.ContextBudgetExceeded) return .blocked;
+    const prompt_build = buildPromptWithContextBudget(allocator, config, state, hooks, system_prompt, .decanus, "") catch |err| {
+        if (err == error.ContextBudgetExceeded or err == error.MemoryLoadBlocked) return .blocked;
         return err;
     };
+    defer prompt_build.memory.deinit(allocator);
+    const user_prompt = prompt_build.user_prompt;
+    try logRuntimeEvent(allocator, config, state, .{
+        .actor = .decanus,
+        .lane = .command,
+        .action = "memory_layers_loaded",
+        .status = "success",
+        .summary = try summarizeRuntimeMemorySnapshot(allocator, prompt_build.memory),
+    });
     try logRuntimeEvent(allocator, config, state, .{
         .actor = .decanus,
         .lane = .command,
@@ -4130,10 +4184,19 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
 
     const schema_path = "shared/specialist-schema.json";
     const system_prompt = try assembleSystemPrompt(allocator, config.paths.prompts_dir, actorName(actor), schema_path);
-    const user_prompt = buildPromptWithContextBudget(allocator, config, state, hooks, system_prompt, .specialist, laneName(lane)) catch |err| {
-        if (err == error.ContextBudgetExceeded) return .blocked;
+    const prompt_build = buildPromptWithContextBudget(allocator, config, state, hooks, system_prompt, .specialist, laneName(lane)) catch |err| {
+        if (err == error.ContextBudgetExceeded or err == error.MemoryLoadBlocked) return .blocked;
         return err;
     };
+    defer prompt_build.memory.deinit(allocator);
+    const user_prompt = prompt_build.user_prompt;
+    try logRuntimeEvent(allocator, config, state, .{
+        .actor = actor,
+        .lane = lane,
+        .action = "memory_layers_loaded",
+        .status = "success",
+        .summary = try summarizeRuntimeMemorySnapshot(allocator, prompt_build.memory),
+    });
     try logRuntimeEvent(allocator, config, state, .{
         .actor = actor,
         .lane = lane,
@@ -4531,7 +4594,40 @@ fn structuredChatWithRepair(
     }
 }
 
-fn buildDecanusUserPrompt(allocator: std.mem.Allocator, config: AppConfig, state: *const AppState) ![]const u8 {
+fn runtimeMemoryStatusLabel(layer: RuntimeMemoryLayer) []const u8 {
+    if (layer.content.len == 0) return "empty";
+    if (layer.truncated) return "loaded_truncated";
+    return "loaded";
+}
+
+fn runtimeMemoryPromptText(layer: RuntimeMemoryLayer) []const u8 {
+    if (layer.content.len == 0) return "none captured";
+    return layer.content;
+}
+
+fn summarizeRuntimeMemorySnapshot(allocator: std.mem.Allocator, memory: RuntimeMemorySnapshot) ![]const u8 {
+    return try std.fmt.allocPrint(
+        allocator,
+        "project={s} status={s} source_chars={d} prompt_chars={d}\nglobal={s} status={s} source_chars={d} prompt_chars={d}",
+        .{
+            memory.project.path,
+            runtimeMemoryStatusLabel(memory.project),
+            memory.project.source_chars,
+            memory.project.content.len,
+            memory.global.path,
+            runtimeMemoryStatusLabel(memory.global),
+            memory.global.source_chars,
+            memory.global.content.len,
+        },
+    );
+}
+
+fn buildDecanusUserPrompt(
+    allocator: std.mem.Allocator,
+    config: AppConfig,
+    state: *const AppState,
+    memory: RuntimeMemorySnapshot,
+) ![]const u8 {
     const history = try recentHistoryText(allocator, state.agent_loop.history, config.context.max_history_events);
     const task_summary = try taskSummaryText(allocator, state.tasks);
     var buffer: std.ArrayList(u8) = .empty;
@@ -4550,6 +4646,20 @@ fn buildDecanusUserPrompt(allocator: std.mem.Allocator, config: AppConfig, state
         \\{s}
         \\
         \\Success criteria:
+        \\{s}
+        \\
+        \\External memory
+        \\---------------
+        \\Project memory file: {s}
+        \\Project memory status: {s}
+        \\Project memory source chars: {d}
+        \\Project memory:
+        \\{s}
+        \\
+        \\Global memory file: {s}
+        \\Global memory status: {s}
+        \\Global memory source chars: {d}
+        \\Global memory:
         \\{s}
         \\
         \\Loop state
@@ -4576,6 +4686,14 @@ fn buildDecanusUserPrompt(allocator: std.mem.Allocator, config: AppConfig, state
             state.mission.current_goal,
             try joinStrings(allocator, state.mission.constraints, ", "),
             try joinStrings(allocator, state.mission.success_criteria, ", "),
+            memory.project.path,
+            runtimeMemoryStatusLabel(memory.project),
+            memory.project.source_chars,
+            runtimeMemoryPromptText(memory.project),
+            memory.global.path,
+            runtimeMemoryStatusLabel(memory.global),
+            memory.global.source_chars,
+            runtimeMemoryPromptText(memory.global),
             state.agent_loop.iteration,
             @tagName(state.agent_loop.status),
             maybeActorName(state.agent_loop.active_tool),
@@ -4589,7 +4707,13 @@ fn buildDecanusUserPrompt(allocator: std.mem.Allocator, config: AppConfig, state
     return try truncateText(allocator, try buffer.toOwnedSlice(allocator), config.context.max_prompt_chars);
 }
 
-fn buildSpecialistUserPrompt(allocator: std.mem.Allocator, config: AppConfig, state: *const AppState, lane: []const u8) ![]const u8 {
+fn buildSpecialistUserPrompt(
+    allocator: std.mem.Allocator,
+    config: AppConfig,
+    state: *const AppState,
+    memory: RuntimeMemorySnapshot,
+    lane: []const u8,
+) ![]const u8 {
     const lane_value = std.meta.stringToEnum(Lane, lane) orelse .bulk_ops;
     const task = taskForLaneConst(state, lane_value);
     const history = try recentHistoryText(allocator, state.agent_loop.history, config.context.max_history_events);
@@ -4606,6 +4730,20 @@ fn buildSpecialistUserPrompt(allocator: std.mem.Allocator, config: AppConfig, st
         \\{s}
         \\
         \\Active lane:
+        \\{s}
+        \\
+        \\External memory
+        \\---------------
+        \\Project memory file: {s}
+        \\Project memory status: {s}
+        \\Project memory source chars: {d}
+        \\Project memory:
+        \\{s}
+        \\
+        \\Global memory file: {s}
+        \\Global memory status: {s}
+        \\Global memory source chars: {d}
+        \\Global memory:
         \\{s}
         \\
         \\Invocation
@@ -4637,6 +4775,14 @@ fn buildSpecialistUserPrompt(allocator: std.mem.Allocator, config: AppConfig, st
             state.mission.initial_prompt,
             state.mission.current_goal,
             lane,
+            memory.project.path,
+            runtimeMemoryStatusLabel(memory.project),
+            memory.project.source_chars,
+            runtimeMemoryPromptText(memory.project),
+            memory.global.path,
+            runtimeMemoryStatusLabel(memory.global),
+            memory.global.source_chars,
+            runtimeMemoryPromptText(memory.global),
             @tagName(task.invocation.status),
             task.invocation.objective,
             task.invocation.completion_signal,
@@ -4737,6 +4883,7 @@ fn runDoctorCheck(allocator: std.mem.Allocator) ![]const u8 {
     var state = try loadState(allocator, config.paths.state_file);
 
     try ensurePromptFiles(config.paths.prompts_dir);
+    try ensureMemoryFiles(config.paths);
 
     const models = try providerListModels(allocator, config.provider);
     if (!containsString(models, config.provider.model)) return error.ModelNotFound;
@@ -4808,6 +4955,20 @@ fn ensurePromptFiles(prompts_dir: []const u8) !void {
         std.fs.cwd().access(full_path, .{}) catch {
             stderrPrint("missing prompt asset: {s}\n", .{full_path}) catch {};
             return error.MissingPromptAsset;
+        };
+    }
+}
+
+fn ensureMemoryFiles(paths: PathsConfig) !void {
+    const required = [_][]const u8{
+        paths.project_memory_file,
+        paths.global_memory_file,
+    };
+
+    for (required) |path| {
+        std.fs.cwd().access(path, .{}) catch {
+            stderrPrint("missing memory asset: {s}\n", .{path}) catch {};
+            return error.MissingMemoryAsset;
         };
     }
 }
@@ -5846,6 +6007,144 @@ fn condenseHistoryForContext(allocator: std.mem.Allocator, config: ContextConfig
     return true;
 }
 
+fn projectMemorySpec(config: AppConfig) RuntimeMemorySpec {
+    return .{
+        .kind = "project",
+        .path = config.paths.project_memory_file,
+        .max_chars = config.context.max_project_memory_chars,
+    };
+}
+
+fn globalMemorySpec(config: AppConfig) RuntimeMemorySpec {
+    return .{
+        .kind = "global",
+        .path = config.paths.global_memory_file,
+        .max_chars = config.context.max_global_memory_chars,
+    };
+}
+
+fn loadRuntimeMemoryLayer(allocator: std.mem.Allocator, spec: RuntimeMemorySpec) !RuntimeMemoryLayer {
+    const memory_path = trimAscii(spec.path);
+    if (memory_path.len == 0 or !pathIsSafeForWorkspace(memory_path)) {
+        return error.MemoryPathInvalid;
+    }
+
+    const data = std.fs.cwd().readFileAlloc(allocator, memory_path, max_file_bytes) catch |err| switch (err) {
+        error.FileNotFound => return error.MemoryLayerMissing,
+        else => return err,
+    };
+    defer allocator.free(data);
+
+    const trimmed = trimAscii(data);
+    const truncated = spec.max_chars > 0 and trimmed.len > spec.max_chars;
+    const content = if (trimmed.len == 0)
+        ""
+    else if (truncated)
+        try truncateText(allocator, trimmed, spec.max_chars)
+    else
+        try allocator.dupe(u8, trimmed);
+
+    return .{
+        .kind = spec.kind,
+        .path = memory_path,
+        .content = content,
+        .source_chars = trimmed.len,
+        .truncated = truncated,
+        .owns_content = content.len > 0,
+    };
+}
+
+fn blockForMemoryLoadFailure(
+    allocator: std.mem.Allocator,
+    config: AppConfig,
+    state: *AppState,
+    hooks: RuntimeHooks,
+    spec: RuntimeMemorySpec,
+    err: anyerror,
+) !void {
+    const error_code = switch (err) {
+        error.MemoryPathInvalid => "MEMORY_PATH_INVALID",
+        error.MemoryLayerMissing => "MEMORY_LAYER_MISSING",
+        error.FileTooBig => "MEMORY_LAYER_TOO_LARGE",
+        else => "MEMORY_LOAD_FAILED",
+    };
+    const message = switch (err) {
+        error.MemoryPathInvalid => try std.fmt.allocPrint(
+            allocator,
+            "{s} memory path must stay inside the workspace: {s}",
+            .{ spec.kind, spec.path },
+        ),
+        error.MemoryLayerMissing => try std.fmt.allocPrint(
+            allocator,
+            "{s} memory file is missing: {s}",
+            .{ spec.kind, spec.path },
+        ),
+        error.FileTooBig => try std.fmt.allocPrint(
+            allocator,
+            "{s} memory file exceeds the runtime load ceiling: {s}",
+            .{ spec.kind, spec.path },
+        ),
+        else => try std.fmt.allocPrint(
+            allocator,
+            "failed to load {s} memory from {s}",
+            .{ spec.kind, spec.path },
+        ),
+    };
+
+    const failure = buildRuntimeFailure(state, state.current_actor, laneForActor(state.current_actor), error_code, message, .{
+        .target = spec.path,
+        .detail = @errorName(err),
+    });
+    recordRuntimeFailure(state, failure);
+    stateManager(state).markBlocked(state.current_actor, laneForActor(state.current_actor), message);
+    try appendHistory(allocator, state, .{
+        .iteration = state.agent_loop.iteration,
+        .type = "memory_load_blocked",
+        .actor = actorName(state.current_actor),
+        .lane = currentLaneForState(state.*),
+        .summary = message,
+        .artifacts = &.{spec.path},
+        .timestamp = try unixTimestampString(allocator),
+    });
+    try logRuntimeEvent(allocator, config, state, .{
+        .actor = state.current_actor,
+        .lane = laneForActor(state.current_actor),
+        .action = "memory_load_failed",
+        .status = "blocked",
+        .summary = message,
+        .error_text = message,
+        .failure = failure,
+        .include_snapshot = true,
+    });
+    emitLog(hooks, .danger, "runtime", "Memory Load Failed", message, .plain);
+    emitStateSnapshot(hooks, config, state.*);
+}
+
+fn loadPromptMemorySnapshot(
+    allocator: std.mem.Allocator,
+    config: AppConfig,
+    state: *AppState,
+    hooks: RuntimeHooks,
+) !RuntimeMemorySnapshot {
+    const project_spec = projectMemorySpec(config);
+    const project = loadRuntimeMemoryLayer(allocator, project_spec) catch |err| {
+        try blockForMemoryLoadFailure(allocator, config, state, hooks, project_spec, err);
+        return error.MemoryLoadBlocked;
+    };
+    errdefer project.deinit(allocator);
+
+    const global_spec = globalMemorySpec(config);
+    const global = loadRuntimeMemoryLayer(allocator, global_spec) catch |err| {
+        try blockForMemoryLoadFailure(allocator, config, state, hooks, global_spec, err);
+        return error.MemoryLoadBlocked;
+    };
+
+    return .{
+        .project = project,
+        .global = global,
+    };
+}
+
 fn progressDocumentationText(
     allocator: std.mem.Allocator,
     state: *const AppState,
@@ -5932,12 +6231,26 @@ fn buildPromptWithContextBudget(
     system_prompt: []const u8,
     mode: PromptMode,
     lane: []const u8,
-) ![]const u8 {
+) !PromptBuildResult {
+    const memory = try loadPromptMemorySnapshot(allocator, config, state, hooks);
+    errdefer memory.deinit(allocator);
+
+    if (memory.project.truncated or memory.global.truncated) {
+        emitLog(
+            hooks,
+            .warning,
+            "runtime",
+            "Memory Trimmed",
+            try summarizeRuntimeMemorySnapshot(allocator, memory),
+            .plain,
+        );
+    }
+
     var attempt: usize = 0;
     while (true) {
         const user_prompt = switch (mode) {
-            .decanus => try buildDecanusUserPrompt(allocator, config, state),
-            .specialist => try buildSpecialistUserPrompt(allocator, config, state, lane),
+            .decanus => try buildDecanusUserPrompt(allocator, config, state, memory),
+            .specialist => try buildSpecialistUserPrompt(allocator, config, state, memory, lane),
         };
         const estimate = estimatePromptBudget(config.context, system_prompt, user_prompt);
         applyPromptBudgetEstimate(state, config.context, estimate);
@@ -5948,7 +6261,10 @@ fn buildPromptWithContextBudget(
                 try blockForContextLimit(allocator, config, state, hooks, estimate);
                 return error.ContextBudgetExceeded;
             }
-            return user_prompt;
+            return .{
+                .user_prompt = user_prompt,
+                .memory = memory,
+            };
         }
 
         const condensed = try condenseHistoryForContext(allocator, config.context, state);
@@ -5957,7 +6273,10 @@ fn buildPromptWithContextBudget(
                 try blockForContextLimit(allocator, config, state, hooks, estimate);
                 return error.ContextBudgetExceeded;
             }
-            return user_prompt;
+            return .{
+                .user_prompt = user_prompt,
+                .memory = memory,
+            };
         }
 
         emitLog(
@@ -6401,12 +6720,109 @@ fn scaffoldProject(allocator: std.mem.Allocator) !void {
     try std.fs.cwd().makePath(default_logs_dir);
     for (embedded_assets) |asset| {
         const destination = try runtimePath(allocator, asset.relative_path);
+        defer allocator.free(destination);
         try writeFileIfMissing(destination, asset.content);
     }
+    try scaffoldAgentAssets(allocator);
 }
 
 fn runtimePath(allocator: std.mem.Allocator, relative_path: []const u8) ![]const u8 {
     return try std.fs.path.join(allocator, &.{ runtime_dir_name, relative_path });
+}
+
+fn agentPath(allocator: std.mem.Allocator, relative_path: []const u8) ![]const u8 {
+    return try std.fs.path.join(allocator, &.{ agents_dir_name, relative_path });
+}
+
+fn resolveContuberniumHome(allocator: std.mem.Allocator) ![]const u8 {
+    return std.process.getEnvVarOwned(allocator, "CONTUBERNIUM_HOME") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => {
+            const home = try std.process.getEnvVarOwned(allocator, "HOME");
+            defer allocator.free(home);
+            return try std.fs.path.join(allocator, &.{ home, ".contubernium" });
+        },
+        else => return err,
+    };
+}
+
+fn resolveAgentAssetSource(allocator: std.mem.Allocator) ![]const u8 {
+    const contubernium_home = try resolveContuberniumHome(allocator);
+    defer allocator.free(contubernium_home);
+
+    const installed_agents = try std.fs.path.join(allocator, &.{ contubernium_home, "agents" });
+    const installed_loop = try std.fs.path.join(allocator, &.{ installed_agents, "AGENT_LOOP.md" });
+    defer allocator.free(installed_loop);
+    if (pathExists(installed_loop)) return installed_agents;
+    allocator.free(installed_agents);
+
+    const exe_path = try std.fs.selfExePathAlloc(allocator);
+    defer allocator.free(exe_path);
+    const exe_dir = std.fs.path.dirname(exe_path) orelse return error.AgentAssetSourceNotFound;
+
+    var current_dir = try allocator.dupe(u8, exe_dir);
+    errdefer allocator.free(current_dir);
+
+    while (true) {
+        const candidate = try std.fs.path.join(allocator, &.{ current_dir, ".agents" });
+        errdefer allocator.free(candidate);
+        const candidate_loop = try std.fs.path.join(allocator, &.{ candidate, "AGENT_LOOP.md" });
+        defer allocator.free(candidate_loop);
+        if (pathExists(candidate_loop)) {
+            allocator.free(current_dir);
+            return candidate;
+        }
+        allocator.free(candidate);
+
+        const parent = std.fs.path.dirname(current_dir) orelse break;
+        if (parent.len == current_dir.len and eql(parent, current_dir)) break;
+        if (parent.len == 0) break;
+
+        const next_dir = try allocator.dupe(u8, parent);
+        allocator.free(current_dir);
+        current_dir = next_dir;
+    }
+
+    allocator.free(current_dir);
+
+    return error.AgentAssetSourceNotFound;
+}
+
+fn copyTreeIfMissing(allocator: std.mem.Allocator, source_root: []const u8, target_root: []const u8) !void {
+    var source_dir = try std.fs.cwd().openDir(source_root, .{ .iterate = true });
+    defer source_dir.close();
+    try copyTreeFromDirIfMissing(allocator, source_root, target_root, source_dir);
+}
+
+fn copyTreeFromDirIfMissing(
+    allocator: std.mem.Allocator,
+    source_root: []const u8,
+    target_root: []const u8,
+    source_dir: std.fs.Dir,
+) !void {
+    var iterator = source_dir.iterate();
+    while (try iterator.next()) |entry| {
+        const source_path = try std.fs.path.join(allocator, &.{ source_root, entry.name });
+        defer allocator.free(source_path);
+        const target_path = try std.fs.path.join(allocator, &.{ target_root, entry.name });
+        defer allocator.free(target_path);
+
+        switch (entry.kind) {
+            .file => try copyFileIfMissing(allocator, source_path, target_path),
+            .directory => {
+                try std.fs.cwd().makePath(target_path);
+                var child = try source_dir.openDir(entry.name, .{ .iterate = true });
+                defer child.close();
+                try copyTreeFromDirIfMissing(allocator, source_path, target_path, child);
+            },
+            else => {},
+        }
+    }
+}
+
+fn scaffoldAgentAssets(allocator: std.mem.Allocator) !void {
+    const source_root = try resolveAgentAssetSource(allocator);
+    defer allocator.free(source_root);
+    try copyTreeIfMissing(allocator, source_root, agents_dir_name);
 }
 
 fn writeFileIfMissing(path: []const u8, content: []const u8) !void {
@@ -6424,7 +6840,6 @@ fn writeFileIfMissing(path: []const u8, content: []const u8) !void {
 fn resolveConfigPath(allocator: std.mem.Allocator) ![]const u8 {
     _ = allocator;
     if (pathExists(default_config_path)) return default_config_path;
-    if (pathExists("contubernium.config.json")) return "contubernium.config.json";
     return default_config_path;
 }
 
@@ -9190,6 +9605,120 @@ test "intermediate results are recorded canonically in state" {
     try testing.expectEqual(Actor.faber, state.agent_loop.intermediate_results[1].actor);
     try testing.expectEqual(Lane.backend, state.agent_loop.intermediate_results[1].lane);
     try testing.expectEqualStrings("state manager complete", state.agent_loop.intermediate_results[1].summary);
+}
+
+test "loadRuntimeMemoryLayer truncates oversized external memory content" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    defer original_cwd.close();
+    try tmp.dir.setAsCwd();
+    defer original_cwd.setAsCwd() catch {};
+
+    var file = try tmp.dir.createFile("project.md", .{ .truncate = true });
+    defer file.close();
+    try file.writeAll("Architecture:\n0123456789012345678901234567890123456789");
+
+    const layer = try loadRuntimeMemoryLayer(testing.allocator, .{
+        .kind = "project",
+        .path = "project.md",
+        .max_chars = 24,
+    });
+    defer layer.deinit(testing.allocator);
+
+    try testing.expectEqualStrings("project", layer.kind);
+    try testing.expect(layer.truncated);
+    try testing.expect(layer.source_chars > 24);
+    try testing.expect(std.mem.indexOf(u8, layer.content, "...[truncated]...") != null);
+}
+
+test "buildDecanusUserPrompt includes project and global memory layers" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+    var state = AppState{};
+    state.mission.initial_prompt = "complete phase 7";
+    state.mission.current_goal = "hook memory layers into the runtime";
+
+    const prompt = try buildDecanusUserPrompt(allocator, AppConfig{}, &state, .{
+        .project = .{
+            .kind = "project",
+            .path = ".contubernium/project.md",
+            .content = "Architecture decisions live here.",
+            .source_chars = 32,
+        },
+        .global = .{
+            .kind = "global",
+            .path = ".contubernium/global.md",
+            .content = "Reusable strategies live here.",
+            .source_chars = 30,
+        },
+    });
+
+    try testing.expect(std.mem.indexOf(u8, prompt, "Project memory file: .contubernium/project.md") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Architecture decisions live here.") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Global memory file: .contubernium/global.md") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Reusable strategies live here.") != null);
+}
+
+test "buildPromptWithContextBudget blocks when a required memory layer is missing" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    defer original_cwd.close();
+    try tmp.dir.setAsCwd();
+    defer original_cwd.setAsCwd() catch {};
+
+    var project_file = try tmp.dir.createFile("project.md", .{ .truncate = true });
+    defer project_file.close();
+    try project_file.writeAll("Project context");
+
+    var state = AppState{};
+    state.current_actor = .decanus;
+    state.mission.initial_prompt = "complete phase 7";
+    state.mission.current_goal = "hook memory";
+
+    const config = AppConfig{
+        .paths = .{
+            .project_memory_file = "project.md",
+            .global_memory_file = "global.md",
+        },
+    };
+
+    try testing.expectError(
+        error.MemoryLoadBlocked,
+        buildPromptWithContextBudget(allocator, config, &state, .{}, "system prompt", .decanus, ""),
+    );
+    try testing.expectEqualStrings("MEMORY_LAYER_MISSING", state.runtime_session.last_failure.error_code);
+    try testing.expectEqualStrings("global.md", state.runtime_session.last_failure.context.target);
+    try testing.expectEqual(@as(usize, 1), state.agent_loop.history.len);
+    try testing.expectEqualStrings("memory_load_blocked", state.agent_loop.history[0].type);
+}
+
+test "scaffoldProject creates canonical runtime and agent assets" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    defer original_cwd.close();
+    try tmp.dir.setAsCwd();
+    defer original_cwd.setAsCwd() catch {};
+
+    try scaffoldProject(testing.allocator);
+
+    try testing.expect(pathExists(".contubernium/state.json"));
+    try testing.expect(pathExists(".contubernium/config.json"));
+    try testing.expect(pathExists(".contubernium/project.md"));
+    try testing.expect(pathExists(".contubernium/global.md"));
+    try testing.expect(pathExists(".contubernium/prompts/decanus.md"));
+    try testing.expect(pathExists(".agents/AGENT_LOOP.md"));
+    try testing.expect(pathExists(".agents/decanus/SOUL.md"));
+    try testing.expect(pathExists(".agents/architectus/CONTRACT.md"));
 }
 
 test "estimatePromptBudget reserves response headroom" {

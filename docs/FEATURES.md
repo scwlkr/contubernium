@@ -78,7 +78,7 @@ Structure
 .agents/{agent_name}/
   SOUL.md
   CONTRACT.md
-  SKILLS/
+  SKILL.md
 
 Components
 
@@ -100,15 +100,12 @@ Defines:
 
 👉 This is hard boundaries
 
-2.3 SKILLS/
-	•	Modular capabilities
-	•	Each skill = scoped function
-	•	Examples:
-	•	read_code
-	•	design_system
-	•	debug_runtime
+2.3 SKILL.md
+	•	One scoped execution guide per agent
+	•	Encodes the narrow callable behavior `decanus` can invoke
+	•	Keeps the agent folder self-contained
 
-👉 Skills are composable execution units
+👉 `SKILL.md` is the canonical v2 shape. A future `SKILLS/` subtree can exist as an expansion inside the same agent folder, but it is not the base structure.
 
 ⸻
 
@@ -123,6 +120,8 @@ Structure
   state.json
   project.md
   global.md
+  config.json
+  prompts/
   logs/
 
 Components
@@ -168,7 +167,8 @@ Installs to:
 
 Contains:
 	•	base agents
-	•	default configs
+	•	default prompts
+	•	default templates
 	•	global memory
 
 4.2 Project Initialization
@@ -179,7 +179,19 @@ contubernium init
 Creates:
 
 .contubernium/
+  state.json
+  project.md
+  global.md
+  config.json
+  prompts/
+  logs/
+
 .agents/
+  AGENT_LOOP.md
+  {agent_name}/
+    SOUL.md
+    CONTRACT.md
+    SKILL.md
 
 
 ⸻

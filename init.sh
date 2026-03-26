@@ -1,72 +1,97 @@
 #!/usr/bin/env bash
+set -euo pipefail
 
-# Find the absolute path to the directory where this script lives
-GLOBAL_BARRACKS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AGENTS_DIR="$GLOBAL_BARRACKS/.agents"
-PROMPTS_DIR="$GLOBAL_BARRACKS/prompts"
-STATE_TEMPLATE="$GLOBAL_BARRACKS/templates/contubernium_state.template.json"
-CONFIG_TEMPLATE="$GLOBAL_BARRACKS/templates/contubernium.config.template.json"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="${1:-$PWD}"
+CONTUBERNIUM_HOME="${CONTUBERNIUM_HOME:-$HOME/.contubernium}"
 
-echo "🏛️ Deploying Contubernium..."
+require_path() {
+    local path="$1"
+    local label="$2"
+    if [[ ! -e "$path" ]]; then
+        echo "error: missing ${label}: $path" >&2
+        exit 1
+    fi
+}
 
-# 1. Verify the global .agents directory exists
-if [ ! -d "$AGENTS_DIR" ]; then
-    echo "❌ Error: Agents directory not found at $AGENTS_DIR"
-    exit 1
+copy_if_missing() {
+    local source_path="$1"
+    local target_path="$2"
+
+    if [[ -e "$target_path" ]]; then
+        return
+    fi
+
+    mkdir -p "$(dirname "$target_path")"
+    install -m 0644 "$source_path" "$target_path"
+}
+
+copy_tree_if_missing() {
+    local source_dir="$1"
+    local target_dir="$2"
+    local source_file
+    local relative_path
+
+    while IFS= read -r source_file; do
+        relative_path="${source_file#"$source_dir"/}"
+        copy_if_missing "$source_file" "$target_dir/$relative_path"
+    done < <(find "$source_dir" -type f | sort)
+}
+
+template_path() {
+    local template_dir="$1"
+    local primary_name="$2"
+    local fallback_name="$3"
+
+    if [[ -f "$template_dir/$primary_name" ]]; then
+        printf '%s\n' "$template_dir/$primary_name"
+        return
+    fi
+
+    printf '%s\n' "$template_dir/$fallback_name"
+}
+
+select_asset_root() {
+    if [[ -d "$CONTUBERNIUM_HOME/agents" && -d "$CONTUBERNIUM_HOME/prompts" && -d "$CONTUBERNIUM_HOME/templates" ]]; then
+        printf '%s\n' "$CONTUBERNIUM_HOME"
+        return
+    fi
+
+    printf '%s\n' "$SCRIPT_DIR"
+}
+
+ASSET_ROOT="$(select_asset_root)"
+AGENTS_SOURCE="$ASSET_ROOT/agents"
+PROMPTS_SOURCE="$ASSET_ROOT/prompts"
+TEMPLATES_SOURCE="$ASSET_ROOT/templates"
+
+if [[ "$ASSET_ROOT" == "$SCRIPT_DIR" ]]; then
+    AGENTS_SOURCE="$SCRIPT_DIR/.agents"
+    PROMPTS_SOURCE="$SCRIPT_DIR/prompts"
 fi
 
-# 2. Verify the state template exists
-if [ ! -f "$STATE_TEMPLATE" ]; then
-    echo "❌ Error: State template not found at $STATE_TEMPLATE"
-    exit 1
-fi
+STATE_TEMPLATE="$(template_path "$TEMPLATES_SOURCE" "state.json" "contubernium_state.template.json")"
+CONFIG_TEMPLATE="$(template_path "$TEMPLATES_SOURCE" "config.json" "contubernium.config.template.json")"
+PROJECT_TEMPLATE="$(template_path "$TEMPLATES_SOURCE" "project.md" "project.template.md")"
+GLOBAL_TEMPLATE="$(template_path "$TEMPLATES_SOURCE" "global.md" "global.template.md")"
 
-# 2b. Verify the prompts directory exists
-if [ ! -d "$PROMPTS_DIR" ]; then
-    echo "❌ Error: Prompts directory not found at $PROMPTS_DIR"
-    exit 1
-fi
+require_path "$AGENTS_SOURCE" "agents source"
+require_path "$PROMPTS_SOURCE" "prompts source"
+require_path "$STATE_TEMPLATE" "state template"
+require_path "$CONFIG_TEMPLATE" "config template"
+require_path "$PROJECT_TEMPLATE" "project memory template"
+require_path "$GLOBAL_TEMPLATE" "global memory template"
 
-# 2c. Verify the config template exists
-if [ ! -f "$CONFIG_TEMPLATE" ]; then
-    echo "❌ Error: Config template not found at $CONFIG_TEMPLATE"
-    exit 1
-fi
+mkdir -p "$PROJECT_DIR/.contubernium/logs"
+mkdir -p "$PROJECT_DIR/.agents"
 
-# 3. Create the symlink (safeguarded so it doesn't overwrite existing ones)
-if [ -e ".agents" ]; then
-    echo "⚠️ .agents symlink already exists in this directory."
-else
-    ln -s "$AGENTS_DIR" .agents
-    echo "✅ Agents symlinked successfully."
-fi
+copy_if_missing "$STATE_TEMPLATE" "$PROJECT_DIR/.contubernium/state.json"
+copy_if_missing "$CONFIG_TEMPLATE" "$PROJECT_DIR/.contubernium/config.json"
+copy_if_missing "$PROJECT_TEMPLATE" "$PROJECT_DIR/.contubernium/project.md"
+copy_if_missing "$GLOBAL_TEMPLATE" "$PROJECT_DIR/.contubernium/global.md"
+copy_tree_if_missing "$PROMPTS_SOURCE" "$PROJECT_DIR/.contubernium/prompts"
+copy_tree_if_missing "$AGENTS_SOURCE" "$PROJECT_DIR/.agents"
 
-# 4. Generate the local state file (safeguarded to protect existing project memory)
-if [ -f "contubernium_state.json" ]; then
-    echo "⚠️ contubernium_state.json already exists. Skipping to protect state."
-else
-    cp "$STATE_TEMPLATE" contubernium_state.json
-    echo "✅ Local contubernium_state.json initialized."
-fi
-
-# 5. Create the prompts symlink
-if [ -e "prompts" ]; then
-    echo "⚠️ prompts already exists in this directory."
-else
-    ln -s "$PROMPTS_DIR" prompts
-    echo "✅ Prompts symlinked successfully."
-fi
-
-# 6. Generate the local runtime config
-if [ -f "contubernium.config.json" ]; then
-    echo "⚠️ contubernium.config.json already exists. Skipping to protect local config."
-else
-    cp "$CONFIG_TEMPLATE" contubernium.config.json
-    echo "✅ Local contubernium.config.json initialized."
-fi
-
-# 7. Ensure the runtime log directory exists
-mkdir -p .contubernium/logs
-echo "✅ Runtime log directory ready."
-
-echo "🚀 Contubernium deployed! Awaiting Decanus loop orders."
+echo "Initialized Contubernium in $PROJECT_DIR"
+echo "  - $PROJECT_DIR/.contubernium"
+echo "  - $PROJECT_DIR/.agents"

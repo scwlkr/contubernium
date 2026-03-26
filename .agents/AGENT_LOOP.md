@@ -21,7 +21,7 @@ The loop is always:
 1. `decanus` always receives the initial user prompt.
 2. `decanus` owns planning, routing, and the final response.
 3. Every other agent is a callable tool with a narrow specialty.
-4. Tool calls must be written into `contubernium_state.json` before handoff.
+4. Tool calls must be written into `.contubernium/state.json` before handoff.
 5. Specialists must return control to `decanus` after each invocation.
 
 ## State Contract
@@ -39,11 +39,15 @@ The loop is always:
 - Holds the live tool contract for a specialist:
   - `status`
   - `requested_by`
+  - `target`
+  - `lane`
   - `iteration`
   - `objective`
   - `completion_signal`
-  - `dependencies`
-  - `result_summary`
+  - `context`
+  - `scope`
+  - `memory`
+  - `result`
   - `return_to`
 
 ## Invocation Lifecycle
@@ -89,3 +93,11 @@ Each `agent_loop.history` entry should be a compact JSON object with fields such
   "artifacts": ["api/routes/report.ts"]
 }
 ```
+
+## Canonical Filesystem Layout
+
+Each agent lives under `.agents/<agent>/` and ships three required documents:
+
+- `SOUL.md` for behavioral bias and tone
+- `CONTRACT.md` for allowed and forbidden scope
+- `SKILL.md` for the narrow execution checklist the commander invokes

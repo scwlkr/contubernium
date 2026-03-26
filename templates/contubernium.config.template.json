@@ -1,6 +1,7 @@
 {
   "runtime_version": 1,
   "provider": {
+    "enabled": true,
     "type": "ollama-native",
     "base_url": "http://127.0.0.1:11434",
     "model": "qwen2.5-coder:7b",
@@ -18,7 +19,9 @@
   "paths": {
     "state_file": ".contubernium/state.json",
     "prompts_dir": ".contubernium/prompts",
-    "logs_dir": ".contubernium/logs"
+    "logs_dir": ".contubernium/logs",
+    "project_memory_file": ".contubernium/project.md",
+    "global_memory_file": ".contubernium/global.md"
   },
   "policy": {
     "approval_mode": "guarded",
@@ -37,6 +40,8 @@
     "max_file_read_bytes": 12000,
     "max_search_hits": 20,
     "max_tool_result_chars": 6000,
+    "max_project_memory_chars": 4000,
+    "max_global_memory_chars": 4000,
     "estimated_context_window_tokens": 32768,
     "response_reserve_tokens": 4096,
     "warn_at_percent": 70,

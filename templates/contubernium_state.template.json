@@ -13,9 +13,17 @@
     "status": "awaiting_initial_prompt",
     "iteration": 0,
     "max_iterations": 24,
-    "active_tool": "",
+    "active_tool": null,
+    "last_step": {
+      "iteration": 0,
+      "kind": "think",
+      "actor": "decanus",
+      "lane": "command",
+      "summary": ""
+    },
     "last_decision": "",
     "last_tool_result": "",
+    "intermediate_results": [],
     "history": []
   },
   "runtime_session": {
@@ -24,11 +32,37 @@
     "model": "",
     "endpoint": "",
     "approval_mode": "guarded",
+    "active_approval": {
+      "status": "idle",
+      "kind": "read",
+      "requested_by": "decanus",
+      "lane": "command",
+      "tool_name": "",
+      "detail": "",
+      "reason": "",
+      "target": ""
+    },
     "current_turn_id": "",
     "last_health_check": "",
     "last_error": "",
+    "last_failure": {
+      "error_code": "",
+      "message": "",
+      "context": {
+        "actor": "",
+        "lane": "",
+        "tool": "",
+        "target": "",
+        "command": "",
+        "detail": "",
+        "provider": "",
+        "model": "",
+        "turn_id": "",
+        "iteration": 0
+      }
+    },
     "active_log_path": "",
-    "last_actor": "",
+    "last_actor": "decanus",
     "repair_attempts": 0,
     "context_budget": {
       "estimated_prompt_chars": 0,
@@ -116,11 +150,35 @@
       "invocation": {
         "status": "idle",
         "requested_by": "decanus",
+        "target": "faber",
+        "lane": "backend",
         "iteration": 0,
         "objective": "",
         "completion_signal": "",
-        "dependencies": [],
-        "result_summary": "",
+        "context": {
+          "project": "",
+          "files": [],
+          "constraints": [],
+          "dependencies": []
+        },
+        "scope": {
+          "allowed_actions": [],
+          "restricted_actions": []
+        },
+        "memory": {
+          "mission": "",
+          "project": "",
+          "relevant": []
+        },
+        "result": {
+          "status": "idle",
+          "summary": "",
+          "changes": [],
+          "findings": [],
+          "blockers": [],
+          "next_recommended_agent": null,
+          "confidence": 0
+        },
         "return_to": "decanus"
       }
     },
@@ -132,11 +190,35 @@
       "invocation": {
         "status": "idle",
         "requested_by": "decanus",
+        "target": "artifex",
+        "lane": "frontend",
         "iteration": 0,
         "objective": "",
         "completion_signal": "",
-        "dependencies": [],
-        "result_summary": "",
+        "context": {
+          "project": "",
+          "files": [],
+          "constraints": [],
+          "dependencies": []
+        },
+        "scope": {
+          "allowed_actions": [],
+          "restricted_actions": []
+        },
+        "memory": {
+          "mission": "",
+          "project": "",
+          "relevant": []
+        },
+        "result": {
+          "status": "idle",
+          "summary": "",
+          "changes": [],
+          "findings": [],
+          "blockers": [],
+          "next_recommended_agent": null,
+          "confidence": 0
+        },
         "return_to": "decanus"
       }
     },
@@ -148,11 +230,35 @@
       "invocation": {
         "status": "idle",
         "requested_by": "decanus",
+        "target": "architectus",
+        "lane": "systems",
         "iteration": 0,
         "objective": "",
         "completion_signal": "",
-        "dependencies": [],
-        "result_summary": "",
+        "context": {
+          "project": "",
+          "files": [],
+          "constraints": [],
+          "dependencies": []
+        },
+        "scope": {
+          "allowed_actions": [],
+          "restricted_actions": []
+        },
+        "memory": {
+          "mission": "",
+          "project": "",
+          "relevant": []
+        },
+        "result": {
+          "status": "idle",
+          "summary": "",
+          "changes": [],
+          "findings": [],
+          "blockers": [],
+          "next_recommended_agent": null,
+          "confidence": 0
+        },
         "return_to": "decanus"
       }
     },
@@ -164,11 +270,35 @@
       "invocation": {
         "status": "idle",
         "requested_by": "decanus",
+        "target": "tesserarius",
+        "lane": "qa",
         "iteration": 0,
         "objective": "",
         "completion_signal": "",
-        "dependencies": [],
-        "result_summary": "",
+        "context": {
+          "project": "",
+          "files": [],
+          "constraints": [],
+          "dependencies": []
+        },
+        "scope": {
+          "allowed_actions": [],
+          "restricted_actions": []
+        },
+        "memory": {
+          "mission": "",
+          "project": "",
+          "relevant": []
+        },
+        "result": {
+          "status": "idle",
+          "summary": "",
+          "changes": [],
+          "findings": [],
+          "blockers": [],
+          "next_recommended_agent": null,
+          "confidence": 0
+        },
         "return_to": "decanus"
       }
     },
@@ -180,11 +310,35 @@
       "invocation": {
         "status": "idle",
         "requested_by": "decanus",
+        "target": "explorator",
+        "lane": "research",
         "iteration": 0,
         "objective": "",
         "completion_signal": "",
-        "dependencies": [],
-        "result_summary": "",
+        "context": {
+          "project": "",
+          "files": [],
+          "constraints": [],
+          "dependencies": []
+        },
+        "scope": {
+          "allowed_actions": [],
+          "restricted_actions": []
+        },
+        "memory": {
+          "mission": "",
+          "project": "",
+          "relevant": []
+        },
+        "result": {
+          "status": "idle",
+          "summary": "",
+          "changes": [],
+          "findings": [],
+          "blockers": [],
+          "next_recommended_agent": null,
+          "confidence": 0
+        },
         "return_to": "decanus"
       }
     },
@@ -196,11 +350,35 @@
       "invocation": {
         "status": "idle",
         "requested_by": "decanus",
+        "target": "signifer",
+        "lane": "brand",
         "iteration": 0,
         "objective": "",
         "completion_signal": "",
-        "dependencies": [],
-        "result_summary": "",
+        "context": {
+          "project": "",
+          "files": [],
+          "constraints": [],
+          "dependencies": []
+        },
+        "scope": {
+          "allowed_actions": [],
+          "restricted_actions": []
+        },
+        "memory": {
+          "mission": "",
+          "project": "",
+          "relevant": []
+        },
+        "result": {
+          "status": "idle",
+          "summary": "",
+          "changes": [],
+          "findings": [],
+          "blockers": [],
+          "next_recommended_agent": null,
+          "confidence": 0
+        },
         "return_to": "decanus"
       }
     },
@@ -212,11 +390,35 @@
       "invocation": {
         "status": "idle",
         "requested_by": "decanus",
+        "target": "praeco",
+        "lane": "media",
         "iteration": 0,
         "objective": "",
         "completion_signal": "",
-        "dependencies": [],
-        "result_summary": "",
+        "context": {
+          "project": "",
+          "files": [],
+          "constraints": [],
+          "dependencies": []
+        },
+        "scope": {
+          "allowed_actions": [],
+          "restricted_actions": []
+        },
+        "memory": {
+          "mission": "",
+          "project": "",
+          "relevant": []
+        },
+        "result": {
+          "status": "idle",
+          "summary": "",
+          "changes": [],
+          "findings": [],
+          "blockers": [],
+          "next_recommended_agent": null,
+          "confidence": 0
+        },
         "return_to": "decanus"
       }
     },
@@ -228,11 +430,35 @@
       "invocation": {
         "status": "idle",
         "requested_by": "decanus",
+        "target": "calo",
+        "lane": "docs",
         "iteration": 0,
         "objective": "",
         "completion_signal": "",
-        "dependencies": [],
-        "result_summary": "",
+        "context": {
+          "project": "",
+          "files": [],
+          "constraints": [],
+          "dependencies": []
+        },
+        "scope": {
+          "allowed_actions": [],
+          "restricted_actions": []
+        },
+        "memory": {
+          "mission": "",
+          "project": "",
+          "relevant": []
+        },
+        "result": {
+          "status": "idle",
+          "summary": "",
+          "changes": [],
+          "findings": [],
+          "blockers": [],
+          "next_recommended_agent": null,
+          "confidence": 0
+        },
         "return_to": "decanus"
       }
     },
@@ -244,11 +470,35 @@
       "invocation": {
         "status": "idle",
         "requested_by": "decanus",
+        "target": "mulus",
+        "lane": "bulk_ops",
         "iteration": 0,
         "objective": "",
         "completion_signal": "",
-        "dependencies": [],
-        "result_summary": "",
+        "context": {
+          "project": "",
+          "files": [],
+          "constraints": [],
+          "dependencies": []
+        },
+        "scope": {
+          "allowed_actions": [],
+          "restricted_actions": []
+        },
+        "memory": {
+          "mission": "",
+          "project": "",
+          "relevant": []
+        },
+        "result": {
+          "status": "idle",
+          "summary": "",
+          "changes": [],
+          "findings": [],
+          "blockers": [],
+          "next_recommended_agent": null,
+          "confidence": 0
+        },
         "return_to": "decanus"
       }
     }

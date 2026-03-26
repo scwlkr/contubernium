@@ -24,9 +24,11 @@ Supported commands:
 `init`
 - Creates `.contubernium/config.json` if missing.
 - Creates `.contubernium/state.json` if missing.
+- Creates `.contubernium/project.md` if missing.
+- Creates `.contubernium/global.md` if missing.
 - Creates `.contubernium/prompts/` from embedded assets if missing.
 - Creates `.contubernium/logs/` if missing.
-- Starts the full-screen terminal UI when stdin and stdout are attached to a terminal.
+- Creates `.agents/` from embedded agent assets if missing.
 
 `doctor`
 - Auto-scaffolds `.contubernium/` if it is missing.
@@ -88,9 +90,15 @@ Supported commands:
 ## File Layout
 
 - `.contubernium/state.json`
+- `.contubernium/project.md`
+- `.contubernium/global.md`
 - `.contubernium/config.json`
 - `.contubernium/prompts/`
 - `.contubernium/logs/`
+- `.agents/AGENT_LOOP.md`
+- `.agents/<agent>/SOUL.md`
+- `.agents/<agent>/CONTRACT.md`
+- `.agents/<agent>/SKILL.md`
 - `docs/`
 
 ## Runtime Config Shape
@@ -99,6 +107,7 @@ Supported commands:
 {
   "runtime_version": 1,
   "provider": {
+    "enabled": true,
     "type": "ollama-native",
     "base_url": "http://127.0.0.1:11434",
     "model": "qwen2.5-coder:7b",
@@ -116,13 +125,16 @@ Supported commands:
   "paths": {
     "state_file": ".contubernium/state.json",
     "prompts_dir": ".contubernium/prompts",
-    "logs_dir": ".contubernium/logs"
+    "logs_dir": ".contubernium/logs",
+    "project_memory_file": ".contubernium/project.md",
+    "global_memory_file": ".contubernium/global.md"
   },
   "policy": {
     "approval_mode": "guarded",
     "allow_read_tools_without_confirmation": true,
     "allow_workspace_writes_without_confirmation": false,
     "allow_shell_without_confirmation": false,
+    "tool_timeout_ms": 120000,
     "blocked_command_patterns": [
       "rm -rf",
       "git reset --hard"
@@ -133,7 +145,16 @@ Supported commands:
     "max_prompt_chars": 32000,
     "max_file_read_bytes": 12000,
     "max_search_hits": 20,
-    "max_tool_result_chars": 6000
+    "max_tool_result_chars": 6000,
+    "max_project_memory_chars": 4000,
+    "max_global_memory_chars": 4000,
+    "estimated_context_window_tokens": 32768,
+    "response_reserve_tokens": 4096,
+    "warn_at_percent": 70,
+    "condense_at_percent": 85,
+    "condensed_keep_recent_events": 4,
+    "max_condensed_summary_chars": 2400,
+    "max_stop_summary_chars": 2400
   }
 }
 ```
@@ -150,11 +171,37 @@ Add `runtime_session` to `.contubernium/state.json`:
     "model": "",
     "endpoint": "",
     "approval_mode": "guarded",
+    "active_approval": {
+      "status": "idle",
+      "kind": "read",
+      "requested_by": "decanus",
+      "lane": "command",
+      "tool_name": "",
+      "detail": "",
+      "reason": "",
+      "target": ""
+    },
     "current_turn_id": "",
     "last_health_check": "",
     "last_error": "",
+    "last_failure": {
+      "error_code": "",
+      "message": "",
+      "context": {
+        "actor": "",
+        "lane": "",
+        "tool": "",
+        "target": "",
+        "command": "",
+        "detail": "",
+        "provider": "",
+        "model": "",
+        "turn_id": "",
+        "iteration": 0
+      }
+    },
     "active_log_path": "",
-    "last_actor": "",
+    "last_actor": "decanus",
     "repair_attempts": 0
   }
 }

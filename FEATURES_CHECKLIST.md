@@ -10,7 +10,7 @@ This checklist tracks implementation progress against [FEATURES.md](docs/FEATURE
 - [x] 4. Basic agent loop (no agents yet)
 - [x] 5. Tool execution layer
 - [x] 6. Single agent (Decanus only)
-- [ ] 7. Memory system hookup
+- [x] 7. Memory system hookup
 - [ ] 8. Then TUI
 
 ## Phase 1: Logging System
@@ -39,7 +39,6 @@ Done:
 - [x] Included structured failure payloads in runtime log events so failures are inspectable beyond plain text
 
 Still to do later:
-- [ ] Phase 7: hook the external memory layers fully into the runtime flow
 - [ ] Phase 8: refine the TUI only after the underlying runtime stack is confirmed
 
 ## Phase 3: State manager
@@ -93,3 +92,20 @@ Done:
 - [x] Rejected `invoke_specialist` decisions from `decanus` with structured failures, state/history updates, and explicit runtime log events
 - [x] Updated Decanus prompt/schema assets in `prompts/`, `.contubernium/prompts/`, and `src/embedded_assets.zig` so phase 6 runtime guidance is single-agent by default
 - [x] Added focused tests covering blocked active-specialist turns and blocked specialist-invocation requests without removing the future-facing invocation/state-manager surfaces
+
+## Phase 7: Memory system hookup
+
+Reference:
+- [FEATURES.md](docs/FEATURES.md) section `3. Memory System`
+- [FEATURES.md](docs/FEATURES.md) section `3.1 state.json (volatile)`
+- [FEATURES.md](docs/FEATURES.md) section `3.2 project.md (semi-static)`
+- [FEATURES.md](docs/FEATURES.md) section `3.3 global.md (shared intelligence)`
+- [PHASE_HANDOFF.md](PHASE_HANDOFF.md) section `Phase 7 Target`
+
+Done:
+- [x] Added an explicit runtime memory-loading layer in `src/main.zig` that reads configured project/global memory files before prompt assembly instead of copying those layers into ad hoc state fields
+- [x] Kept `.contubernium/state.json` as canonical mission/runtime state while wiring `.contubernium/project.md` and `.contubernium/global.md` into Decanus and future specialist prompt context
+- [x] Added bounded memory-context limits plus structured blocking failures/log events for missing, invalid, or oversized memory-layer inputs
+- [x] Scaffolded default project/global memory files and config defaults in `src/embedded_assets.zig`, `.contubernium/config.json`, and template/repo config surfaces
+- [x] Updated phase-7 prompt guidance in `prompts/` and `.contubernium/prompts/` so Decanus treats external memory as read-only context while keeping the phase-6 single-agent guard intact
+- [x] Added focused tests covering memory truncation, prompt inclusion, and blocked prompt assembly when a required memory layer is missing

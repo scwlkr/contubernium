@@ -121,13 +121,13 @@ This makes the system:
 Contubernium uses layered memory:
 
 ```
-
 .contubernium/
-state.json     # mission state (live loop)
-project.md     # project-level knowledge
-global.md      # reusable patterns
-logs/
-
+state.json      # mission state (live loop)
+project.md      # project-level knowledge
+global.md       # reusable patterns
+config.json     # runtime configuration
+prompts/        # runtime prompt assets
+logs/           # structured JSON run logs
 ```
 
 Rules:
@@ -180,18 +180,18 @@ No silent execution of risky operations.
 # 📁 Repository Structure
 
 ```
-
-.contubernium/
-state.json
-config.json
-prompts/
-logs/
-
 .agents/
-AGENT_LOOP.md <agent>/
-SOUL.md
-SKILL.md
-CONTRACT.md
+AGENT_LOOP.md
+<agent>/
+  SOUL.md
+  CONTRACT.md
+  SKILL.md
+
+templates/
+contubernium_state.template.json
+contubernium.config.template.json
+project.template.md
+global.template.md
 
 docs/
 doctrine.md
@@ -199,8 +199,7 @@ agent-contracts.md
 invocation-protocol.md
 
 src/
-
-````
+```
 
 ---
 
@@ -212,7 +211,9 @@ src/
 git clone https://github.com/scwlkr/contubernium.git
 cd contubernium
 ./install.sh
-````
+```
+
+`install.sh` installs the CLI onto your `PATH` and syncs the global Contubernium home into `~/.contubernium/`.
 
 ## Run
 
@@ -226,6 +227,21 @@ contubernium
 cd your-project
 contubernium init
 ```
+
+`contubernium init` creates the canonical local project scaffold:
+
+```text
+.contubernium/
+.agents/
+```
+
+If you need a Bash-only fallback from a source checkout, run:
+
+```bash
+./init.sh /path/to/project
+```
+
+See [docs/installation.md](/Users/shanewalker/Desktop/dev/Contubernium/docs/installation.md) for the full install and initialization flow.
 
 ---
 

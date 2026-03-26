@@ -14,7 +14,7 @@ From the Contubernium repo root:
 ./install.sh
 ```
 
-This builds the binary and symlinks `contubernium` into a user bin directory such as `~/bin` or `~/.local/bin`.
+This builds the binary, installs `contubernium` into a user bin directory such as `~/bin` or `~/.local/bin`, and syncs the global Contubernium home into `~/.contubernium/`.
 
 Before shipping changes to the runtime itself, run:
 
@@ -33,10 +33,17 @@ This prepares:
 
 - `.contubernium/config.json`
 - `.contubernium/state.json`
+- `.contubernium/project.md`
+- `.contubernium/global.md`
 - `.contubernium/prompts/`
 - `.contubernium/logs/`
+- `.agents/`
 
-If you run it in a normal terminal session, it immediately opens the full-screen Contubernium command tent after scaffolding.
+If you need a Bash-only fallback from a source checkout, run:
+
+```bash
+./init.sh /path/to/project
+```
 
 ### 3. Start Ollama
 
@@ -157,6 +164,8 @@ Turn logs are written under:
 ```text
 .contubernium/logs/
 ```
+
+They are structured JSON run logs with one file per runtime session.
 
 Use these logs when:
 

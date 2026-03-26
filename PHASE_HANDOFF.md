@@ -6,7 +6,7 @@ This file is the bootstrap artifact for the next thread.
 
 - Current build order source: [FEATURES_CHECKLIST.md](FEATURES_CHECKLIST.md)
 - Feature source of truth: [docs/FEATURES.md](docs/FEATURES.md)
-- Next phase to implement: `7. Memory system hookup`
+- Next phase to implement: `8. Then TUI`
 
 ## Completed Phases
 
@@ -16,27 +16,37 @@ This file is the bootstrap artifact for the next thread.
 - [x] Phase 4. Basic agent loop (no agents yet)
 - [x] Phase 5. Tool execution layer
 - [x] Phase 6. Single agent (Decanus only)
-- [ ] Phase 7. Memory system hookup
+- [x] Phase 7. Memory system hookup
 - [ ] Phase 8. TUI
 
-## Files Touched By Phases 1-6
+## Files Touched By Phases 1-7
 
 - [src/main.zig](/Users/shanewalker/Desktop/dev/Contubernium/src/main.zig)
-  Runtime logging ledger, structured failures, centralized state-manager transitions, shared loop progression, typed tool mediation, timeout-aware command execution, phase-6 single-agent runtime guards, and focused runtime tests.
+  Runtime logging ledger, structured failures, centralized state-manager transitions, shared loop progression, typed tool mediation, timeout-aware command execution, phase-6 single-agent runtime guards, explicit project/global memory loading and prompt hookup, and focused runtime tests.
 - [src/embedded_assets.zig](/Users/shanewalker/Desktop/dev/Contubernium/src/embedded_assets.zig)
-  Embedded default config includes the phase-5 timeout policy surface, and embedded Decanus prompt/schema assets now default to phase-6 single-agent behavior.
+  Embedded default config now includes project/global memory paths and memory-size bounds, plus default project/global memory scaffold files and phase-7 prompt guidance.
 - [prompts/decanus.md](/Users/shanewalker/Desktop/dev/Contubernium/prompts/decanus.md)
-  Repo prompt asset now instructs `decanus` to stay in a Decanus-only runtime loop for phase 6.
-- [prompts/shared/decanus-schema.json](/Users/shanewalker/Desktop/dev/Contubernium/prompts/shared/decanus-schema.json)
-  Repo schema asset now narrows Decanus runtime decisions to `finish`, `tool_request`, `ask_user`, or `blocked` for phase 6.
+  Repo prompt asset now instructs `decanus` to use external project/global memory while staying in the phase-7 Decanus-only loop.
+- [prompts/shared/base.md](/Users/shanewalker/Desktop/dev/Contubernium/prompts/shared/base.md)
+  Shared repo prompt rules now call project/global memory read-only context while keeping mission state canonical in `.contubernium/state.json`.
+- [.contubernium/prompts/decanus.md](/Users/shanewalker/Desktop/dev/Contubernium/.contubernium/prompts/decanus.md)
+  Active runtime prompt asset mirrors the phase-7 Decanus memory guidance.
+- [.contubernium/prompts/shared/base.md](/Users/shanewalker/Desktop/dev/Contubernium/.contubernium/prompts/shared/base.md)
+  Active runtime base prompt mirrors the phase-7 read-only memory guidance.
 - [contubernium.config.json](/Users/shanewalker/Desktop/dev/Contubernium/contubernium.config.json)
-  Repo config now exposes the phase-5 `tool_timeout_ms` policy default.
+  Repo config now exposes project/global memory file paths and bounded memory-context defaults alongside the existing runtime policy surface.
 - [templates/contubernium.config.template.json](/Users/shanewalker/Desktop/dev/Contubernium/templates/contubernium.config.template.json)
-  Template config now mirrors the phase-5 tool timeout policy field.
+  Template config now mirrors the phase-7 memory file paths and memory-size bounds.
+- [.contubernium/config.json](/Users/shanewalker/Desktop/dev/Contubernium/.contubernium/config.json)
+  Active runtime config now points the running workspace at the project/global memory layers and their phase-7 bounds.
+- [.contubernium/project.md](/Users/shanewalker/Desktop/dev/Contubernium/.contubernium/project.md)
+  Default project-memory scaffold now exists as a live runtime input.
+- [.contubernium/global.md](/Users/shanewalker/Desktop/dev/Contubernium/.contubernium/global.md)
+  Default global-memory scaffold now exists as a live runtime input.
 - [FEATURES_CHECKLIST.md](/Users/shanewalker/Desktop/dev/Contubernium/FEATURES_CHECKLIST.md)
-  Progress tracker and ordered build plan updated through phase 6.
+  Progress tracker and ordered build plan updated through phase 7.
 - [PHASE_HANDOFF.md](/Users/shanewalker/Desktop/dev/Contubernium/PHASE_HANDOFF.md)
-  Bootstrap guidance now hands the next thread off to phase 7 with phase-6 single-agent constraints recorded.
+  Bootstrap guidance now hands the next thread off to phase 8 with phase-7 memory constraints recorded.
 
 ## Architectural Decisions Already Made
 
@@ -59,6 +69,9 @@ This file is the bootstrap artifact for the next thread.
 14. Phase 6 constrains active runtime execution to `decanus`; any attempt to execute a specialist turn now blocks with a structured `SINGLE_AGENT_RUNTIME_ONLY` failure.
 15. Phase 6 keeps specialist task contracts, prompts, and invocation/state-manager helpers in place as future-facing surfaces rather than removing them.
 16. Phase 6 narrows Decanus prompt/schema guidance to `finish`, `tool_request`, `ask_user`, or `blocked`, and rejects legacy `invoke_specialist` decisions at runtime.
+17. Phase 7 loads project/global memory from configured file paths at prompt-build time rather than copying those external layers into `.contubernium/state.json`.
+18. Phase 7 bounds external memory through dedicated context limits and logs memory-layer loading/truncation explicitly.
+19. Phase 7 turns missing, invalid, or oversized memory-layer inputs into structured runtime failures instead of silent prompt omissions.
 
 ## Constraints That Must Not Be Broken
 
@@ -69,39 +82,40 @@ This file is the bootstrap artifact for the next thread.
 5. Keep structured failures intact. Do not collapse phase-2 failures back into plain strings.
 6. Keep `.contubernium/state.json` as the canonical runtime state file.
 7. Preserve the phase-5 typed tool mediation layer. Do not re-scatter tool validation or execution policy across actor-specific branches.
-8. Preserve the phase-6 Decanus-only runtime guard. Do not silently reintroduce active specialist execution during phase 7.
-9. Avoid TUI-driven schema or memory-layer redesign in phase 7 unless the runtime layer requires it first.
+8. Preserve the phase-6 Decanus-only runtime guard. Do not silently reintroduce active specialist execution during phase 8.
+9. Preserve the phase-7 external memory loading model. Do not fold project/global memory back into ad hoc state fields.
+10. Avoid redesigning the engine, logging, or memory layers just to advance the TUI.
 
-## Phase 7 Target
+## Phase 8 Target
 
-Phase 7 is the `Memory system hookup` step from [FEATURES_CHECKLIST.md](FEATURES_CHECKLIST.md):
+Phase 8 is the `Then TUI` step from [FEATURES_CHECKLIST.md](FEATURES_CHECKLIST.md):
 
-- Wire the external memory layers into runtime execution: mission state stays in `.contubernium/state.json`, while project and global memory become available to prompt assembly and loop decisions
-- Preserve the phase-6 single-agent runtime target so memory hookup strengthens Decanus-owned execution instead of reopening specialist turns
-- Keep memory structured, explicit, and queryable in line with [AGENTS.md](AGENTS.md) and [docs/FEATURES.md](docs/FEATURES.md)
+- Build the TUI on top of the now-complete runtime stack so the interface shows mission state, loop progress, tool activity, and approvals without redefining runtime behavior
+- Reuse the structured state snapshots, structured logs, context-budget telemetry, and memory-aware prompt/runtime surfaces already in place
+- Keep the TUI as an adapter over commander-first runtime execution in line with [AGENTS.md](AGENTS.md) and [docs/FEATURES.md](docs/FEATURES.md)
 
-## What “Done” Means For Phase 7
+## What “Done” Means For Phase 8
 
-Phase 7 is done when all of the following are true:
+Phase 8 is done when all of the following are true:
 
-1. Runtime prompt assembly and loop decisions can read the external project/global memory layers without collapsing them into ad hoc state fields.
-2. `.contubernium/state.json` remains the canonical mission/runtime state file while `.contubernium/project.md` and `.contubernium/global.md` become live inputs to execution.
-3. Phase-5 typed tool mediation and phase-6 Decanus-only control remain intact.
-4. Structured logs and structured failures remain canonical and compatible.
-5. Existing tests still pass, and new tests cover memory loading/hookup behavior without redesigning the TUI.
-6. Phase 7 does not quietly reintroduce specialist execution as active runtime turns.
+1. The TUI visibly reflects the canonical runtime state: active mission, current actor, loop step, tool activity, and key runtime status.
+2. Operator input and approval handling stay mediated through the existing runtime layer instead of adding parallel UI-only execution paths.
+3. Phase-1 through phase-7 logging, failures, memory hookup, and Decanus-only runtime control remain intact.
+4. The TUI surfaces enough runtime context to make the commander loop observable without needing ad hoc debug prints.
+5. Existing tests still pass, and any new tests focus on TUI rendering/event integration rather than reworking engine behavior.
+6. Phase 8 does not silently reintroduce specialist execution as active runtime turns.
 
-## Suggested Phase 7 Approach
+## Suggested Phase 8 Approach
 
-1. Inventory the current memory files, prompt builders, and any config/state surfaces that should expose project/global memory to Decanus.
-2. Introduce the smallest clean runtime layer that loads and bounds project/global memory before prompt assembly.
-3. Reuse the phase-3/4 state-manager helpers, the phase-5 tool mediation layer, and the phase-6 single-agent runtime guard instead of adding new side-effect paths.
-4. Add focused tests around memory loading, prompt inclusion, and failure handling for missing or oversized memory inputs.
-5. Keep documentation/checklists aligned once phase 7 is complete.
+1. Inventory the current legacy/vaxis TUI surfaces and compare them against the required Phase 8 views from [docs/FEATURES.md](docs/FEATURES.md).
+2. Prefer wiring missing UI views to existing runtime events/state snapshots instead of inventing new runtime-specific UI state.
+3. Reuse the phase-1 structured logs, phase-3/4 state-manager ownership, phase-5 tool mediation, phase-6 Decanus-only guard, and phase-7 memory/context telemetry as read-only UI inputs.
+4. Add focused tests around TUI rendering/event handling where feasible, without redesigning runtime semantics.
+5. Keep documentation/checklists aligned once phase 8 is complete.
 
 ## Validation Commands
 
-Run these after phase 7 changes:
+Run these after phase 8 changes:
 
 ```bash
 zig fmt src/main.zig src/embedded_assets.zig
@@ -115,16 +129,22 @@ Optional runtime validation if a local model backend is available:
 zig build run -- doctor
 ```
 
+Optional interface validation:
+
+```bash
+zig build run -- ui --legacy
+```
+
 ## Suggested Commit Message
 
 ```text
-feat(runtime): complete phase 6 single-agent loop
+feat(runtime): complete phase 7 memory hookup
 ```
 
 ## Next Thread Bootstrap Prompt
 
 ```text
-Continue Contubernium feature work from phase 7 only.
+Continue Contubernium feature work from phase 8 only.
 
 Read:
 - AGENTS.md
@@ -138,10 +158,10 @@ Constraints:
 - Do not skip build order.
 - Preserve the structured JSON logging system from phase 1.
 - Preserve the structured runtime failure system from phase 2.
-- Preserve the phase-3 state-manager ownership, phase-4 shared loop-progression helpers, phase-5 typed tool mediation layer, and phase-6 Decanus-only runtime guard.
-- Do not redesign the TUI in phase 7.
+- Preserve the phase-3 state-manager ownership, phase-4 shared loop-progression helpers, phase-5 typed tool mediation layer, phase-6 Decanus-only runtime guard, and phase-7 external memory loading model.
 - Keep `.contubernium/state.json` as canonical runtime state.
+- Do not fold project/global memory into ad hoc UI state.
 
 Task:
-Implement phase 7, the memory system hookup step, and update the handoff/checklist artifacts when done.
+Implement phase 8, the TUI step, and update the handoff/checklist artifacts when done.
 ```

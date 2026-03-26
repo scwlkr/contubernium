@@ -528,7 +528,9 @@ pub const config_json =
     \\  "paths": {
     \\    "state_file": ".contubernium/state.json",
     \\    "prompts_dir": ".contubernium/prompts",
-    \\    "logs_dir": ".contubernium/logs"
+    \\    "logs_dir": ".contubernium/logs",
+    \\    "project_memory_file": ".contubernium/project.md",
+    \\    "global_memory_file": ".contubernium/global.md"
     \\  },
     \\  "policy": {
     \\    "approval_mode": "guarded",
@@ -547,6 +549,8 @@ pub const config_json =
     \\    "max_file_read_bytes": 12000,
     \\    "max_search_hits": 20,
     \\    "max_tool_result_chars": 6000,
+    \\    "max_project_memory_chars": 4000,
+    \\    "max_global_memory_chars": 4000,
     \\    "estimated_context_window_tokens": 32768,
     \\    "response_reserve_tokens": 4096,
     \\    "warn_at_percent": 70,
@@ -556,6 +560,26 @@ pub const config_json =
     \\    "max_stop_summary_chars": 2400
     \\  }
     \\}
+;
+
+pub const project_memory_md =
+    \\# Project Memory
+    \\
+    \\Capture validated project-specific architecture, constraints, and conventions here.
+    \\
+    \\- Keep this file explicit and current.
+    \\- Do not duplicate volatile mission state from `state.json`.
+    \\- Prefer short sections for architecture decisions, invariants, and known constraints.
+;
+
+pub const global_memory_md =
+    \\# Global Memory
+    \\
+    \\Capture reusable strategies, defaults, and stable patterns that can inform future runs.
+    \\
+    \\- Record only validated cross-project knowledge.
+    \\- Avoid speculative notes or one-off mission details.
+    \\- Keep entries concise so the runtime can load them into prompt context safely.
 ;
 
 pub const base_prompt =
@@ -570,6 +594,7 @@ pub const base_prompt =
     \\- Do not assume work is complete unless the state and tool results support it.
     \\- Keep reasoning concise and operational.
     \\- Respect the current actor role and only make decisions that role is allowed to make.
+    \\- Treat project/global memory as read-only context; mission state remains canonical in `.contubernium/state.json`.
 ;
 
 pub const tool_policy_prompt =
@@ -658,9 +683,10 @@ pub const decanus_prompt =
     \\Responsibilities:
     \\
     \\- read the mission and current state
+    \\- use the provided project/global memory layers before requesting more reads
     \\- decide whether to finish, ask for runtime tools, ask the user, or block
     \\- keep the loop moving
-    \\- keep `decanus` as the only active runtime actor for phase 6
+    \\- keep `decanus` as the only active runtime actor for phase 7
     \\- return control decisions, not implementation prose
     \\
     \\You own:
@@ -670,7 +696,7 @@ pub const decanus_prompt =
     \\- final response quality
     \\- loop completion
     \\
-    \\Specialist contracts still exist as future-facing planning surfaces, but phase 6 does not hand execution to them.
+    \\Specialist contracts still exist as future-facing planning surfaces, but phase 7 does not hand execution to them.
     \\If work is needed, request runtime tools and continue owning the loop as `decanus`.
 ;
 
