@@ -7,7 +7,7 @@ This checklist tracks implementation progress against [FEATURES.md](docs/FEATURE
 - [x] 1. Logging system
 - [x] 2. Error system
 - [x] 3. State manager
-- [ ] 4. Basic agent loop (no agents yet)
+- [x] 4. Basic agent loop (no agents yet)
 - [ ] 5. Tool execution layer
 - [ ] 6. Single agent (Decanus only)
 - [ ] 7. Memory system hookup
@@ -39,7 +39,6 @@ Done:
 - [x] Included structured failure payloads in runtime log events so failures are inspectable beyond plain text
 
 Still to do later:
-- [ ] Phase 4: isolate and confirm the basic agent loop independently from specialist behavior
 - [ ] Phase 5: tighten the tool execution layer around typed mediation and validation
 - [ ] Phase 6: constrain execution to Decanus-only behavior where later-phase logic currently reaches beyond that target
 - [ ] Phase 7: hook the external memory layers fully into the runtime flow
@@ -58,3 +57,15 @@ Done:
 - [x] Added canonical `agent_loop.intermediate_results` tracking without regressing existing `last_tool_result` and history compatibility surfaces
 - [x] Preserved phase-1 structured logs and phase-2 structured failures while routing blocked and completion paths through the state manager
 - [x] Added focused tests for reset, approval, blocked, invocation, and intermediate-result transitions
+
+## Phase 4: Basic agent loop
+
+Reference:
+- [FEATURES.md](docs/FEATURES.md) section `1.1 Agent Loop`
+- [PHASE_HANDOFF.md](PHASE_HANDOFF.md) section `Phase 4 Target`
+
+Done:
+- [x] Isolated shared loop-progression helpers in `src/main.zig` so runtime tool results, specialist handoffs, invocation results, and mission completion flow through a common state-manager surface
+- [x] Made the loop's `result` step explicit for runtime-tool and invocation-result transitions without redesigning the tool layer or TUI
+- [x] Preserved phase-1 structured logging, phase-2 structured failures, and phase-3 state-manager ownership while reducing duplicated loop-transition logic in actor-specific turn handling
+- [x] Added focused tests covering runtime tool result progression, invocation handoff/result progression, and mission completion

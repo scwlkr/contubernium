@@ -470,6 +470,35 @@ const StateManager = struct {
         self.state.agent_loop.last_tool_result = summary;
     }
 
+    fn recordRuntimeToolResultStep(
+        self: StateManager,
+        allocator: std.mem.Allocator,
+        actor: Actor,
+        lane: Lane,
+        summary: []const u8,
+    ) !void {
+        self.recordToolResult(summary);
+        if (actor == .decanus) {
+            self.state.global_status = .planning;
+            self.state.agent_loop.status = .thinking;
+        } else {
+            self.state.global_status = .waiting_on_tool;
+            self.state.agent_loop.status = .running_tool;
+            taskForLane(self.state, lane).invocation.status = .running;
+        }
+        setLoopStep(self.state, .result, actor, lane, summary);
+        try self.appendIntermediateResult(allocator, "runtime_tool_result", actor, lane, summary);
+        try appendHistory(allocator, self.state, .{
+            .iteration = self.state.agent_loop.iteration,
+            .type = "runtime_tool_result",
+            .actor = actorName(actor),
+            .lane = if (lane == .command) "" else laneName(lane),
+            .summary = summary,
+            .artifacts = &.{},
+            .timestamp = try unixTimestampString(allocator),
+        });
+    }
+
     fn appendIntermediateResult(
         self: StateManager,
         allocator: std.mem.Allocator,
@@ -564,6 +593,27 @@ const StateManager = struct {
         setLoopStep(self.state, .invoke, .decanus, lane, objective);
     }
 
+    fn prepareInvocationWithHistory(
+        self: StateManager,
+        allocator: std.mem.Allocator,
+        lane: Lane,
+        actor: Actor,
+        objective: []const u8,
+        completion_signal: []const u8,
+        dependencies: []const []const u8,
+    ) !void {
+        self.prepareInvocation(lane, actor, objective, completion_signal, dependencies);
+        try appendHistory(allocator, self.state, .{
+            .iteration = self.state.agent_loop.iteration,
+            .type = "tool_call",
+            .actor = "decanus",
+            .lane = laneName(lane),
+            .summary = objective,
+            .artifacts = &.{},
+            .timestamp = try unixTimestampString(allocator),
+        });
+    }
+
     fn finalizeInvocation(
         self: StateManager,
         lane: Lane,
@@ -584,6 +634,46 @@ const StateManager = struct {
         self.state.agent_loop.last_tool_result = result.summary;
         self.state.runtime_session.status = if (result.status == .blocked) .blocked else .idle;
         setLoopStep(self.state, if (result.status == .blocked) .blocked else .result, actor, lane, result.summary);
+    }
+
+    fn finalizeInvocationWithHistory(
+        self: StateManager,
+        allocator: std.mem.Allocator,
+        lane: Lane,
+        actor: Actor,
+        result: InvocationResult,
+        description: []const u8,
+    ) !void {
+        self.finalizeInvocation(lane, actor, result, description);
+        try self.appendIntermediateResult(allocator, "invocation_result", actor, lane, result.summary);
+        try appendHistory(allocator, self.state, .{
+            .iteration = self.state.agent_loop.iteration,
+            .type = "tool_result",
+            .actor = actorName(actor),
+            .lane = laneName(lane),
+            .summary = result.summary,
+            .artifacts = result.changes,
+            .timestamp = try unixTimestampString(allocator),
+        });
+    }
+
+    fn completeMissionWithHistory(
+        self: StateManager,
+        allocator: std.mem.Allocator,
+        actor: Actor,
+        lane: Lane,
+        final_response: []const u8,
+    ) !void {
+        self.markMissionComplete(actor, lane, final_response);
+        try appendHistory(allocator, self.state, .{
+            .iteration = self.state.agent_loop.iteration,
+            .type = "finish",
+            .actor = actorName(actor),
+            .lane = if (lane == .command) "" else laneName(lane),
+            .summary = final_response,
+            .artifacts = &.{},
+            .timestamp = try unixTimestampString(allocator),
+        });
     }
 
     fn applyPromptBudgetEstimate(self: StateManager, config: ContextConfig, estimate: PromptBudgetEstimate) void {
@@ -3746,21 +3836,7 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
             .plain,
         );
         const tool_result = try executeToolRequests(allocator, config, state, .decanus, .command, decision.tool_requests, hooks);
-        stateManager(state).recordToolResult(tool_result.summary);
-        try stateManager(state).appendIntermediateResult(allocator, "runtime_tool_result", .decanus, .command, tool_result.summary);
-        try appendHistory(
-            allocator,
-            state,
-            .{
-                .iteration = state.agent_loop.iteration,
-                .type = "runtime_tool_result",
-                .actor = "decanus",
-                .lane = "",
-                .summary = tool_result.summary,
-                .artifacts = &.{},
-                .timestamp = try unixTimestampString(allocator),
-            },
-        );
+        try stateManager(state).recordRuntimeToolResultStep(allocator, .decanus, .command, tool_result.summary);
         if (tool_result.blocked) {
             stateManager(state).markBlocked(.decanus, .command, tool_result.summary);
             try logRuntimeEvent(allocator, config, state, .{
@@ -3796,20 +3872,7 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
     }
 
     if (eql(decision.action, "finish")) {
-        stateManager(state).markMissionComplete(.decanus, .command, decision.final_response);
-        try appendHistory(
-            allocator,
-            state,
-            .{
-                .iteration = state.agent_loop.iteration,
-                .type = "finish",
-                .actor = "decanus",
-                .lane = "",
-                .summary = decision.final_response,
-                .artifacts = &.{},
-                .timestamp = try unixTimestampString(allocator),
-            },
-        );
+        try stateManager(state).completeMissionWithHistory(allocator, .decanus, .command, decision.final_response);
         try logRuntimeEvent(allocator, config, state, .{
             .actor = .decanus,
             .lane = .command,
@@ -3833,19 +3896,13 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
         else
             .bulk_ops;
         const actor = requested_actor orelse actorForLane(lane);
-        prepareInvocation(state, lane, actor, decision.objective, decision.completion_signal, decision.dependencies);
-        try appendHistory(
+        try stateManager(state).prepareInvocationWithHistory(
             allocator,
-            state,
-            .{
-                .iteration = state.agent_loop.iteration,
-                .type = "tool_call",
-                .actor = "decanus",
-                .lane = laneName(lane),
-                .summary = decision.objective,
-                .artifacts = &.{},
-                .timestamp = try unixTimestampString(allocator),
-            },
+            lane,
+            actor,
+            decision.objective,
+            decision.completion_signal,
+            decision.dependencies,
         );
         emitLog(
             hooks,
@@ -4026,8 +4083,7 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
             .plain,
         );
         const tool_result = try executeToolRequests(allocator, config, state, actor, lane, result.tool_requests, hooks);
-        stateManager(state).recordToolResult(tool_result.summary);
-        try stateManager(state).appendIntermediateResult(allocator, "runtime_tool_result", actor, lane, tool_result.summary);
+        try stateManager(state).recordRuntimeToolResultStep(allocator, actor, lane, tool_result.summary);
         if (tool_result.blocked) {
             task.invocation.status = .blocked;
             stateManager(state).markBlocked(actor, lane, tool_result.summary);
@@ -4066,21 +4122,7 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
 
     if (eql(result.action, "complete") or eql(result.status, "complete") or eql(result.status, "partial")) {
         const invocation_result = try materializeInvocationResult(allocator, result, .complete);
-        finalizeInvocation(state, lane, actor, invocation_result, result.description);
-        try stateManager(state).appendIntermediateResult(allocator, "invocation_result", actor, lane, invocation_result.summary);
-        try appendHistory(
-            allocator,
-            state,
-            .{
-                .iteration = state.agent_loop.iteration,
-                .type = "tool_result",
-                .actor = actorName(actor),
-                .lane = laneName(lane),
-                .summary = invocation_result.summary,
-                .artifacts = invocation_result.changes,
-                .timestamp = try unixTimestampString(allocator),
-            },
-        );
+        try stateManager(state).finalizeInvocationWithHistory(allocator, lane, actor, invocation_result, result.description);
         try logRuntimeEvent(allocator, config, state, .{
             .actor = actor,
             .lane = lane,
@@ -4100,7 +4142,7 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
         const failure = buildRuntimeFailure(state, actor, lane, "USER_INPUT_REQUIRED", result.question, .{
             .detail = "specialist requested user input",
         });
-        finalizeInvocation(state, lane, actor, invocation_result, result.description);
+        try stateManager(state).finalizeInvocationWithHistory(allocator, lane, actor, invocation_result, result.description);
         recordRuntimeFailure(state, failure);
         stateManager(state).markBlocked(actor, lane, result.question);
         try logRuntimeEvent(allocator, config, state, .{
@@ -4123,7 +4165,7 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
     const blocked_failure = buildRuntimeFailure(state, actor, lane, "SPECIALIST_BLOCKED", blocked_message, .{
         .detail = "specialist returned a blocked state",
     });
-    finalizeInvocation(state, lane, actor, invocation_result, result.description);
+    try stateManager(state).finalizeInvocationWithHistory(allocator, lane, actor, invocation_result, result.description);
     recordRuntimeFailure(state, blocked_failure);
     stateManager(state).markBlocked(actor, lane, state.runtime_session.last_error);
     try logRuntimeEvent(allocator, config, state, .{
@@ -8507,8 +8549,30 @@ test "blocked transition keeps loop and runtime state aligned" {
     try testing.expectEqualStrings("waiting on operator", state.agent_loop.last_step.summary);
 }
 
-test "invocation transitions keep state manager surfaces aligned" {
+test "runtime tool result records an explicit loop result step" {
     const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+    var state = AppState{};
+    state.current_actor = .decanus;
+    state.global_status = .planning;
+    state.agent_loop.status = .thinking;
+    state.agent_loop.iteration = 2;
+
+    try stateManager(&state).recordRuntimeToolResultStep(allocator, .decanus, .command, "read_file docs/FEATURES.md");
+
+    try testing.expectEqual(GlobalStatus.planning, state.global_status);
+    try testing.expectEqual(LoopStatus.thinking, state.agent_loop.status);
+    try testing.expectEqual(LoopStepKind.result, state.agent_loop.last_step.kind);
+    try testing.expectEqualStrings("read_file docs/FEATURES.md", state.agent_loop.last_step.summary);
+    try testing.expectEqualStrings("read_file docs/FEATURES.md", state.agent_loop.last_tool_result);
+    try testing.expectEqual(@as(usize, 1), state.agent_loop.intermediate_results.len);
+    try testing.expectEqual(@as(usize, 1), state.agent_loop.history.len);
+    try testing.expectEqualStrings("runtime_tool_result", state.agent_loop.history[0].type);
+}
+
+test "invocation loop transitions keep shared state and history aligned" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
     var state = AppState{};
     state.project_name = "Contubernium";
     state.agent_loop.iteration = 3;
@@ -8517,18 +8581,28 @@ test "invocation transitions keep state manager surfaces aligned" {
     state.mission.constraints = &.{"keep compatibility"};
     state.agent_loop.last_tool_result = "read_file src/main.zig";
 
-    prepareInvocation(&state, .backend, .faber, "implement state helpers", "return structured result", &.{"src/main.zig"});
+    try stateManager(&state).prepareInvocationWithHistory(
+        allocator,
+        .backend,
+        .faber,
+        "implement state helpers",
+        "return structured result",
+        &.{"src/main.zig"},
+    );
 
     try testing.expectEqual(Actor.faber, state.current_actor);
     try testing.expectEqual(GlobalStatus.waiting_on_tool, state.global_status);
     try testing.expectEqual(LoopStatus.running_tool, state.agent_loop.status);
+    try testing.expectEqual(LoopStepKind.invoke, state.agent_loop.last_step.kind);
     try testing.expectEqual(Actor.faber, state.agent_loop.active_tool.?);
     try testing.expectEqual(TaskStatus.in_progress, state.tasks.backend.status);
     try testing.expectEqual(InvocationStatus.ready, state.tasks.backend.invocation.status);
     try testing.expectEqualStrings("centralize state transitions", state.tasks.backend.invocation.memory.mission);
     try testing.expectEqualStrings("read_file src/main.zig", state.tasks.backend.invocation.memory.project);
+    try testing.expectEqual(@as(usize, 1), state.agent_loop.history.len);
+    try testing.expectEqualStrings("tool_call", state.agent_loop.history[0].type);
 
-    finalizeInvocation(&state, .backend, .faber, .{
+    try stateManager(&state).finalizeInvocationWithHistory(allocator, .backend, .faber, .{
         .status = .complete,
         .summary = "implemented state helpers",
         .changes = &.{"src/main.zig"},
@@ -8537,11 +8611,33 @@ test "invocation transitions keep state manager surfaces aligned" {
     try testing.expectEqual(Actor.decanus, state.current_actor);
     try testing.expectEqual(GlobalStatus.planning, state.global_status);
     try testing.expectEqual(LoopStatus.thinking, state.agent_loop.status);
+    try testing.expectEqual(LoopStepKind.result, state.agent_loop.last_step.kind);
     try testing.expect(state.agent_loop.active_tool == null);
     try testing.expectEqual(RuntimeStatus.idle, state.runtime_session.status);
     try testing.expectEqual(TaskStatus.complete, state.tasks.backend.status);
     try testing.expectEqual(InvocationStatus.complete, state.tasks.backend.invocation.status);
     try testing.expectEqualStrings("implemented state helpers", state.agent_loop.last_tool_result);
+    try testing.expectEqual(@as(usize, 1), state.agent_loop.intermediate_results.len);
+    try testing.expectEqual(@as(usize, 2), state.agent_loop.history.len);
+    try testing.expectEqualStrings("tool_result", state.agent_loop.history[1].type);
+}
+
+test "mission completion records the finish step and history" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+    var state = AppState{};
+    state.current_actor = .decanus;
+    state.agent_loop.iteration = 5;
+
+    try stateManager(&state).completeMissionWithHistory(allocator, .decanus, .command, "phase 4 complete");
+
+    try testing.expectEqual(GlobalStatus.complete, state.global_status);
+    try testing.expectEqual(LoopStatus.complete, state.agent_loop.status);
+    try testing.expectEqual(RuntimeStatus.complete, state.runtime_session.status);
+    try testing.expectEqual(LoopStepKind.finish, state.agent_loop.last_step.kind);
+    try testing.expectEqualStrings("phase 4 complete", state.mission.final_response);
+    try testing.expectEqual(@as(usize, 1), state.agent_loop.history.len);
+    try testing.expectEqualStrings("finish", state.agent_loop.history[0].type);
 }
 
 test "intermediate results are recorded canonically in state" {
