@@ -1,0 +1,10 @@
+{
+  "name": "contubernium-opentui",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@opentui/core": "^0.1.90",
+    "@opentui/react": "^0.1.90",
+    "react": "^19.1.0"
+  }
+}

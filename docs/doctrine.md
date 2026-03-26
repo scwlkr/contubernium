@@ -203,7 +203,7 @@ The system must remain:
 
 ## 10. Interface Philosophy
 
-The primary interface is the **terminal (TUI)**.
+The primary interface is the **OpenTUI terminal interface**.
 
 This is intentional:
 - it keeps the system close to the developer

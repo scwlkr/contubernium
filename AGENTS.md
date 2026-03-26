@@ -139,7 +139,7 @@ Do not introduce conflicting structures.
 # 9. Interface Scope
 
 Primary interface:
-- TUI (terminal UI)
+- OpenTUI terminal interface
 
 Other interfaces (Telegram, etc.) are adapters and must not redefine core behavior.
 
@@ -205,4 +205,3 @@ If a change violates this file:
 - stop
 - surface the violation
 - do not proceed silently
-

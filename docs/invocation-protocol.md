@@ -21,7 +21,7 @@ The protocol is valid only when all of these remain true:
 - All specialist output returns to `decanus`.
 - Risky side effects pass through explicit approval gates.
 - The runtime stays local-first.
-- The primary interface remains the TUI.
+- The primary interface remains OpenTUI.
 
 ## 2. Invocation Envelope
 
@@ -93,7 +93,7 @@ Approval is not implicit. The runtime must materialize an approval request befor
 Approval request lifecycle:
 
 1. Runtime creates `ApprovalRequest(status=pending)`.
-2. Runtime exposes intent in the TUI.
+2. Runtime exposes intent in OpenTUI.
 3. Operator approves or denies.
 4. Runtime records `approved` or `denied`.
 5. `decanus` continues only after the result is known.

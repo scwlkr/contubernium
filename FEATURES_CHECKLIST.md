@@ -11,7 +11,7 @@ This checklist tracks implementation progress against [FEATURES.md](docs/FEATURE
 - [x] 5. Tool execution layer
 - [x] 6. Single agent (Decanus only)
 - [x] 7. Memory system hookup
-- [ ] 8. Then TUI
+- [x] 8. Then OpenTUI
 
 ## Phase 1: Logging System
 
@@ -25,7 +25,7 @@ Done:
 - [x] Switched the active runtime log path to a `.json` run ledger so each mission/resume session is traceable
 - [x] Logged prompt capture, provider transport, raw model output, parsed output, tool requests/results, approval flow, repair retries, and run outcomes as structured events
 - [x] Kept logging local-first and runtime-owned in Zig without introducing hidden behavior
-- [x] Preserved the existing runtime/TUI state references so the current log path is still observable in the UI snapshot
+- [x] Preserved the existing runtime/OpenTUI state references so the current log path is still observable in the OpenTUI snapshot
 
 ## Phase 2: Error System
 
@@ -39,7 +39,7 @@ Done:
 - [x] Included structured failure payloads in runtime log events so failures are inspectable beyond plain text
 
 Still to do later:
-- [ ] Phase 8: refine the TUI only after the underlying runtime stack is confirmed
+- [x] Phase 8: replace the legacy terminal UI with OpenTUI after the underlying runtime stack is confirmed
 
 ## Phase 3: State manager
 
@@ -63,7 +63,7 @@ Reference:
 
 Done:
 - [x] Isolated shared loop-progression helpers in `src/main.zig` so runtime tool results, specialist handoffs, invocation results, and mission completion flow through a common state-manager surface
-- [x] Made the loop's `result` step explicit for runtime-tool and invocation-result transitions without redesigning the tool layer or TUI
+- [x] Made the loop's `result` step explicit for runtime-tool and invocation-result transitions without redesigning the tool layer or OpenTUI
 - [x] Preserved phase-1 structured logging, phase-2 structured failures, and phase-3 state-manager ownership while reducing duplicated loop-transition logic in actor-specific turn handling
 - [x] Added focused tests covering runtime tool result progression, invocation handoff/result progression, and mission completion
 
@@ -109,3 +109,17 @@ Done:
 - [x] Scaffolded default project/global memory files and config defaults in `src/embedded_assets.zig`, `.contubernium/config.json`, and template/repo config surfaces
 - [x] Updated phase-7 prompt guidance in `prompts/` and `.contubernium/prompts/` so Decanus treats external memory as read-only context while keeping the phase-6 single-agent guard intact
 - [x] Added focused tests covering memory truncation, prompt inclusion, and blocked prompt assembly when a required memory layer is missing
+
+## Phase 8: OpenTUI
+
+Reference:
+- [FEATURES.md](docs/FEATURES.md) section `5. Zig + OpenTUI Runtime CLI`
+- [PHASE_HANDOFF.md](PHASE_HANDOFF.md)
+
+Done:
+- [x] Removed the `vaxis` dependency and deleted the legacy terminal renderer from `src/main.zig`
+- [x] Added an OpenTUI frontend under `opentui/` that renders the mission transcript, structured run log, runtime rail, approvals, and model controls
+- [x] Added a Zig `ui-bridge` command that streams runtime events and snapshots to OpenTUI over JSON lines without bypassing commander-first runtime control
+- [x] Updated `contubernium ui` so it launches the OpenTUI frontend through Bun while keeping Zig as the authoritative runtime
+- [x] Updated installation flow and documentation so OpenTUI is the only documented terminal interface
+- [x] Kept runtime tests green and added a bridge smoke-path that works against the current workspace state

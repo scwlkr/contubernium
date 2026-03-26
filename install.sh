@@ -141,6 +141,7 @@ install_global_assets() {
     mkdir -p "$home_dir" "$templates_dir"
     copy_tree "$source_dir/.agents" "$home_dir/agents"
     copy_tree "$source_dir/prompts" "$home_dir/prompts"
+    copy_tree "$source_dir/opentui" "$home_dir/opentui"
 
     install -m 0644 "$source_dir/templates/contubernium_state.template.json" "$templates_dir/state.json"
     install -m 0644 "$source_dir/templates/contubernium.config.template.json" "$templates_dir/config.json"
@@ -154,12 +155,19 @@ install_global_assets() {
     if [[ -d "$home_dir/agents/skills" ]]; then
         rm -rf "$home_dir/agents/skills"
     fi
+
+    echo "Installing OpenTUI frontend dependencies in $home_dir/opentui" >&2
+    (
+        cd "$home_dir/opentui"
+        bun install --frozen-lockfile
+    )
 }
 
 INSTALL_DIR="$(pick_install_dir)"
 SOURCE_DIR="$(pick_source_dir)"
 
 require_command zig
+require_command bun
 
 echo "Building Contubernium from $SOURCE_DIR"
 (

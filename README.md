@@ -140,7 +140,7 @@ Rules:
 # ⚙️ Runtime
 
 - **Language:** Zig
-- **Interface:** Terminal UI (TUI)
+- **Interface:** OpenTUI terminal interface
 - **Execution:** Local-first (Ollama primary)
 - **Adapters:** OpenAI-compatible backends supported
 
@@ -213,7 +213,7 @@ cd contubernium
 ./install.sh
 ```
 
-`install.sh` installs the CLI onto your `PATH` and syncs the global Contubernium home into `~/.contubernium/`.
+`install.sh` installs the CLI onto your `PATH`, syncs the global Contubernium home into `~/.contubernium/`, and installs the bundled OpenTUI frontend in `~/.contubernium/opentui/`.
 
 ## Run
 
@@ -247,7 +247,7 @@ See [docs/installation.md](/Users/shanewalker/Desktop/dev/Contubernium/docs/inst
 
 # 🧭 Usage
 
-Inside the TUI:
+Inside the OpenTUI interface:
 
 * enter a mission directly
 * observe agent loop execution in real time

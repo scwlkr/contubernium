@@ -105,7 +105,7 @@ or
 contubernium ui
 ```
 
-The TUI supports:
+The OpenTUI interface supports:
 
 - direct mission prompts
 - live state context for actor, lane, loop iteration, provider, model, and last error
@@ -155,7 +155,7 @@ That means:
 
 If a command is denied, the runtime records the blocked condition in state and logs. Use `resume` after changing the situation.
 
-Inside the TUI, those confirmations appear inline in the command tent instead of as blocking terminal prompts from the worker thread.
+Inside OpenTUI, those confirmations appear inline in the command tent instead of as blocking terminal prompts from the worker thread.
 
 ## Log Locations
 
@@ -184,7 +184,7 @@ Check:
 - the configured `base_url` is correct
 - local firewall or process issues are not blocking the port
 
-The TUI will show this as a backend-unavailable status in the model roster area. Use `/models` or `/doctor` after starting the service.
+OpenTUI will show this as a backend-unavailable status in the model roster area. Use `/models` or `/doctor` after starting the service.
 
 ### The configured model is missing
 
@@ -200,7 +200,7 @@ Then rerun:
 contubernium doctor
 ```
 
-Or from the TUI:
+Or from OpenTUI:
 
 ```text
 /models
@@ -217,7 +217,7 @@ This is expected sometimes with local models. The runtime will try bounded repai
 - reduce prompt complexity
 - lower context pressure
 
-During TUI runs you will still see the streamed attempt in the ledger, followed by the repair retry.
+During OpenTUI runs you will still see the streamed attempt in the ledger, followed by the repair retry.
 
 ### The context window is too small
 

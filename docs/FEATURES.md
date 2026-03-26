@@ -196,7 +196,7 @@ Creates:
 
 ⸻
 
-5. Zig TUI Runtime CLI 🖥️
+5. Zig + OpenTUI Runtime CLI 🖥️
 
 Owner: Interface Layer
 Priority: P2 (after engine works)
@@ -325,6 +325,6 @@ Now each section has constraints you can code against
 	5.	Tool execution layer
 	6.	Single agent (Decanus only)
 	7.	Memory system hookup
-	8.	Then TUI
+	8.	Then OpenTUI
 
 If you don’t follow this order, you will get stuck.

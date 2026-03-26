@@ -16,7 +16,7 @@ Take a project (folder or URL) and produce:
 
 # 1. Entry Point (User → Decanus)
 
-## Input (TUI)
+## Input (OpenTUI)
 
 ```text
 Analyze this project and design a full system architecture:

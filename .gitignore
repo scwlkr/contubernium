@@ -2,3 +2,4 @@
 zig-out/
 .contubernium/
 contubernium.config.json
+opentui/node_modules/
