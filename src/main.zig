@@ -14,6 +14,7 @@ const legacy_default_max_iterations = 12;
 const default_max_iterations = 24;
 const default_context_window_tokens = 32768;
 const default_response_reserve_tokens = 4096;
+const default_tool_timeout_ms = 120000;
 
 const Actor = protocol.Actor;
 const Lane = protocol.Lane;
@@ -92,6 +93,7 @@ const PolicyConfig = struct {
     allow_read_tools_without_confirmation: bool = true,
     allow_workspace_writes_without_confirmation: bool = false,
     allow_shell_without_confirmation: bool = false,
+    tool_timeout_ms: usize = default_tool_timeout_ms,
     blocked_command_patterns: []const []const u8 = &.{
         "rm -rf",
         "git reset --hard",
@@ -254,6 +256,43 @@ const ToolRequest = struct {
     pattern: []const u8 = "",
     command: []const u8 = "",
     content: []const u8 = "",
+};
+
+const RuntimeToolKind = enum {
+    list_files,
+    read_file,
+    search_text,
+    run_command,
+    write_file,
+    ask_user,
+};
+
+const ToolApprovalGate = enum {
+    none,
+    read,
+    shell,
+    write,
+};
+
+const RuntimeToolSpec = struct {
+    kind: RuntimeToolKind,
+    name: []const u8,
+    approval_gate: ToolApprovalGate = .none,
+};
+
+const ValidatedToolRequest = struct {
+    spec: RuntimeToolSpec,
+    detail: []const u8 = "",
+    target: []const u8 = "",
+    path: []const u8 = "",
+    pattern: []const u8 = "",
+    command: []const u8 = "",
+    content: []const u8 = "",
+};
+
+const ToolRequestValidation = union(enum) {
+    ok: ValidatedToolRequest,
+    blocked: RuntimeFailure,
 };
 
 const DecanusDecision = struct {
@@ -706,6 +745,12 @@ const StateManager = struct {
 const ToolExecutionOutcome = struct {
     blocked: bool,
     summary: []const u8,
+};
+
+const ToolRequestExecution = struct {
+    blocked: bool = false,
+    summary: []const u8,
+    failure: ?RuntimeFailure = null,
 };
 
 const RuntimeRunLog = struct {
@@ -4197,10 +4242,19 @@ fn executeToolRequests(
     }
 
     var summaries: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (summaries.items) |summary| allocator.free(summary);
+        summaries.deinit(allocator);
+    }
+
     for (requests) |request| {
         const tool_name = canonicalToolName(request.tool);
         if (tool_name.len == 0) continue;
-        const request_summary = toolRequestDisplay(allocator, request) catch tool_name;
+
+        const request_summary_owned = toolRequestDisplay(allocator, request) catch null;
+        const request_summary = request_summary_owned orelse tool_name;
+        defer if (request_summary_owned) |owned| allocator.free(owned);
+
         emitLog(hooks, .tool, actorName(actor), tool_name, request_summary, .plain);
         try logRuntimeEvent(allocator, config, state, .{
             .actor = actor,
@@ -4212,257 +4266,85 @@ fn executeToolRequests(
             .input = request_summary,
         });
 
-        if (eql(tool_name, "list_files")) {
-            if (!config.policy.allow_read_tools_without_confirmation and !try confirmTool(allocator, config, state, hooks, actor, lane, tool_name, request.description, request.path)) {
-                const failure = buildRuntimeFailure(state, actor, lane, "TOOL_DENIED", "list_files denied by operator", .{
-                    .tool = tool_name,
-                    .target = request.path,
-                });
+        const validated = switch (validateToolRequest(config, state, actor, lane, request)) {
+            .ok => |value| value,
+            .blocked => |failure| {
+                const blocked_summary = try std.fmt.allocPrint(allocator, "blocked: {s}", .{failure.message});
+                try summaries.append(allocator, blocked_summary);
                 try logRuntimeEvent(allocator, config, state, .{
                     .actor = actor,
                     .lane = lane,
                     .action = "tool_result",
                     .status = "blocked",
-                    .tool = tool_name,
+                    .tool = if (tool_name.len > 0) tool_name else request.tool,
                     .summary = failure.message,
                     .error_text = failure.message,
                     .failure = failure,
                     .include_snapshot = true,
                 });
-                return try blockedToolOutcome(allocator, state, failure);
-            }
-            const output = try listWorkspaceFiles(allocator, request.path);
-            const summary = try summarizeCommandResult(allocator, "list_files", output, config.context.max_tool_result_chars);
-            try summaries.append(allocator, summary);
+                recordRuntimeFailure(state, failure);
+                stateManager(state).markBlocked(actor, lane, failure.message);
+                return .{
+                    .blocked = true,
+                    .summary = try joinStrings(allocator, summaries.items, "\n"),
+                };
+            },
+        };
+
+        const execution = executeValidatedToolRequest(allocator, config, state, actor, lane, validated, hooks) catch |err| {
+            const failure = try buildToolExecutionFailure(allocator, config, state, actor, lane, validated, err);
+            const blocked_summary = try std.fmt.allocPrint(allocator, "blocked: {s}", .{failure.message});
+            try summaries.append(allocator, blocked_summary);
             try logRuntimeEvent(allocator, config, state, .{
                 .actor = actor,
                 .lane = lane,
                 .action = "tool_result",
-                .status = "success",
-                .tool = tool_name,
-                .summary = summary,
-                .output = summary,
-            });
-            continue;
-        }
-
-        if (eql(tool_name, "read_file")) {
-            if (!config.policy.allow_read_tools_without_confirmation and !try confirmTool(allocator, config, state, hooks, actor, lane, tool_name, request.description, request.path)) {
-                const failure = buildRuntimeFailure(state, actor, lane, "TOOL_DENIED", "read_file denied by operator", .{
-                    .tool = tool_name,
-                    .target = request.path,
-                });
-                try logRuntimeEvent(allocator, config, state, .{
-                    .actor = actor,
-                    .lane = lane,
-                    .action = "tool_result",
-                    .status = "blocked",
-                    .tool = tool_name,
-                    .summary = failure.message,
-                    .error_text = failure.message,
-                    .failure = failure,
-                    .include_snapshot = true,
-                });
-                return try blockedToolOutcome(allocator, state, failure);
-            }
-            const path = if (request.path.len > 0) request.path else return error.MissingPath;
-            const content = try readFileLimited(allocator, path, config.context.max_file_read_bytes);
-            const summary = try truncateText(allocator, try std.fmt.allocPrint(allocator, "read_file {s}\n{s}", .{ path, content }), config.context.max_tool_result_chars);
-            try summaries.append(allocator, summary);
-            try logRuntimeEvent(allocator, config, state, .{
-                .actor = actor,
-                .lane = lane,
-                .action = "tool_result",
-                .status = "success",
-                .tool = tool_name,
-                .summary = summary,
-                .output = summary,
-            });
-            continue;
-        }
-
-        if (eql(tool_name, "search_text")) {
-            if (!config.policy.allow_read_tools_without_confirmation and !try confirmTool(allocator, config, state, hooks, actor, lane, tool_name, request.description, request.path)) {
-                const failure = buildRuntimeFailure(state, actor, lane, "TOOL_DENIED", "search_text denied by operator", .{
-                    .tool = tool_name,
-                    .target = request.path,
-                });
-                try logRuntimeEvent(allocator, config, state, .{
-                    .actor = actor,
-                    .lane = lane,
-                    .action = "tool_result",
-                    .status = "blocked",
-                    .tool = tool_name,
-                    .summary = failure.message,
-                    .error_text = failure.message,
-                    .failure = failure,
-                    .include_snapshot = true,
-                });
-                return try blockedToolOutcome(allocator, state, failure);
-            }
-            const path = if (request.path.len > 0) request.path else ".";
-            const pattern = if (request.pattern.len > 0) request.pattern else return error.MissingPattern;
-            const output = try searchText(allocator, pattern, path, config.context.max_search_hits);
-            const summary = try truncateText(allocator, try std.fmt.allocPrint(allocator, "search_text {s} in {s}\n{s}", .{ pattern, path, output }), config.context.max_tool_result_chars);
-            try summaries.append(allocator, summary);
-            try logRuntimeEvent(allocator, config, state, .{
-                .actor = actor,
-                .lane = lane,
-                .action = "tool_result",
-                .status = "success",
-                .tool = tool_name,
-                .summary = summary,
-                .output = summary,
-            });
-            continue;
-        }
-
-        if (eql(tool_name, "run_command")) {
-            if (commandIsBlocked(config.policy.blocked_command_patterns, request.command)) {
-                const failure = buildRuntimeFailure(state, actor, lane, "TOOL_POLICY_BLOCKED", "run_command blocked by policy", .{
-                    .tool = tool_name,
-                    .command = request.command,
-                });
-                try logRuntimeEvent(allocator, config, state, .{
-                    .actor = actor,
-                    .lane = lane,
-                    .action = "tool_result",
-                    .status = "blocked",
-                    .tool = tool_name,
-                    .summary = failure.message,
-                    .error_text = failure.message,
-                    .failure = failure,
-                    .include_snapshot = true,
-                });
-                return try blockedToolOutcome(allocator, state, failure);
-            }
-            if (!config.policy.allow_shell_without_confirmation and !try confirmTool(allocator, config, state, hooks, actor, lane, tool_name, request.command, request.command)) {
-                const failure = buildRuntimeFailure(state, actor, lane, "TOOL_DENIED", "run_command denied by operator", .{
-                    .tool = tool_name,
-                    .command = request.command,
-                });
-                try logRuntimeEvent(allocator, config, state, .{
-                    .actor = actor,
-                    .lane = lane,
-                    .action = "tool_result",
-                    .status = "blocked",
-                    .tool = tool_name,
-                    .summary = failure.message,
-                    .error_text = failure.message,
-                    .failure = failure,
-                    .include_snapshot = true,
-                });
-                return try blockedToolOutcome(allocator, state, failure);
-            }
-            const output = try runShellCommand(allocator, request.command);
-            const summary = try summarizeCommandResult(allocator, "run_command", output, config.context.max_tool_result_chars);
-            try summaries.append(allocator, summary);
-            try logRuntimeEvent(allocator, config, state, .{
-                .actor = actor,
-                .lane = lane,
-                .action = "tool_result",
-                .status = "success",
-                .tool = tool_name,
-                .summary = summary,
-                .output = summary,
-            });
-            continue;
-        }
-
-        if (eql(tool_name, "write_file")) {
-            const path = if (request.path.len > 0) request.path else return error.MissingPath;
-            if (!pathIsSafeForWrite(path)) {
-                const failure = buildRuntimeFailure(state, actor, lane, "TOOL_PATH_UNSAFE", "write_file path outside workspace policy", .{
-                    .tool = tool_name,
-                    .target = path,
-                });
-                try logRuntimeEvent(allocator, config, state, .{
-                    .actor = actor,
-                    .lane = lane,
-                    .action = "tool_result",
-                    .status = "blocked",
-                    .tool = tool_name,
-                    .summary = failure.message,
-                    .error_text = failure.message,
-                    .failure = failure,
-                    .include_snapshot = true,
-                });
-                return try blockedToolOutcome(allocator, state, failure);
-            }
-            if (!config.policy.allow_workspace_writes_without_confirmation and !try confirmTool(allocator, config, state, hooks, actor, lane, tool_name, path, path)) {
-                const failure = buildRuntimeFailure(state, actor, lane, "TOOL_DENIED", "write_file denied by operator", .{
-                    .tool = tool_name,
-                    .target = path,
-                });
-                try logRuntimeEvent(allocator, config, state, .{
-                    .actor = actor,
-                    .lane = lane,
-                    .action = "tool_result",
-                    .status = "blocked",
-                    .tool = tool_name,
-                    .summary = failure.message,
-                    .error_text = failure.message,
-                    .failure = failure,
-                    .include_snapshot = true,
-                });
-                return try blockedToolOutcome(allocator, state, failure);
-            }
-            try writeFile(path, request.content);
-            const summary = try std.fmt.allocPrint(allocator, "write_file {s} ({d} bytes)", .{ path, request.content.len });
-            try summaries.append(allocator, summary);
-            try logRuntimeEvent(allocator, config, state, .{
-                .actor = actor,
-                .lane = lane,
-                .action = "tool_result",
-                .status = "success",
-                .tool = tool_name,
-                .summary = summary,
-                .output = summary,
-            });
-            continue;
-        }
-
-        if (eql(tool_name, "ask_user")) {
-            const question = if (request.description.len > 0) request.description else "tool requested user input";
-            const failure = buildRuntimeFailure(state, actor, lane, "USER_INPUT_REQUIRED", question, .{
-                .tool = tool_name,
-                .detail = "tool requested user input",
+                .status = if (err == error.ToolTimedOut) "blocked" else "error",
+                .tool = validated.spec.name,
+                .summary = failure.message,
+                .error_text = failure.message,
+                .failure = failure,
+                .include_snapshot = true,
             });
             recordRuntimeFailure(state, failure);
-            stateManager(state).markBlocked(actor, lane, question);
-            try summaries.append(allocator, try std.fmt.allocPrint(allocator, "ask_user {s}", .{question}));
+            stateManager(state).markBlocked(actor, lane, failure.message);
+            return .{
+                .blocked = true,
+                .summary = try joinStrings(allocator, summaries.items, "\n"),
+            };
+        };
+
+        try summaries.append(allocator, execution.summary);
+
+        if (execution.blocked) {
+            const failure = execution.failure.?;
             try logRuntimeEvent(allocator, config, state, .{
                 .actor = actor,
                 .lane = lane,
                 .action = "tool_result",
                 .status = "blocked",
-                .tool = tool_name,
-                .summary = question,
-                .error_text = question,
+                .tool = validated.spec.name,
+                .summary = execution.summary,
+                .error_text = failure.message,
                 .failure = failure,
                 .include_snapshot = true,
             });
-            emitLog(hooks, .warning, actorName(actor), "Question", question, .plain);
+            recordRuntimeFailure(state, failure);
+            stateManager(state).markBlocked(actor, lane, failure.message);
             return .{
                 .blocked = true,
                 .summary = try joinStrings(allocator, summaries.items, "\n"),
             };
         }
 
-        const summary = try std.fmt.allocPrint(allocator, "unknown tool `{s}` requested by {s} on lane {s}", .{ request.tool, actorName(actor), laneName(lane) });
-        const failure = buildRuntimeFailure(state, actor, lane, "UNKNOWN_TOOL_REQUEST", summary, .{
-            .tool = request.tool,
-        });
-        try summaries.append(allocator, summary);
         try logRuntimeEvent(allocator, config, state, .{
             .actor = actor,
             .lane = lane,
             .action = "tool_result",
-            .status = "error",
-            .tool = request.tool,
-            .summary = summary,
-            .error_text = summary,
-            .failure = failure,
+            .status = "success",
+            .tool = validated.spec.name,
+            .summary = execution.summary,
+            .output = execution.summary,
         });
     }
 
@@ -5306,8 +5188,106 @@ fn runCommandCapture(allocator: std.mem.Allocator, argv: []const []const u8) !Co
     };
 }
 
-fn runShellCommand(allocator: std.mem.Allocator, command: []const u8) !CommandResult {
-    return try runCommandCapture(allocator, &.{ "sh", "-lc", command });
+fn freeCommandResult(allocator: std.mem.Allocator, result: CommandResult) void {
+    allocator.free(result.stdout);
+    allocator.free(result.stderr);
+}
+
+fn runCommandCaptureWithTimeout(
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+    timeout_ms: usize,
+) !CommandResult {
+    if (timeout_ms == 0) return try runCommandCapture(allocator, argv);
+
+    var child = std.process.Child.init(argv, allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+    try child.spawn();
+    try child.waitForSpawn();
+    errdefer {
+        if (child.term == null) _ = child.kill() catch {};
+    }
+
+    var stdout_text: std.ArrayList(u8) = .empty;
+    errdefer stdout_text.deinit(allocator);
+    var stderr_text: std.ArrayList(u8) = .empty;
+    errdefer stderr_text.deinit(allocator);
+
+    var stdout_open = child.stdout != null;
+    var stderr_open = child.stderr != null;
+    const started = std.time.milliTimestamp();
+
+    while (stdout_open or stderr_open) {
+        const now = std.time.milliTimestamp();
+        const elapsed_ms = if (now > started) @as(usize, @intCast(now - started)) else 0;
+        if (elapsed_ms >= timeout_ms) {
+            _ = child.kill() catch {};
+            return error.ToolTimedOut;
+        }
+
+        var poll_items: [2]std.posix.pollfd = undefined;
+        var poll_count: usize = 0;
+        if (stdout_open) {
+            poll_items[poll_count] = .{
+                .fd = child.stdout.?.handle,
+                .events = std.posix.POLL.IN | std.posix.POLL.HUP,
+                .revents = 0,
+            };
+            poll_count += 1;
+        }
+        if (stderr_open) {
+            poll_items[poll_count] = .{
+                .fd = child.stderr.?.handle,
+                .events = std.posix.POLL.IN | std.posix.POLL.HUP,
+                .revents = 0,
+            };
+            poll_count += 1;
+        }
+
+        const remaining_ms = timeout_ms - elapsed_ms;
+        const poll_timeout: i32 = @intCast(@min(remaining_ms, @as(usize, 100)));
+        _ = try std.posix.poll(poll_items[0..poll_count], poll_timeout);
+
+        var poll_index: usize = 0;
+        if (stdout_open) {
+            const item = poll_items[poll_index];
+            if ((item.revents & (std.posix.POLL.IN | std.posix.POLL.HUP)) != 0) {
+                var buffer: [4096]u8 = undefined;
+                const read_len = try child.stdout.?.read(&buffer);
+                if (read_len == 0) {
+                    stdout_open = false;
+                } else {
+                    try stdout_text.appendSlice(allocator, buffer[0..read_len]);
+                }
+            }
+            poll_index += 1;
+        }
+        if (stderr_open) {
+            const item = poll_items[poll_index];
+            if ((item.revents & (std.posix.POLL.IN | std.posix.POLL.HUP)) != 0) {
+                var buffer: [1024]u8 = undefined;
+                const read_len = try child.stderr.?.read(&buffer);
+                if (read_len == 0) {
+                    stderr_open = false;
+                } else {
+                    try stderr_text.appendSlice(allocator, buffer[0..read_len]);
+                }
+            }
+        }
+    }
+
+    const term = try child.wait();
+    return .{
+        .stdout = try stdout_text.toOwnedSlice(allocator),
+        .stderr = try stderr_text.toOwnedSlice(allocator),
+        .exit_code = exitCode(term),
+    };
+}
+
+fn runShellCommand(allocator: std.mem.Allocator, command: []const u8, timeout_ms: usize) !CommandResult {
+    return try runCommandCaptureWithTimeout(allocator, &.{ "sh", "-lc", command }, timeout_ms);
 }
 
 fn shouldSkipWorkspacePath(path: []const u8, prune_noise: bool) bool {
@@ -5394,7 +5374,7 @@ fn listWorkspaceFiles(allocator: std.mem.Allocator, path: []const u8) !CommandRe
             const stdout = try allocator.dupe(u8, root);
             return .{
                 .stdout = stdout,
-                .stderr = "",
+                .stderr = try allocator.dupe(u8, ""),
                 .exit_code = 0,
             };
         },
@@ -5418,7 +5398,10 @@ fn listWorkspaceFiles(allocator: std.mem.Allocator, path: []const u8) !CommandRe
 
     return .{
         .stdout = stdout,
-        .stderr = if (truncated) "truncated directory listing" else "",
+        .stderr = if (truncated)
+            try allocator.dupe(u8, "truncated directory listing")
+        else
+            try allocator.dupe(u8, ""),
         .exit_code = 0,
     };
 }
@@ -5437,18 +5420,25 @@ fn summarizeCommandResult(
     return try truncateText(allocator, combined, max_chars);
 }
 
-fn searchText(allocator: std.mem.Allocator, pattern: []const u8, path: []const u8, max_hits: usize) ![]const u8 {
-    const rg_result = runCommandCapture(allocator, &.{ "rg", "-n", "--no-heading", "--max-count", try std.fmt.allocPrint(allocator, "{d}", .{max_hits}), pattern, path }) catch |err| switch (err) {
+fn searchText(allocator: std.mem.Allocator, pattern: []const u8, path: []const u8, max_hits: usize, timeout_ms: usize) ![]const u8 {
+    const max_count = try std.fmt.allocPrint(allocator, "{d}", .{max_hits});
+    defer allocator.free(max_count);
+
+    const rg_result = runCommandCaptureWithTimeout(allocator, &.{ "rg", "-n", "--no-heading", "--max-count", max_count, pattern, path }, timeout_ms) catch |err| switch (err) {
         error.FileNotFound => {
-            const grep_result = try runCommandCapture(allocator, &.{ "grep", "-R", "-n", pattern, path });
+            const grep_result = try runCommandCaptureWithTimeout(allocator, &.{ "grep", "-R", "-n", pattern, path }, timeout_ms);
+            allocator.free(grep_result.stderr);
             return grep_result.stdout;
         },
         else => return err,
     };
     if (rg_result.exit_code == 0 or rg_result.exit_code == 1) {
+        allocator.free(rg_result.stderr);
         return rg_result.stdout;
     }
-    const grep_result = try runCommandCapture(allocator, &.{ "grep", "-R", "-n", pattern, path });
+    freeCommandResult(allocator, rg_result);
+    const grep_result = try runCommandCaptureWithTimeout(allocator, &.{ "grep", "-R", "-n", pattern, path }, timeout_ms);
+    allocator.free(grep_result.stderr);
     return grep_result.stdout;
 }
 
@@ -5902,13 +5892,333 @@ fn buildPromptWithContextBudget(
     }
 }
 
-fn blockedToolOutcome(allocator: std.mem.Allocator, state: *AppState, failure: RuntimeFailure) !ToolExecutionOutcome {
-    recordRuntimeFailure(state, failure);
-    stateManager(state).markBlocked(state.current_actor, laneForActor(state.current_actor), failure.message);
-    return .{
-        .blocked = true,
-        .summary = try std.fmt.allocPrint(allocator, "blocked: {s}", .{failure.message}),
+fn runtimeToolSpec(tool_name: []const u8) ?RuntimeToolSpec {
+    const normalized = canonicalToolName(tool_name);
+    if (eql(normalized, "list_files")) return .{ .kind = .list_files, .name = "list_files", .approval_gate = .read };
+    if (eql(normalized, "read_file")) return .{ .kind = .read_file, .name = "read_file", .approval_gate = .read };
+    if (eql(normalized, "search_text")) return .{ .kind = .search_text, .name = "search_text", .approval_gate = .read };
+    if (eql(normalized, "run_command")) return .{ .kind = .run_command, .name = "run_command", .approval_gate = .shell };
+    if (eql(normalized, "write_file")) return .{ .kind = .write_file, .name = "write_file", .approval_gate = .write };
+    if (eql(normalized, "ask_user")) return .{ .kind = .ask_user, .name = "ask_user", .approval_gate = .none };
+    return null;
+}
+
+fn toolAllowsWithoutConfirmation(spec: RuntimeToolSpec, policy: PolicyConfig) bool {
+    return switch (spec.approval_gate) {
+        .none => true,
+        .read => policy.allow_read_tools_without_confirmation,
+        .shell => policy.allow_shell_without_confirmation,
+        .write => policy.allow_workspace_writes_without_confirmation,
     };
+}
+
+fn pathIsSafeForWorkspace(path: []const u8) bool {
+    const trimmed = trimAscii(path);
+    if (trimmed.len == 0) return true;
+    if (std.fs.path.isAbsolute(trimmed)) return false;
+
+    var parts = std.mem.splitScalar(u8, trimmed, '/');
+    while (parts.next()) |part| {
+        if (eql(part, "..")) return false;
+    }
+    return true;
+}
+
+fn toolRequestContextSpec(request: ToolRequest, spec: RuntimeToolSpec) RuntimeFailureContextSpec {
+    const target = if (request.path.len > 0)
+        request.path
+    else if (request.pattern.len > 0)
+        request.pattern
+    else if (request.command.len > 0)
+        request.command
+    else
+        request.description;
+    const detail = if (request.description.len > 0)
+        request.description
+    else if (request.pattern.len > 0)
+        request.pattern
+    else if (request.command.len > 0)
+        request.command
+    else
+        request.path;
+    return .{
+        .tool = spec.name,
+        .target = target,
+        .command = request.command,
+        .detail = detail,
+    };
+}
+
+fn validatedToolContextSpec(request: ValidatedToolRequest) RuntimeFailureContextSpec {
+    return .{
+        .tool = request.spec.name,
+        .target = request.target,
+        .command = request.command,
+        .detail = request.detail,
+    };
+}
+
+fn validateToolRequest(
+    config: AppConfig,
+    state: *AppState,
+    actor: Actor,
+    lane: Lane,
+    request: ToolRequest,
+) ToolRequestValidation {
+    const spec = runtimeToolSpec(request.tool) orelse return .{
+        .blocked = buildRuntimeFailure(state, actor, lane, "UNKNOWN_TOOL_REQUEST", "runtime tool is not supported", .{
+            .tool = canonicalToolName(request.tool),
+            .detail = request.description,
+        }),
+    };
+
+    switch (spec.kind) {
+        .list_files => {
+            const path = if (trimAscii(request.path).len > 0) trimAscii(request.path) else ".";
+            if (!pathIsSafeForWorkspace(path)) {
+                return .{
+                    .blocked = buildRuntimeFailure(state, actor, lane, "TOOL_PATH_UNSAFE", "tool path escapes workspace policy", .{
+                        .tool = spec.name,
+                        .target = path,
+                        .detail = request.description,
+                    }),
+                };
+            }
+            return .{
+                .ok = .{
+                    .spec = spec,
+                    .detail = if (request.description.len > 0) request.description else path,
+                    .target = path,
+                    .path = path,
+                },
+            };
+        },
+        .read_file => {
+            const path = trimAscii(request.path);
+            if (path.len == 0) {
+                return .{
+                    .blocked = buildRuntimeFailure(state, actor, lane, "MISSING_PATH", "read_file requires a path", toolRequestContextSpec(request, spec)),
+                };
+            }
+            if (!pathIsSafeForWorkspace(path)) {
+                return .{
+                    .blocked = buildRuntimeFailure(state, actor, lane, "TOOL_PATH_UNSAFE", "tool path escapes workspace policy", .{
+                        .tool = spec.name,
+                        .target = path,
+                        .detail = request.description,
+                    }),
+                };
+            }
+            return .{
+                .ok = .{
+                    .spec = spec,
+                    .detail = if (request.description.len > 0) request.description else path,
+                    .target = path,
+                    .path = path,
+                },
+            };
+        },
+        .search_text => {
+            const pattern = trimAscii(request.pattern);
+            if (pattern.len == 0) {
+                return .{
+                    .blocked = buildRuntimeFailure(state, actor, lane, "MISSING_PATTERN", "search_text requires a pattern", toolRequestContextSpec(request, spec)),
+                };
+            }
+            const path = if (trimAscii(request.path).len > 0) trimAscii(request.path) else ".";
+            if (!pathIsSafeForWorkspace(path)) {
+                return .{
+                    .blocked = buildRuntimeFailure(state, actor, lane, "TOOL_PATH_UNSAFE", "tool path escapes workspace policy", .{
+                        .tool = spec.name,
+                        .target = path,
+                        .detail = pattern,
+                    }),
+                };
+            }
+            return .{
+                .ok = .{
+                    .spec = spec,
+                    .detail = if (request.description.len > 0) request.description else pattern,
+                    .target = path,
+                    .path = path,
+                    .pattern = pattern,
+                },
+            };
+        },
+        .run_command => {
+            const command = trimAscii(request.command);
+            if (command.len == 0) {
+                return .{
+                    .blocked = buildRuntimeFailure(state, actor, lane, "MISSING_COMMAND", "run_command requires a command", toolRequestContextSpec(request, spec)),
+                };
+            }
+            if (commandIsBlocked(config.policy.blocked_command_patterns, command)) {
+                return .{
+                    .blocked = buildRuntimeFailure(state, actor, lane, "TOOL_POLICY_BLOCKED", "run_command blocked by policy", .{
+                        .tool = spec.name,
+                        .command = command,
+                        .detail = request.description,
+                    }),
+                };
+            }
+            return .{
+                .ok = .{
+                    .spec = spec,
+                    .detail = if (request.description.len > 0) request.description else command,
+                    .target = command,
+                    .command = command,
+                },
+            };
+        },
+        .write_file => {
+            const path = trimAscii(request.path);
+            if (path.len == 0) {
+                return .{
+                    .blocked = buildRuntimeFailure(state, actor, lane, "MISSING_PATH", "write_file requires a path", toolRequestContextSpec(request, spec)),
+                };
+            }
+            if (!pathIsSafeForWorkspace(path)) {
+                return .{
+                    .blocked = buildRuntimeFailure(state, actor, lane, "TOOL_PATH_UNSAFE", "tool path escapes workspace policy", .{
+                        .tool = spec.name,
+                        .target = path,
+                        .detail = request.description,
+                    }),
+                };
+            }
+            return .{
+                .ok = .{
+                    .spec = spec,
+                    .detail = if (request.description.len > 0) request.description else path,
+                    .target = path,
+                    .path = path,
+                    .content = request.content,
+                },
+            };
+        },
+        .ask_user => {
+            const question = if (trimAscii(request.description).len > 0) trimAscii(request.description) else "tool requested user input";
+            return .{
+                .ok = .{
+                    .spec = spec,
+                    .detail = question,
+                    .target = question,
+                },
+            };
+        },
+    }
+}
+
+fn buildToolExecutionFailure(
+    allocator: std.mem.Allocator,
+    config: AppConfig,
+    state: *AppState,
+    actor: Actor,
+    lane: Lane,
+    request: ValidatedToolRequest,
+    err: anyerror,
+) !RuntimeFailure {
+    if (err == error.ToolTimedOut) {
+        return buildRuntimeFailure(
+            state,
+            actor,
+            lane,
+            "TOOL_TIMEOUT",
+            try std.fmt.allocPrint(allocator, "{s} exceeded the {d}ms runtime limit", .{ request.spec.name, config.policy.tool_timeout_ms }),
+            validatedToolContextSpec(request),
+        );
+    }
+    if (err == error.FileNotFound) {
+        return buildRuntimeFailure(state, actor, lane, "FILE_NOT_FOUND", "requested path was not found inside the workspace", validatedToolContextSpec(request));
+    }
+    if (err == error.IsDir) {
+        return buildRuntimeFailure(state, actor, lane, "TOOL_TARGET_INVALID", "tool expected a file but received a directory", validatedToolContextSpec(request));
+    }
+    if (err == error.AccessDenied) {
+        return buildRuntimeFailure(state, actor, lane, "TOOL_ACCESS_DENIED", "tool access was denied by the operating system", validatedToolContextSpec(request));
+    }
+    return buildRuntimeFailure(
+        state,
+        actor,
+        lane,
+        "TOOL_EXECUTION_FAILED",
+        try std.fmt.allocPrint(allocator, "{s} failed: {s}", .{ request.spec.name, @errorName(err) }),
+        validatedToolContextSpec(request),
+    );
+}
+
+fn executeValidatedToolRequest(
+    allocator: std.mem.Allocator,
+    config: AppConfig,
+    state: *AppState,
+    actor: Actor,
+    lane: Lane,
+    request: ValidatedToolRequest,
+    hooks: RuntimeHooks,
+) !ToolRequestExecution {
+    if (!toolAllowsWithoutConfirmation(request.spec, config.policy) and
+        !try confirmTool(allocator, config, state, hooks, actor, lane, request.spec.name, request.detail, request.target))
+    {
+        return .{
+            .blocked = true,
+            .failure = buildRuntimeFailure(state, actor, lane, "TOOL_DENIED", "runtime tool denied by operator", validatedToolContextSpec(request)),
+            .summary = try std.fmt.allocPrint(allocator, "blocked: {s} denied by operator", .{request.spec.name}),
+        };
+    }
+
+    switch (request.spec.kind) {
+        .list_files => {
+            const output = try listWorkspaceFiles(allocator, request.path);
+            defer freeCommandResult(allocator, output);
+            return .{
+                .summary = try summarizeCommandResult(allocator, request.spec.name, output, config.context.max_tool_result_chars),
+            };
+        },
+        .read_file => {
+            const content = try readFileLimited(allocator, request.path, config.context.max_file_read_bytes);
+            defer allocator.free(content);
+            return .{
+                .summary = try truncateText(
+                    allocator,
+                    try std.fmt.allocPrint(allocator, "read_file {s}\n{s}", .{ request.path, content }),
+                    config.context.max_tool_result_chars,
+                ),
+            };
+        },
+        .search_text => {
+            const output = try searchText(allocator, request.pattern, request.path, config.context.max_search_hits, config.policy.tool_timeout_ms);
+            defer allocator.free(output);
+            return .{
+                .summary = try truncateText(
+                    allocator,
+                    try std.fmt.allocPrint(allocator, "search_text {s} in {s}\n{s}", .{ request.pattern, request.path, output }),
+                    config.context.max_tool_result_chars,
+                ),
+            };
+        },
+        .run_command => {
+            const output = try runShellCommand(allocator, request.command, config.policy.tool_timeout_ms);
+            defer freeCommandResult(allocator, output);
+            return .{
+                .summary = try summarizeCommandResult(allocator, request.spec.name, output, config.context.max_tool_result_chars),
+            };
+        },
+        .write_file => {
+            try writeFile(request.path, request.content);
+            return .{
+                .summary = try std.fmt.allocPrint(allocator, "write_file {s} ({d} bytes)", .{ request.path, request.content.len }),
+            };
+        },
+        .ask_user => {
+            const failure = buildRuntimeFailure(state, actor, lane, "USER_INPUT_REQUIRED", request.detail, validatedToolContextSpec(request));
+            emitLog(hooks, .warning, actorName(actor), "Question", request.detail, .plain);
+            return .{
+                .blocked = true,
+                .failure = failure,
+                .summary = try std.fmt.allocPrint(allocator, "ask_user {s}", .{request.detail}),
+            };
+        },
+    }
 }
 
 fn toolRequestDisplay(allocator: std.mem.Allocator, request: ToolRequest) ![]const u8 {
@@ -6024,11 +6334,7 @@ fn pathExists(path: []const u8) bool {
 }
 
 fn pathIsSafeForWrite(path: []const u8) bool {
-    if (std.fs.path.isAbsolute(path)) return false;
-    if (eql(path, "..")) return false;
-    if (std.mem.startsWith(u8, path, "../")) return false;
-    if (std.mem.indexOf(u8, path, "/../") != null) return false;
-    return true;
+    return pathIsSafeForWorkspace(path);
 }
 
 fn commandIsBlocked(patterns: []const []const u8, command: []const u8) bool {
@@ -8079,6 +8385,10 @@ fn testQueueEmit(context: ?*anyopaque, event: RuntimeUiEvent) void {
     queue.push(event);
 }
 
+fn testDenyApproval(_: ?*anyopaque, _: []const u8, _: []const u8) bool {
+    return false;
+}
+
 test "parseUiFlavor defaults to vaxis" {
     const testing = std.testing;
     try testing.expectEqual(UiFlavor.vaxis, try parseUiFlavor(&.{}));
@@ -8391,11 +8701,72 @@ test "openAIMessageRawText converts tool calls into structured tool_request JSON
 test "listWorkspaceFiles defaults empty path and skips noisy roots" {
     const testing = std.testing;
     const result = try listWorkspaceFiles(testing.allocator, "");
-    defer testing.allocator.free(result.stdout);
+    defer freeCommandResult(testing.allocator, result);
 
     try testing.expect(result.exit_code == 0);
     try testing.expect(std.mem.indexOf(u8, result.stdout, "README.md") != null);
     try testing.expect(std.mem.indexOf(u8, result.stdout, ".git/") == null);
+}
+
+test "executeToolRequests mediates valid list_files execution through the runtime tool layer" {
+    const testing = std.testing;
+    var state = AppState{};
+
+    const outcome = try executeToolRequests(testing.allocator, AppConfig{}, &state, .decanus, .command, &.{
+        .{ .tool = "list_files" },
+    }, .{});
+    defer testing.allocator.free(outcome.summary);
+
+    try testing.expect(!outcome.blocked);
+    try testing.expect(std.mem.indexOf(u8, outcome.summary, "list_files (exit 0)") != null);
+}
+
+test "executeToolRequests blocks policy-denied commands with structured failure state" {
+    const testing = std.testing;
+    var state = AppState{};
+
+    const outcome = try executeToolRequests(testing.allocator, AppConfig{}, &state, .decanus, .command, &.{
+        .{ .tool = "run_command", .command = "git reset --hard" },
+    }, .{});
+    defer testing.allocator.free(outcome.summary);
+
+    try testing.expect(outcome.blocked);
+    try testing.expectEqualStrings("TOOL_POLICY_BLOCKED", state.runtime_session.last_failure.error_code);
+    try testing.expectEqualStrings("run_command", state.runtime_session.last_failure.context.tool);
+    try testing.expect(std.mem.indexOf(u8, outcome.summary, "blocked: run_command blocked by policy") != null);
+}
+
+test "executeToolRequests converts malformed read_file requests into structured failures" {
+    const testing = std.testing;
+    var state = AppState{};
+
+    const outcome = try executeToolRequests(testing.allocator, AppConfig{}, &state, .decanus, .command, &.{
+        .{ .tool = "read_file" },
+    }, .{});
+    defer testing.allocator.free(outcome.summary);
+
+    try testing.expect(outcome.blocked);
+    try testing.expectEqualStrings("MISSING_PATH", state.runtime_session.last_failure.error_code);
+    try testing.expectEqualStrings("read_file", state.runtime_session.last_failure.context.tool);
+    try testing.expect(std.mem.indexOf(u8, outcome.summary, "blocked: read_file requires a path") != null);
+}
+
+test "executeToolRequests records approval denials through the mediated write_file path" {
+    const testing = std.testing;
+    var state = AppState{};
+    const hooks = RuntimeHooks{
+        .approval_fn = testDenyApproval,
+    };
+
+    const outcome = try executeToolRequests(testing.allocator, AppConfig{}, &state, .decanus, .command, &.{
+        .{ .tool = "write_file", .path = "phase5-test.txt", .content = "salve" },
+    }, hooks);
+    defer testing.allocator.free(outcome.summary);
+
+    try testing.expect(outcome.blocked);
+    try testing.expectEqualStrings("TOOL_DENIED", state.runtime_session.last_failure.error_code);
+    try testing.expectEqualStrings("write_file", state.runtime_session.last_failure.context.tool);
+    try testing.expectEqual(ApprovalStatus.denied, state.runtime_session.active_approval.status);
 }
 
 test "summarizeDecanusDecisionForUi renders compact tool request summary" {

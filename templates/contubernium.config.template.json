@@ -25,6 +25,7 @@
     "allow_read_tools_without_confirmation": true,
     "allow_workspace_writes_without_confirmation": false,
     "allow_shell_without_confirmation": false,
+    "tool_timeout_ms": 120000,
     "blocked_command_patterns": [
       "rm -rf",
       "git reset --hard"

@@ -8,7 +8,7 @@ This checklist tracks implementation progress against [FEATURES.md](docs/FEATURE
 - [x] 2. Error system
 - [x] 3. State manager
 - [x] 4. Basic agent loop (no agents yet)
-- [ ] 5. Tool execution layer
+- [x] 5. Tool execution layer
 - [ ] 6. Single agent (Decanus only)
 - [ ] 7. Memory system hookup
 - [ ] 8. Then TUI
@@ -39,7 +39,6 @@ Done:
 - [x] Included structured failure payloads in runtime log events so failures are inspectable beyond plain text
 
 Still to do later:
-- [ ] Phase 5: tighten the tool execution layer around typed mediation and validation
 - [ ] Phase 6: constrain execution to Decanus-only behavior where later-phase logic currently reaches beyond that target
 - [ ] Phase 7: hook the external memory layers fully into the runtime flow
 - [ ] Phase 8: refine the TUI only after the underlying runtime stack is confirmed
@@ -69,3 +68,16 @@ Done:
 - [x] Made the loop's `result` step explicit for runtime-tool and invocation-result transitions without redesigning the tool layer or TUI
 - [x] Preserved phase-1 structured logging, phase-2 structured failures, and phase-3 state-manager ownership while reducing duplicated loop-transition logic in actor-specific turn handling
 - [x] Added focused tests covering runtime tool result progression, invocation handoff/result progression, and mission completion
+
+## Phase 5: Tool execution layer
+
+Reference:
+- [FEATURES.md](docs/FEATURES.md) section `1.2 Tool Execution System`
+- [PHASE_HANDOFF.md](PHASE_HANDOFF.md) section `Phase 5 Target`
+
+Done:
+- [x] Replaced the long ad hoc tool-name branch in `src/main.zig` with a typed runtime mediation layer for lookup, approval policy, validation, and execution dispatch
+- [x] Added explicit per-tool validation for unsupported tools, missing inputs, blocked commands, and workspace-path safety before execution
+- [x] Added structured runtime failure handling for malformed requests, operator denials, policy denials, and command timeouts without regressing phase-1 logs or phase-3/4 loop ownership
+- [x] Added a bounded command timeout policy/config surface so shell-backed tool execution is mediated instead of unbounded
+- [x] Added focused tests for valid execution, malformed input, policy denial, and approval denial through `executeToolRequests`
