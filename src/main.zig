@@ -3757,10 +3757,137 @@ fn executeStep(allocator: std.mem.Allocator, config: AppConfig, state: *AppState
     try stateManager(state).beginTurn(allocator, config);
     emitStateSnapshot(hooks, config, state.*);
 
-    if (state.current_actor == .decanus) {
-        return try executeDecanusTurn(allocator, config, state, hooks);
+    if (state.current_actor != .decanus) {
+        return try blockUnsupportedSpecialistTurn(allocator, config, state, hooks, state.current_actor);
     }
-    return try executeSpecialistTurn(allocator, config, state, hooks);
+    return try executeDecanusTurn(allocator, config, state, hooks);
+}
+
+fn blockSingleAgentRuntimeViolation(
+    allocator: std.mem.Allocator,
+    state: *AppState,
+    actor: Actor,
+    lane: Lane,
+    message: []const u8,
+    detail: []const u8,
+    history_type: []const u8,
+    history_actor: []const u8,
+    history_lane: []const u8,
+    mark_invocation_blocked: bool,
+) !RuntimeFailure {
+    if (mark_invocation_blocked and lane != .command) {
+        const task = taskForLane(state, lane);
+        task.status = .blocked;
+        task.invocation.status = .blocked;
+    }
+
+    state.current_actor = .decanus;
+    state.agent_loop.active_tool = null;
+
+    const failure = buildRuntimeFailure(state, .decanus, .command, "SINGLE_AGENT_RUNTIME_ONLY", message, .{
+        .tool = if (lane == .command) "" else actorName(actor),
+        .target = if (lane == .command) "" else laneName(lane),
+        .detail = detail,
+    });
+    recordRuntimeFailure(state, failure);
+    stateManager(state).markBlocked(.decanus, .command, message);
+    try appendHistory(allocator, state, .{
+        .iteration = state.agent_loop.iteration,
+        .type = history_type,
+        .actor = history_actor,
+        .lane = history_lane,
+        .summary = message,
+        .artifacts = &.{},
+        .timestamp = try unixTimestampString(allocator),
+    });
+    return failure;
+}
+
+fn blockUnsupportedSpecialistTurn(
+    allocator: std.mem.Allocator,
+    config: AppConfig,
+    state: *AppState,
+    hooks: RuntimeHooks,
+    actor: Actor,
+) !StepOutcome {
+    const lane = laneForActor(actor);
+    const task = taskForLane(state, lane);
+    const detail = if (task.invocation.objective.len > 0) task.invocation.objective else "pending specialist execution";
+    const message = try std.fmt.allocPrint(
+        allocator,
+        "phase 6 only supports decanus as the active runtime actor; specialist execution for {s} is disabled",
+        .{actorName(actor)},
+    );
+    const failure = try blockSingleAgentRuntimeViolation(
+        allocator,
+        state,
+        actor,
+        lane,
+        message,
+        detail,
+        "specialist_execution_blocked",
+        actorName(actor),
+        laneName(lane),
+        true,
+    );
+    try logRuntimeEvent(allocator, config, state, .{
+        .actor = .decanus,
+        .lane = .command,
+        .action = "specialist_execution_blocked",
+        .status = "blocked",
+        .tool = actorName(actor),
+        .summary = message,
+        .error_text = message,
+        .failure = failure,
+        .include_snapshot = true,
+    });
+    emitLog(hooks, .danger, "runtime", "Single Agent Only", message, .plain);
+    emitStateSnapshot(hooks, config, state.*);
+    return .blocked;
+}
+
+fn blockUnsupportedSpecialistInvocation(
+    allocator: std.mem.Allocator,
+    config: AppConfig,
+    state: *AppState,
+    hooks: RuntimeHooks,
+    actor: Actor,
+    lane: Lane,
+    objective: []const u8,
+) !StepOutcome {
+    const detail = if (objective.len > 0) objective else "invoke_specialist";
+    const message = try std.fmt.allocPrint(
+        allocator,
+        "phase 6 only supports decanus as the active runtime actor; use runtime tools instead of invoking {s}",
+        .{actorName(actor)},
+    );
+    const failure = try blockSingleAgentRuntimeViolation(
+        allocator,
+        state,
+        actor,
+        lane,
+        message,
+        detail,
+        "specialist_invocation_blocked",
+        "decanus",
+        laneName(lane),
+        false,
+    );
+    try logRuntimeEvent(allocator, config, state, .{
+        .actor = .decanus,
+        .lane = .command,
+        .action = "specialist_invocation_blocked",
+        .status = "blocked",
+        .tool = actorName(actor),
+        .summary = message,
+        .input = objective,
+        .error_text = message,
+        .failure = failure,
+        .include_snapshot = true,
+    });
+    emitLog(hooks, .danger, "decanus", "Single Agent Only", message, .plain);
+    emitStateSnapshot(hooks, config, state.*);
+    return .blocked;
 }
 
 fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *AppState, hooks: RuntimeHooks) !StepOutcome {
@@ -3941,34 +4068,7 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
         else
             .bulk_ops;
         const actor = requested_actor orelse actorForLane(lane);
-        try stateManager(state).prepareInvocationWithHistory(
-            allocator,
-            lane,
-            actor,
-            decision.objective,
-            decision.completion_signal,
-            decision.dependencies,
-        );
-        emitLog(
-            hooks,
-            .warning,
-            "decanus",
-            "Handoff",
-            try std.fmt.allocPrint(allocator, "{s} -> {s} on {s}: {s}", .{ "decanus", actorName(actor), laneName(lane), decision.objective }),
-            .plain,
-        );
-        try logRuntimeEvent(allocator, config, state, .{
-            .actor = .decanus,
-            .lane = lane,
-            .action = "specialist_invoked",
-            .status = "ready",
-            .tool = actorName(actor),
-            .summary = decision.objective,
-            .input = decision.completion_signal,
-            .include_snapshot = true,
-        });
-        emitStateSnapshot(hooks, config, state.*);
-        return .advanced;
+        return try blockUnsupportedSpecialistInvocation(allocator, config, state, hooks, actor, lane, decision.objective);
     }
 
     if (eql(decision.action, "ask_user")) {
@@ -8991,6 +9091,70 @@ test "invocation loop transitions keep shared state and history aligned" {
     try testing.expectEqual(@as(usize, 1), state.agent_loop.intermediate_results.len);
     try testing.expectEqual(@as(usize, 2), state.agent_loop.history.len);
     try testing.expectEqualStrings("tool_result", state.agent_loop.history[1].type);
+}
+
+test "single-agent runtime blocks active specialist turns and returns control to decanus" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+    const config = AppConfig{};
+    var state = AppState{};
+    state.mission.initial_prompt = "complete phase 6";
+    state.current_actor = .faber;
+    state.global_status = .waiting_on_tool;
+    state.agent_loop.iteration = 2;
+    state.agent_loop.active_tool = .faber;
+    state.tasks.backend.status = .in_progress;
+    state.tasks.backend.invocation.status = .running;
+    state.tasks.backend.invocation.objective = "implement the backend slice";
+
+    try stateManager(&state).beginTurn(allocator, config);
+    const outcome = try blockUnsupportedSpecialistTurn(allocator, config, &state, .{}, .faber);
+
+    try testing.expectEqual(StepOutcome.blocked, outcome);
+    try testing.expectEqual(Actor.decanus, state.current_actor);
+    try testing.expectEqual(GlobalStatus.waiting_on_tool, state.global_status);
+    try testing.expectEqual(LoopStatus.blocked, state.agent_loop.status);
+    try testing.expectEqual(RuntimeStatus.blocked, state.runtime_session.status);
+    try testing.expect(state.agent_loop.active_tool == null);
+    try testing.expectEqual(TaskStatus.blocked, state.tasks.backend.status);
+    try testing.expectEqual(InvocationStatus.blocked, state.tasks.backend.invocation.status);
+    try testing.expectEqualStrings("SINGLE_AGENT_RUNTIME_ONLY", state.runtime_session.last_failure.error_code);
+    try testing.expectEqualStrings("implement the backend slice", state.runtime_session.last_failure.context.detail);
+    try testing.expectEqualStrings("specialist_execution_blocked", state.agent_loop.history[0].type);
+}
+
+test "single-agent runtime rejects specialist invocations from decanus" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+    const config = AppConfig{};
+    var state = AppState{};
+    state.mission.initial_prompt = "complete phase 6";
+    state.current_actor = .decanus;
+    state.global_status = .planning;
+    state.agent_loop.status = .thinking;
+    state.agent_loop.iteration = 4;
+
+    const outcome = try blockUnsupportedSpecialistInvocation(
+        allocator,
+        config,
+        &state,
+        .{},
+        .faber,
+        .backend,
+        "implement the backend slice",
+    );
+
+    try testing.expectEqual(StepOutcome.blocked, outcome);
+    try testing.expectEqual(Actor.decanus, state.current_actor);
+    try testing.expectEqual(GlobalStatus.waiting_on_tool, state.global_status);
+    try testing.expectEqual(LoopStatus.blocked, state.agent_loop.status);
+    try testing.expectEqual(RuntimeStatus.blocked, state.runtime_session.status);
+    try testing.expect(state.agent_loop.active_tool == null);
+    try testing.expectEqual(TaskStatus.pending, state.tasks.backend.status);
+    try testing.expectEqual(InvocationStatus.idle, state.tasks.backend.invocation.status);
+    try testing.expectEqualStrings("SINGLE_AGENT_RUNTIME_ONLY", state.runtime_session.last_failure.error_code);
+    try testing.expectEqualStrings("implement the backend slice", state.runtime_session.last_failure.context.detail);
+    try testing.expectEqualStrings("specialist_invocation_blocked", state.agent_loop.history[0].type);
 }
 
 test "mission completion records the finish step and history" {

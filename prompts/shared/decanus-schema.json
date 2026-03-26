@@ -1,14 +1,7 @@
 {
-  "action": "finish | invoke_specialist | tool_request | ask_user | blocked",
+  "action": "finish | tool_request | ask_user | blocked",
   "reasoning": "short explanation",
   "current_goal": "current mission focus",
-  "lane": "backend | frontend | systems | qa | research | brand | media | docs | bulk_ops",
-  "actor": "faber | artifex | architectus | tesserarius | explorator | signifer | praeco | calo | mulus",
-  "objective": "specialist objective when invoking a specialist",
-  "completion_signal": "how completion will be judged",
-  "dependencies": [
-    "optional dependency list"
-  ],
   "final_response": "required when action is finish",
   "question": "required when action is ask_user",
   "blocked_reason": "required when action is blocked",

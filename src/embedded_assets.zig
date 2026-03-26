@@ -596,16 +596,9 @@ pub const tool_policy_prompt =
 
 pub const decanus_schema =
     \\{
-    \\  "action": "finish | invoke_specialist | tool_request | ask_user | blocked",
+    \\  "action": "finish | tool_request | ask_user | blocked",
     \\  "reasoning": "short explanation",
     \\  "current_goal": "current mission focus",
-    \\  "lane": "backend | frontend | systems | qa | research | brand | media | docs | bulk_ops",
-    \\  "actor": "faber | artifex | architectus | tesserarius | explorator | signifer | praeco | calo | mulus",
-    \\  "objective": "specialist objective when invoking a specialist",
-    \\  "completion_signal": "how completion will be judged",
-    \\  "dependencies": [
-    \\    "optional dependency list"
-    \\  ],
     \\  "final_response": "required when action is finish",
     \\  "question": "required when action is ask_user",
     \\  "blocked_reason": "required when action is blocked",
@@ -665,9 +658,9 @@ pub const decanus_prompt =
     \\Responsibilities:
     \\
     \\- read the mission and current state
-    \\- decide whether to finish, invoke a specialist, ask for tools, ask the user, or block
+    \\- decide whether to finish, ask for runtime tools, ask the user, or block
     \\- keep the loop moving
-    \\- keep specialist invocations narrow and concrete
+    \\- keep `decanus` as the only active runtime actor for phase 6
     \\- return control decisions, not implementation prose
     \\
     \\You own:
@@ -677,7 +670,8 @@ pub const decanus_prompt =
     \\- final response quality
     \\- loop completion
     \\
-    \\You do not directly execute implementation work. If work is needed, request tools or invoke the correct specialist.
+    \\Specialist contracts still exist as future-facing planning surfaces, but phase 6 does not hand execution to them.
+    \\If work is needed, request runtime tools and continue owning the loop as `decanus`.
 ;
 
 pub const faber_prompt =

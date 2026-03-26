@@ -9,7 +9,7 @@ This checklist tracks implementation progress against [FEATURES.md](docs/FEATURE
 - [x] 3. State manager
 - [x] 4. Basic agent loop (no agents yet)
 - [x] 5. Tool execution layer
-- [ ] 6. Single agent (Decanus only)
+- [x] 6. Single agent (Decanus only)
 - [ ] 7. Memory system hookup
 - [ ] 8. Then TUI
 
@@ -39,7 +39,6 @@ Done:
 - [x] Included structured failure payloads in runtime log events so failures are inspectable beyond plain text
 
 Still to do later:
-- [ ] Phase 6: constrain execution to Decanus-only behavior where later-phase logic currently reaches beyond that target
 - [ ] Phase 7: hook the external memory layers fully into the runtime flow
 - [ ] Phase 8: refine the TUI only after the underlying runtime stack is confirmed
 
@@ -81,3 +80,16 @@ Done:
 - [x] Added structured runtime failure handling for malformed requests, operator denials, policy denials, and command timeouts without regressing phase-1 logs or phase-3/4 loop ownership
 - [x] Added a bounded command timeout policy/config surface so shell-backed tool execution is mediated instead of unbounded
 - [x] Added focused tests for valid execution, malformed input, policy denial, and approval denial through `executeToolRequests`
+
+## Phase 6: Single agent (Decanus only)
+
+Reference:
+- [FEATURES.md](docs/FEATURES.md) section `0. System Philosophy`
+- [FEATURES.md](docs/FEATURES.md) section `2. Agent Layer`
+- [PHASE_HANDOFF.md](PHASE_HANDOFF.md) section `Phase 6 Target`
+
+Done:
+- [x] Constrained `executeStep` in `src/main.zig` so active runtime execution blocks non-`decanus` turns instead of routing into specialist execution
+- [x] Rejected `invoke_specialist` decisions from `decanus` with structured failures, state/history updates, and explicit runtime log events
+- [x] Updated Decanus prompt/schema assets in `prompts/`, `.contubernium/prompts/`, and `src/embedded_assets.zig` so phase 6 runtime guidance is single-agent by default
+- [x] Added focused tests covering blocked active-specialist turns and blocked specialist-invocation requests without removing the future-facing invocation/state-manager surfaces
