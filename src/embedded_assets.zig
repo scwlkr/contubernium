@@ -45,6 +45,22 @@ pub const state_json =
     \\    "current_turn_id": "",
     \\    "last_health_check": "",
     \\    "last_error": "",
+    \\    "last_failure": {
+    \\      "error_code": "",
+    \\      "message": "",
+    \\      "context": {
+    \\        "actor": "",
+    \\        "lane": "",
+    \\        "tool": "",
+    \\        "target": "",
+    \\        "command": "",
+    \\        "detail": "",
+    \\        "provider": "",
+    \\        "model": "",
+    \\        "turn_id": "",
+    \\        "iteration": 0
+    \\      }
+    \\    },
     \\    "active_log_path": "",
     \\    "last_actor": "decanus",
     \\    "repair_attempts": 0,

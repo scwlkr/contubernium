@@ -5,7 +5,7 @@ This checklist tracks implementation progress against [FEATURES.md](docs/FEATURE
 ## Build Order
 
 - [x] 1. Logging system
-- [ ] 2. Error system
+- [x] 2. Error system
 - [ ] 3. State manager
 - [ ] 4. Basic agent loop (no agents yet)
 - [ ] 5. Tool execution layer
@@ -27,8 +27,18 @@ Done:
 - [x] Kept logging local-first and runtime-owned in Zig without introducing hidden behavior
 - [x] Preserved the existing runtime/TUI state references so the current log path is still observable in the UI snapshot
 
+## Phase 2: Error System
+
+Reference:
+- [FEATURES.md](docs/FEATURES.md) section `7. Error System`
+
+Done:
+- [x] Added a structured runtime failure object with `error_code`, `message`, and `context`
+- [x] Preserved the existing `last_error` string as a compatibility surface while storing canonical structured failure data beside it
+- [x] Standardized blocked/error paths across loop interruption, loop limits, context exhaustion, tool denials, invalid model JSON, and blocked actor turns
+- [x] Included structured failure payloads in runtime log events so failures are inspectable beyond plain text
+
 Still to do later:
-- [ ] Phase 2: normalize first-class error payloads (`error_code`, `message`, `context`)
 - [ ] Phase 3: audit and refine canonical state-manager ownership against `state.json`
 - [ ] Phase 4: isolate and confirm the basic agent loop independently from specialist behavior
 - [ ] Phase 5: tighten the tool execution layer around typed mediation and validation

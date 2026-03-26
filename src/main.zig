@@ -147,6 +147,32 @@ const ContextBudgetState = struct {
     last_condensed_iteration: usize = 0,
 };
 
+const RuntimeErrorContext = struct {
+    actor: []const u8 = "",
+    lane: []const u8 = "",
+    tool: []const u8 = "",
+    target: []const u8 = "",
+    command: []const u8 = "",
+    detail: []const u8 = "",
+    provider: []const u8 = "",
+    model: []const u8 = "",
+    turn_id: []const u8 = "",
+    iteration: usize = 0,
+};
+
+const RuntimeFailure = struct {
+    error_code: []const u8 = "",
+    message: []const u8 = "",
+    context: RuntimeErrorContext = .{},
+};
+
+const RuntimeFailureContextSpec = struct {
+    tool: []const u8 = "",
+    target: []const u8 = "",
+    command: []const u8 = "",
+    detail: []const u8 = "",
+};
+
 const RuntimeSession = struct {
     status: RuntimeStatus = .idle,
     provider: []const u8 = "",
@@ -157,6 +183,7 @@ const RuntimeSession = struct {
     current_turn_id: []const u8 = "",
     last_health_check: []const u8 = "",
     last_error: []const u8 = "",
+    last_failure: RuntimeFailure = .{},
     active_log_path: []const u8 = "",
     last_actor: Actor = .decanus,
     repair_attempts: usize = 0,
@@ -326,6 +353,7 @@ const RuntimeLogEvent = struct {
     input: []const u8 = "",
     output: []const u8 = "",
     error_text: []const u8 = "",
+    failure: ?RuntimeFailure = null,
     snapshot: ?StateSnapshot = null,
 };
 
@@ -339,6 +367,7 @@ const RuntimeLogEventSpec = struct {
     input: []const u8 = "",
     output: []const u8 = "",
     error_text: []const u8 = "",
+    failure: ?RuntimeFailure = null,
     include_snapshot: bool = false,
 };
 
@@ -3044,6 +3073,42 @@ fn parseInvocationResultStatus(text: []const u8) ?InvocationResultStatus {
     return std.meta.stringToEnum(InvocationResultStatus, text);
 }
 
+fn buildRuntimeFailure(
+    state: *const AppState,
+    actor: Actor,
+    lane: Lane,
+    error_code: []const u8,
+    message: []const u8,
+    context_spec: RuntimeFailureContextSpec,
+) RuntimeFailure {
+    return .{
+        .error_code = error_code,
+        .message = message,
+        .context = .{
+            .actor = actorName(actor),
+            .lane = laneName(lane),
+            .tool = context_spec.tool,
+            .target = context_spec.target,
+            .command = context_spec.command,
+            .detail = context_spec.detail,
+            .provider = state.runtime_session.provider,
+            .model = state.runtime_session.model,
+            .turn_id = state.runtime_session.current_turn_id,
+            .iteration = state.agent_loop.iteration,
+        },
+    };
+}
+
+fn recordRuntimeFailure(state: *AppState, failure: RuntimeFailure) void {
+    state.runtime_session.last_error = failure.message;
+    state.runtime_session.last_failure = failure;
+}
+
+fn clearRuntimeFailure(state: *AppState) void {
+    state.runtime_session.last_error = "";
+    state.runtime_session.last_failure = .{};
+}
+
 fn currentLaneForState(state: AppState) []const u8 {
     if (state.agent_loop.active_tool) |active_tool| return laneName(protocol.laneForActor(active_tool));
     return laneName(protocol.laneForActor(state.current_actor));
@@ -3124,7 +3189,14 @@ fn markInterrupted(state: *AppState) void {
     state.global_status = .interrupted;
     state.agent_loop.status = .interrupted;
     state.runtime_session.status = .interrupted;
-    state.runtime_session.last_error = "operator interrupted the active loop";
+    recordRuntimeFailure(state, buildRuntimeFailure(
+        state,
+        state.current_actor,
+        laneForActor(state.current_actor),
+        "LOOP_INTERRUPTED",
+        "operator interrupted the active loop",
+        .{},
+    ));
     setLoopStep(state, .blocked, state.current_actor, laneForActor(state.current_actor), state.runtime_session.last_error);
 }
 
@@ -3156,6 +3228,23 @@ fn friendlyRuntimeError(allocator: std.mem.Allocator, err: anyerror) ![]const u8
     return try std.fmt.allocPrint(allocator, "runtime error: {s}", .{@errorName(err)});
 }
 
+fn runtimeErrorCode(err: anyerror) []const u8 {
+    return switch (err) {
+        error.BackendUnavailable => "BACKEND_UNAVAILABLE",
+        error.ModelNotFound => "MODEL_NOT_FOUND",
+        error.EmptyModelOutput => "EMPTY_MODEL_OUTPUT",
+        error.ProviderRejectedRequest => "PROVIDER_REJECTED_REQUEST",
+        error.ModelListUnavailable => "MODEL_LIST_UNAVAILABLE",
+        error.ModelSelectionOutOfRange => "MODEL_SELECTION_OUT_OF_RANGE",
+        error.Interrupted => "LOOP_INTERRUPTED",
+        error.FileNotFound => "FILE_NOT_FOUND",
+        error.MissingPath => "MISSING_PATH",
+        error.MissingPattern => "MISSING_PATTERN",
+        error.ContextBudgetExceeded => "CONTEXT_BUDGET_EXCEEDED",
+        else => "RUNTIME_ERROR",
+    };
+}
+
 fn runLoop(allocator: std.mem.Allocator, config: AppConfig, state: *AppState, hooks: RuntimeHooks) !void {
     ensureLoopBudget(state);
     while (state.agent_loop.iteration < state.agent_loop.max_iterations) {
@@ -3168,6 +3257,7 @@ fn runLoop(allocator: std.mem.Allocator, config: AppConfig, state: *AppState, ho
                 .status = "blocked",
                 .summary = "operator interrupted the active loop",
                 .error_text = state.runtime_session.last_error,
+                .failure = state.runtime_session.last_failure,
                 .include_snapshot = true,
             });
             emitStateSnapshot(hooks, config, state.*);
@@ -3187,12 +3277,21 @@ fn runLoop(allocator: std.mem.Allocator, config: AppConfig, state: *AppState, ho
     state.global_status = .waiting_on_tool;
     state.agent_loop.status = .blocked;
     state.runtime_session.status = .blocked;
-    state.runtime_session.last_error = try progressDocumentationText(
+    const loop_limit_message = try progressDocumentationText(
         allocator,
         state,
         "maximum iteration count reached before the mission completed.",
         config.context.max_stop_summary_chars,
     );
+    const loop_limit_failure = buildRuntimeFailure(
+        state,
+        state.current_actor,
+        laneForActor(state.current_actor),
+        "LOOP_LIMIT_REACHED",
+        loop_limit_message,
+        .{},
+    );
+    recordRuntimeFailure(state, loop_limit_failure);
     try appendHistory(allocator, state, .{
         .iteration = state.agent_loop.iteration,
         .type = "loop_limit_reached",
@@ -3209,6 +3308,7 @@ fn runLoop(allocator: std.mem.Allocator, config: AppConfig, state: *AppState, ho
         .status = "blocked",
         .summary = state.runtime_session.last_error,
         .error_text = state.runtime_session.last_error,
+        .failure = loop_limit_failure,
         .include_snapshot = true,
     });
     try saveState(allocator, config.paths.state_file, state.*);
@@ -3231,6 +3331,7 @@ fn executeStep(allocator: std.mem.Allocator, config: AppConfig, state: *AppState
             .status = "blocked",
             .summary = "operator interrupted the active loop",
             .error_text = state.runtime_session.last_error,
+            .failure = state.runtime_session.last_failure,
             .include_snapshot = true,
         });
         emitStateSnapshot(hooks, config, state.*);
@@ -3239,6 +3340,7 @@ fn executeStep(allocator: std.mem.Allocator, config: AppConfig, state: *AppState
 
     state.agent_loop.iteration += 1;
     state.runtime_session.status = .running;
+    clearRuntimeFailure(state);
     state.runtime_session.provider = config.provider.type;
     state.runtime_session.model = config.provider.model;
     state.runtime_session.endpoint = config.provider.base_url;
@@ -3314,15 +3416,19 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
                 .status = "blocked",
                 .summary = "decanus turn interrupted",
                 .error_text = state.runtime_session.last_error,
+                .failure = state.runtime_session.last_failure,
                 .include_snapshot = true,
             });
             emitStateSnapshot(hooks, config, state.*);
             return .blocked;
         }
         const message = try std.fmt.allocPrint(allocator, "decanus turn failed: {s}", .{@errorName(err)});
+        const failure = buildRuntimeFailure(state, .decanus, .command, "DECANUS_TURN_FAILED", message, .{
+            .detail = @errorName(err),
+        });
         state.global_status = .waiting_on_tool;
         state.runtime_session.status = .blocked;
-        state.runtime_session.last_error = message;
+        recordRuntimeFailure(state, failure);
         try logRuntimeEvent(allocator, config, state, .{
             .actor = .decanus,
             .lane = .command,
@@ -3330,6 +3436,7 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
             .status = "error",
             .summary = "decanus turn failed",
             .error_text = message,
+            .failure = failure,
             .include_snapshot = true,
         });
         emitLog(hooks, .danger, "decanus", "Commander Failed", message, .plain);
@@ -3395,6 +3502,7 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
                 .status = "blocked",
                 .summary = tool_result.summary,
                 .error_text = state.runtime_session.last_error,
+                .failure = state.runtime_session.last_failure,
                 .include_snapshot = true,
             });
             emitStateSnapshot(hooks, config, state.*);
@@ -3498,9 +3606,12 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
     }
 
     if (eql(decision.action, "ask_user")) {
+        const failure = buildRuntimeFailure(state, .decanus, .command, "USER_INPUT_REQUIRED", decision.question, .{
+            .detail = "decanus requested user input",
+        });
         state.global_status = .waiting_on_tool;
         state.runtime_session.status = .blocked;
-        state.runtime_session.last_error = decision.question;
+        recordRuntimeFailure(state, failure);
         setLoopStep(state, .blocked, .decanus, .command, decision.question);
         try logRuntimeEvent(allocator, config, state, .{
             .actor = .decanus,
@@ -3509,6 +3620,7 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
             .status = "blocked",
             .summary = decision.question,
             .error_text = decision.question,
+            .failure = failure,
             .include_snapshot = true,
         });
         emitLog(hooks, .warning, "decanus", "Question", decision.question, .plain);
@@ -3516,9 +3628,13 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
         return .blocked;
     }
 
+    const blocked_message = if (decision.blocked_reason.len > 0) decision.blocked_reason else "decanus returned a blocked state";
+    const blocked_failure = buildRuntimeFailure(state, .decanus, .command, "DECANUS_BLOCKED", blocked_message, .{
+        .detail = "decanus returned a blocked state",
+    });
     state.global_status = .waiting_on_tool;
     state.runtime_session.status = .blocked;
-    state.runtime_session.last_error = if (decision.blocked_reason.len > 0) decision.blocked_reason else "decanus returned a blocked state";
+    recordRuntimeFailure(state, blocked_failure);
     setLoopStep(state, .blocked, .decanus, .command, state.runtime_session.last_error);
     try logRuntimeEvent(allocator, config, state, .{
         .actor = .decanus,
@@ -3527,6 +3643,7 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
         .status = "blocked",
         .summary = state.runtime_session.last_error,
         .error_text = state.runtime_session.last_error,
+        .failure = blocked_failure,
         .include_snapshot = true,
     });
     emitLog(hooks, .danger, "decanus", "Blocked", state.runtime_session.last_error, .plain);
@@ -3596,15 +3713,19 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
                 .status = "blocked",
                 .summary = "specialist turn interrupted",
                 .error_text = state.runtime_session.last_error,
+                .failure = state.runtime_session.last_failure,
                 .include_snapshot = true,
             });
             emitStateSnapshot(hooks, config, state.*);
             return .blocked;
         }
         const message = try std.fmt.allocPrint(allocator, "{s} turn failed: {s}", .{ actorName(actor), @errorName(err) });
+        const failure = buildRuntimeFailure(state, actor, lane, "SPECIALIST_TURN_FAILED", message, .{
+            .detail = @errorName(err),
+        });
         task.invocation.status = .blocked;
         state.runtime_session.status = .blocked;
-        state.runtime_session.last_error = message;
+        recordRuntimeFailure(state, failure);
         try logRuntimeEvent(allocator, config, state, .{
             .actor = actor,
             .lane = lane,
@@ -3612,6 +3733,7 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
             .status = "error",
             .summary = "specialist turn failed",
             .error_text = message,
+            .failure = failure,
             .include_snapshot = true,
         });
         emitLog(hooks, .danger, actorName(actor), "Specialist Failed", message, .plain);
@@ -3658,6 +3780,7 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
                 .status = "blocked",
                 .summary = tool_result.summary,
                 .error_text = state.runtime_session.last_error,
+                .failure = state.runtime_session.last_failure,
                 .include_snapshot = true,
             });
             emitStateSnapshot(hooks, config, state.*);
@@ -3715,8 +3838,11 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
 
     if (eql(result.action, "ask_user")) {
         const invocation_result = try materializeInvocationResult(allocator, result, .blocked);
+        const failure = buildRuntimeFailure(state, actor, lane, "USER_INPUT_REQUIRED", result.question, .{
+            .detail = "specialist requested user input",
+        });
         finalizeInvocation(state, lane, actor, invocation_result, result.description);
-        state.runtime_session.last_error = result.question;
+        recordRuntimeFailure(state, failure);
         try logRuntimeEvent(allocator, config, state, .{
             .actor = actor,
             .lane = lane,
@@ -3724,6 +3850,7 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
             .status = "blocked",
             .summary = result.question,
             .error_text = result.question,
+            .failure = failure,
             .include_snapshot = true,
         });
         emitLog(hooks, .warning, actorName(actor), "Question", result.question, .plain);
@@ -3732,8 +3859,12 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
     }
 
     const invocation_result = try materializeInvocationResult(allocator, result, .blocked);
+    const blocked_message = if (invocation_result.blockers.len > 0) invocation_result.blockers[0] else "specialist returned a blocked state";
+    const blocked_failure = buildRuntimeFailure(state, actor, lane, "SPECIALIST_BLOCKED", blocked_message, .{
+        .detail = "specialist returned a blocked state",
+    });
     finalizeInvocation(state, lane, actor, invocation_result, result.description);
-    state.runtime_session.last_error = if (invocation_result.blockers.len > 0) invocation_result.blockers[0] else "specialist returned a blocked state";
+    recordRuntimeFailure(state, blocked_failure);
     try logRuntimeEvent(allocator, config, state, .{
         .actor = actor,
         .lane = lane,
@@ -3741,6 +3872,7 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
         .status = "blocked",
         .summary = state.runtime_session.last_error,
         .error_text = state.runtime_session.last_error,
+        .failure = blocked_failure,
         .include_snapshot = true,
     });
     emitLog(hooks, .danger, actorName(actor), "Blocked", state.runtime_session.last_error, .plain);
@@ -3779,17 +3911,22 @@ fn executeToolRequests(
 
         if (eql(tool_name, "list_files")) {
             if (!config.policy.allow_read_tools_without_confirmation and !try confirmTool(allocator, config, state, hooks, actor, lane, tool_name, request.description, request.path)) {
+                const failure = buildRuntimeFailure(state, actor, lane, "TOOL_DENIED", "list_files denied by operator", .{
+                    .tool = tool_name,
+                    .target = request.path,
+                });
                 try logRuntimeEvent(allocator, config, state, .{
                     .actor = actor,
                     .lane = lane,
                     .action = "tool_result",
                     .status = "blocked",
                     .tool = tool_name,
-                    .summary = "list_files denied by operator",
-                    .error_text = "list_files denied by operator",
+                    .summary = failure.message,
+                    .error_text = failure.message,
+                    .failure = failure,
                     .include_snapshot = true,
                 });
-                return try blockedToolOutcome(allocator, state, "list_files denied by operator");
+                return try blockedToolOutcome(allocator, state, failure);
             }
             const output = try listWorkspaceFiles(allocator, request.path);
             const summary = try summarizeCommandResult(allocator, "list_files", output, config.context.max_tool_result_chars);
@@ -3808,17 +3945,22 @@ fn executeToolRequests(
 
         if (eql(tool_name, "read_file")) {
             if (!config.policy.allow_read_tools_without_confirmation and !try confirmTool(allocator, config, state, hooks, actor, lane, tool_name, request.description, request.path)) {
+                const failure = buildRuntimeFailure(state, actor, lane, "TOOL_DENIED", "read_file denied by operator", .{
+                    .tool = tool_name,
+                    .target = request.path,
+                });
                 try logRuntimeEvent(allocator, config, state, .{
                     .actor = actor,
                     .lane = lane,
                     .action = "tool_result",
                     .status = "blocked",
                     .tool = tool_name,
-                    .summary = "read_file denied by operator",
-                    .error_text = "read_file denied by operator",
+                    .summary = failure.message,
+                    .error_text = failure.message,
+                    .failure = failure,
                     .include_snapshot = true,
                 });
-                return try blockedToolOutcome(allocator, state, "read_file denied by operator");
+                return try blockedToolOutcome(allocator, state, failure);
             }
             const path = if (request.path.len > 0) request.path else return error.MissingPath;
             const content = try readFileLimited(allocator, path, config.context.max_file_read_bytes);
@@ -3838,17 +3980,22 @@ fn executeToolRequests(
 
         if (eql(tool_name, "search_text")) {
             if (!config.policy.allow_read_tools_without_confirmation and !try confirmTool(allocator, config, state, hooks, actor, lane, tool_name, request.description, request.path)) {
+                const failure = buildRuntimeFailure(state, actor, lane, "TOOL_DENIED", "search_text denied by operator", .{
+                    .tool = tool_name,
+                    .target = request.path,
+                });
                 try logRuntimeEvent(allocator, config, state, .{
                     .actor = actor,
                     .lane = lane,
                     .action = "tool_result",
                     .status = "blocked",
                     .tool = tool_name,
-                    .summary = "search_text denied by operator",
-                    .error_text = "search_text denied by operator",
+                    .summary = failure.message,
+                    .error_text = failure.message,
+                    .failure = failure,
                     .include_snapshot = true,
                 });
-                return try blockedToolOutcome(allocator, state, "search_text denied by operator");
+                return try blockedToolOutcome(allocator, state, failure);
             }
             const path = if (request.path.len > 0) request.path else ".";
             const pattern = if (request.pattern.len > 0) request.pattern else return error.MissingPattern;
@@ -3869,30 +4016,40 @@ fn executeToolRequests(
 
         if (eql(tool_name, "run_command")) {
             if (commandIsBlocked(config.policy.blocked_command_patterns, request.command)) {
+                const failure = buildRuntimeFailure(state, actor, lane, "TOOL_POLICY_BLOCKED", "run_command blocked by policy", .{
+                    .tool = tool_name,
+                    .command = request.command,
+                });
                 try logRuntimeEvent(allocator, config, state, .{
                     .actor = actor,
                     .lane = lane,
                     .action = "tool_result",
                     .status = "blocked",
                     .tool = tool_name,
-                    .summary = "run_command blocked by policy",
-                    .error_text = "run_command blocked by policy",
+                    .summary = failure.message,
+                    .error_text = failure.message,
+                    .failure = failure,
                     .include_snapshot = true,
                 });
-                return try blockedToolOutcome(allocator, state, "run_command blocked by policy");
+                return try blockedToolOutcome(allocator, state, failure);
             }
             if (!config.policy.allow_shell_without_confirmation and !try confirmTool(allocator, config, state, hooks, actor, lane, tool_name, request.command, request.command)) {
+                const failure = buildRuntimeFailure(state, actor, lane, "TOOL_DENIED", "run_command denied by operator", .{
+                    .tool = tool_name,
+                    .command = request.command,
+                });
                 try logRuntimeEvent(allocator, config, state, .{
                     .actor = actor,
                     .lane = lane,
                     .action = "tool_result",
                     .status = "blocked",
                     .tool = tool_name,
-                    .summary = "run_command denied by operator",
-                    .error_text = "run_command denied by operator",
+                    .summary = failure.message,
+                    .error_text = failure.message,
+                    .failure = failure,
                     .include_snapshot = true,
                 });
-                return try blockedToolOutcome(allocator, state, "run_command denied by operator");
+                return try blockedToolOutcome(allocator, state, failure);
             }
             const output = try runShellCommand(allocator, request.command);
             const summary = try summarizeCommandResult(allocator, "run_command", output, config.context.max_tool_result_chars);
@@ -3912,30 +4069,40 @@ fn executeToolRequests(
         if (eql(tool_name, "write_file")) {
             const path = if (request.path.len > 0) request.path else return error.MissingPath;
             if (!pathIsSafeForWrite(path)) {
+                const failure = buildRuntimeFailure(state, actor, lane, "TOOL_PATH_UNSAFE", "write_file path outside workspace policy", .{
+                    .tool = tool_name,
+                    .target = path,
+                });
                 try logRuntimeEvent(allocator, config, state, .{
                     .actor = actor,
                     .lane = lane,
                     .action = "tool_result",
                     .status = "blocked",
                     .tool = tool_name,
-                    .summary = "write_file path outside workspace policy",
-                    .error_text = "write_file path outside workspace policy",
+                    .summary = failure.message,
+                    .error_text = failure.message,
+                    .failure = failure,
                     .include_snapshot = true,
                 });
-                return try blockedToolOutcome(allocator, state, "write_file path outside workspace policy");
+                return try blockedToolOutcome(allocator, state, failure);
             }
             if (!config.policy.allow_workspace_writes_without_confirmation and !try confirmTool(allocator, config, state, hooks, actor, lane, tool_name, path, path)) {
+                const failure = buildRuntimeFailure(state, actor, lane, "TOOL_DENIED", "write_file denied by operator", .{
+                    .tool = tool_name,
+                    .target = path,
+                });
                 try logRuntimeEvent(allocator, config, state, .{
                     .actor = actor,
                     .lane = lane,
                     .action = "tool_result",
                     .status = "blocked",
                     .tool = tool_name,
-                    .summary = "write_file denied by operator",
-                    .error_text = "write_file denied by operator",
+                    .summary = failure.message,
+                    .error_text = failure.message,
+                    .failure = failure,
                     .include_snapshot = true,
                 });
-                return try blockedToolOutcome(allocator, state, "write_file denied by operator");
+                return try blockedToolOutcome(allocator, state, failure);
             }
             try writeFile(path, request.content);
             const summary = try std.fmt.allocPrint(allocator, "write_file {s} ({d} bytes)", .{ path, request.content.len });
@@ -3954,8 +4121,12 @@ fn executeToolRequests(
 
         if (eql(tool_name, "ask_user")) {
             const question = if (request.description.len > 0) request.description else "tool requested user input";
+            const failure = buildRuntimeFailure(state, actor, lane, "USER_INPUT_REQUIRED", question, .{
+                .tool = tool_name,
+                .detail = "tool requested user input",
+            });
             state.runtime_session.status = .blocked;
-            state.runtime_session.last_error = question;
+            recordRuntimeFailure(state, failure);
             try summaries.append(allocator, try std.fmt.allocPrint(allocator, "ask_user {s}", .{question}));
             try logRuntimeEvent(allocator, config, state, .{
                 .actor = actor,
@@ -3965,6 +4136,7 @@ fn executeToolRequests(
                 .tool = tool_name,
                 .summary = question,
                 .error_text = question,
+                .failure = failure,
                 .include_snapshot = true,
             });
             emitLog(hooks, .warning, actorName(actor), "Question", question, .plain);
@@ -3975,6 +4147,9 @@ fn executeToolRequests(
         }
 
         const summary = try std.fmt.allocPrint(allocator, "unknown tool `{s}` requested by {s} on lane {s}", .{ request.tool, actorName(actor), laneName(lane) });
+        const failure = buildRuntimeFailure(state, actor, lane, "UNKNOWN_TOOL_REQUEST", summary, .{
+            .tool = request.tool,
+        });
         try summaries.append(allocator, summary);
         try logRuntimeEvent(allocator, config, state, .{
             .actor = actor,
@@ -3984,6 +4159,7 @@ fn executeToolRequests(
             .tool = request.tool,
             .summary = summary,
             .error_text = summary,
+            .failure = failure,
         });
     }
 
@@ -4022,6 +4198,17 @@ fn structuredChatWithRepair(
             .output = response.transport_text,
         });
         const parsed = parseModelJson(T, allocator, response.raw_text) catch |err| {
+            const failure = buildRuntimeFailure(
+                state,
+                resolved_actor,
+                resolved_lane,
+                "MODEL_OUTPUT_INVALID",
+                if (response.raw_text.len == 0) "model returned an empty response" else "model returned invalid JSON",
+                .{
+                    .detail = @errorName(err),
+                },
+            );
+            recordRuntimeFailure(state, failure);
             try logRuntimeEvent(allocator, config, state, .{
                 .actor = resolved_actor,
                 .lane = resolved_lane,
@@ -4029,13 +4216,13 @@ fn structuredChatWithRepair(
                 .status = "error",
                 .summary = "model returned invalid JSON",
                 .output = response.raw_text,
-                .error_text = if (response.raw_text.len == 0) "model returned an empty response" else "model returned invalid JSON",
+                .error_text = failure.message,
+                .failure = failure,
             });
             emitStreamFinalize(hooks, actor, response.raw_text, .json);
             if (attempt >= max_retries) return err;
             attempt += 1;
             state.runtime_session.repair_attempts = attempt;
-            state.runtime_session.last_error = if (response.raw_text.len == 0) "model returned an empty response" else "model returned invalid JSON";
             emitLog(hooks, .warning, actor, "Repair Retry", state.runtime_session.last_error, .plain);
             repair_user_prompt = try std.fmt.allocPrint(
                 allocator,
@@ -4050,6 +4237,7 @@ fn structuredChatWithRepair(
                 .summary = state.runtime_session.last_error,
                 .input = repair_user_prompt,
                 .error_text = state.runtime_session.last_error,
+                .failure = failure,
             });
             continue;
         };
@@ -4285,7 +4473,7 @@ fn runDoctorCheck(allocator: std.mem.Allocator) ![]const u8 {
     state.runtime_session.model = config.provider.model;
     state.runtime_session.endpoint = config.provider.base_url;
     state.runtime_session.approval_mode = config.policy.approval_mode;
-    state.runtime_session.last_error = "";
+    clearRuntimeFailure(&state);
     try saveState(allocator, config.paths.state_file, state);
 
     return try std.fmt.allocPrint(
@@ -5413,7 +5601,8 @@ fn blockForContextLimit(
     state.global_status = .waiting_on_tool;
     state.agent_loop.status = .blocked;
     state.runtime_session.status = .blocked;
-    state.runtime_session.last_error = message;
+    const failure = buildRuntimeFailure(state, state.current_actor, laneForActor(state.current_actor), "CONTEXT_BUDGET_EXCEEDED", message, .{});
+    recordRuntimeFailure(state, failure);
     try appendHistory(allocator, state, .{
         .iteration = state.agent_loop.iteration,
         .type = "context_budget_blocked",
@@ -5430,6 +5619,7 @@ fn blockForContextLimit(
         .status = "blocked",
         .summary = message,
         .error_text = message,
+        .failure = failure,
         .include_snapshot = true,
     });
     emitLog(hooks, .danger, "runtime", "Context Budget Reached", message, .plain);
@@ -5504,12 +5694,12 @@ fn buildPromptWithContextBudget(
     }
 }
 
-fn blockedToolOutcome(allocator: std.mem.Allocator, state: *AppState, reason: []const u8) !ToolExecutionOutcome {
+fn blockedToolOutcome(allocator: std.mem.Allocator, state: *AppState, failure: RuntimeFailure) !ToolExecutionOutcome {
     state.runtime_session.status = .blocked;
-    state.runtime_session.last_error = reason;
+    recordRuntimeFailure(state, failure);
     return .{
         .blocked = true,
-        .summary = try std.fmt.allocPrint(allocator, "blocked: {s}", .{reason}),
+        .summary = try std.fmt.allocPrint(allocator, "blocked: {s}", .{failure.message}),
     };
 }
 
@@ -5753,6 +5943,7 @@ fn logRuntimeEvent(
         .input = spec.input,
         .output = spec.output,
         .error_text = spec.error_text,
+        .failure = spec.failure,
         .snapshot = snapshot,
     });
 }
@@ -8098,6 +8289,30 @@ test "estimatePromptBudget reserves response headroom" {
     try testing.expectEqual(@as(usize, 1000), estimate.usable_prompt_tokens);
     try testing.expect(estimate.prompt_tokens > 0);
     try testing.expect(estimate.remaining_tokens < estimate.usable_prompt_tokens);
+}
+
+test "recordRuntimeFailure preserves structured and legacy error surfaces" {
+    const testing = std.testing;
+    var state = AppState{};
+    state.runtime_session.provider = "ollama-native";
+    state.runtime_session.model = "qwen2.5-coder:7b";
+    state.runtime_session.current_turn_id = "turn-42";
+    state.agent_loop.iteration = 4;
+
+    const failure = buildRuntimeFailure(&state, .decanus, .command, "TOOL_TIMEOUT", "Tool execution exceeded 5s", .{
+        .tool = "read_file",
+        .detail = "timeout while reading README.md",
+    });
+    recordRuntimeFailure(&state, failure);
+
+    try testing.expectEqualStrings("Tool execution exceeded 5s", state.runtime_session.last_error);
+    try testing.expectEqualStrings("TOOL_TIMEOUT", state.runtime_session.last_failure.error_code);
+    try testing.expectEqualStrings("Tool execution exceeded 5s", state.runtime_session.last_failure.message);
+    try testing.expectEqualStrings("decanus", state.runtime_session.last_failure.context.actor);
+    try testing.expectEqualStrings("command", state.runtime_session.last_failure.context.lane);
+    try testing.expectEqualStrings("read_file", state.runtime_session.last_failure.context.tool);
+    try testing.expectEqualStrings("turn-42", state.runtime_session.last_failure.context.turn_id);
+    try testing.expectEqual(@as(usize, 4), state.runtime_session.last_failure.context.iteration);
 }
 
 test "runtime run log stores structured events" {
