@@ -18,7 +18,8 @@ Global home layout:
 ```text
 ~/.contubernium/
 agents/
-prompts/
+shared/
+adapters/
 templates/
 global.md
 source/        # managed checkout when install.sh clones for you
@@ -28,6 +29,9 @@ source/        # managed checkout when install.sh clones for you
 
 - `state.json`
 - `config.json`
+- `architecture.md`
+- `plan.md`
+- `project_context.md`
 - `project.md`
 - `global.md`
 
@@ -46,18 +50,13 @@ This creates the canonical project layout:
 ```text
 .contubernium/
   state.json
+  ARCHITECTURE.md
+  PLAN.md
+  PROJECT_CONTEXT.md
   project.md
   global.md
   config.json
-  prompts/
   logs/
-
-.agents/
-  AGENT_LOOP.md
-  <agent>/
-    SOUL.md
-    CONTRACT.md
-    SKILL.md
 ```
 
 `contubernium init` uses embedded assets from the built binary, so it does not need symlinks or a live source checkout to scaffold a project.
@@ -70,7 +69,7 @@ If you want to initialize a project from a source checkout without using the com
 ./init.sh /path/to/project
 ```
 
-`init.sh` uses the installed global home when it exists and falls back to the repository’s tracked `prompts/`, `.agents/`, and `templates/` directories when it does not.
+`init.sh` uses the installed global home when it exists and falls back to the repository’s tracked `templates/` directory when it does not. Agent behavior always stays global.
 
 ## Recommended Verification
 
@@ -83,12 +82,13 @@ contubernium doctor
 Then confirm the local project contains:
 
 - `.contubernium/state.json`
+- `.contubernium/ARCHITECTURE.md`
+- `.contubernium/PLAN.md`
+- `.contubernium/PROJECT_CONTEXT.md`
 - `.contubernium/project.md`
 - `.contubernium/global.md`
 - `.contubernium/config.json`
-- `.contubernium/prompts/`
 - `.contubernium/logs/`
-- `.agents/AGENT_LOOP.md`
 
 ## Upgrade Notes
 

@@ -1,3 +1,7 @@
+> Historical planning note:
+> This document predates the global-agent architecture in `docs/AGENT_ARCHITECTURE.md`.
+> Where it describes project-local prompt assets or copied local agent definitions, the current implementation uses global agents plus project-local context files instead.
+
 🏛️ CONTUBERNIUM — FEATURES (v2, build-ready)
 
 0. System Philosophy (lock this first)

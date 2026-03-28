@@ -1,5 +1,9 @@
 # Local LLM Support for Contubernium
 
+> Historical planning note:
+> This plan predates the global-agent architecture.
+> The current runtime composes global agent assets from the installed Contubernium home or the source repository and keeps project-local files limited to context and memory.
+
 ## What This Solves
 
 Right now, Contubernium defines how the agents should think, hand work off, and record state, but it does not include a runtime that can actually drive the protocol with a local model. This plan adds that missing runtime so you can run the Contubernium loop against Ollama first, then other local model servers later, without rewriting the protocol every time you change model hosts.

@@ -140,13 +140,17 @@ install_global_assets() {
 
     mkdir -p "$home_dir" "$templates_dir"
     copy_tree "$source_dir/.agents" "$home_dir/agents"
-    copy_tree "$source_dir/prompts" "$home_dir/prompts"
+    copy_tree "$source_dir/shared" "$home_dir/shared"
+    copy_tree "$source_dir/adapters" "$home_dir/adapters"
     copy_tree "$source_dir/opentui" "$home_dir/opentui"
 
     install -m 0644 "$source_dir/templates/contubernium_state.template.json" "$templates_dir/state.json"
     install -m 0644 "$source_dir/templates/contubernium.config.template.json" "$templates_dir/config.json"
     install -m 0644 "$source_dir/templates/project.template.md" "$templates_dir/project.md"
     install -m 0644 "$source_dir/templates/global.template.md" "$templates_dir/global.md"
+    install -m 0644 "$source_dir/templates/architecture.template.md" "$templates_dir/architecture.md"
+    install -m 0644 "$source_dir/templates/plan.template.md" "$templates_dir/plan.md"
+    install -m 0644 "$source_dir/templates/project_context.template.md" "$templates_dir/project_context.md"
 
     if [[ ! -f "$home_dir/global.md" ]]; then
         install -m 0644 "$source_dir/templates/global.template.md" "$home_dir/global.md"

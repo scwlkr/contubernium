@@ -123,10 +123,12 @@ Contubernium uses layered memory:
 ```
 .contubernium/
 state.json      # mission state (live loop)
+ARCHITECTURE.md # system structure and decisions
+PLAN.md         # current execution order and progress
+PROJECT_CONTEXT.md # local goals, constraints, and conventions
 project.md      # project-level knowledge
 global.md       # reusable patterns
 config.json     # runtime configuration
-prompts/        # runtime prompt assets
 logs/           # structured JSON run logs
 ```
 
@@ -182,16 +184,29 @@ No silent execution of risky operations.
 ```
 .agents/
 AGENT_LOOP.md
+AGENT_ARCHITECTURE.md
+AGENT_COMPATIBILITY.md
+_schemas/
 <agent>/
   SOUL.md
   CONTRACT.md
   SKILL.md
+  actions/
+
+shared/
+  patterns/
+  templates/
+
+adapters/
 
 templates/
 contubernium_state.template.json
 contubernium.config.template.json
 project.template.md
 global.template.md
+architecture.template.md
+plan.template.md
+project_context.template.md
 
 docs/
 doctrine.md
@@ -232,7 +247,14 @@ contubernium init
 
 ```text
 .contubernium/
-.agents/
+  state.json
+  config.json
+  ARCHITECTURE.md
+  PLAN.md
+  PROJECT_CONTEXT.md
+  project.md
+  global.md
+  logs/
 ```
 
 If you need a Bash-only fallback from a source checkout, run:

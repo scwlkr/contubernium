@@ -4,13 +4,14 @@ const protocol = @import("runtime_protocol.zig");
 
 const max_file_bytes = 16 * 1024 * 1024;
 const runtime_dir_name = ".contubernium";
-const agents_dir_name = ".agents";
 const default_state_path = ".contubernium/state.json";
 const default_config_path = ".contubernium/config.json";
-const default_prompts_dir = ".contubernium/prompts";
 const default_logs_dir = ".contubernium/logs";
 const default_project_memory_path = ".contubernium/project.md";
 const default_global_memory_path = ".contubernium/global.md";
+const default_architecture_path = ".contubernium/ARCHITECTURE.md";
+const default_plan_path = ".contubernium/PLAN.md";
+const default_project_context_path = ".contubernium/PROJECT_CONTEXT.md";
 const max_list_files_entries = 400;
 const legacy_default_max_iterations = 12;
 const default_max_iterations = 24;
@@ -48,20 +49,9 @@ const embedded_assets = [_]EmbeddedAsset{
     .{ .relative_path = "config.json", .content = embedded.config_json },
     .{ .relative_path = "project.md", .content = embedded.project_memory_md },
     .{ .relative_path = "global.md", .content = embedded.global_memory_md },
-    .{ .relative_path = "prompts/shared/base.md", .content = embedded.base_prompt },
-    .{ .relative_path = "prompts/shared/tool-policy.md", .content = embedded.tool_policy_prompt },
-    .{ .relative_path = "prompts/shared/decanus-schema.json", .content = embedded.decanus_schema },
-    .{ .relative_path = "prompts/shared/specialist-schema.json", .content = embedded.specialist_schema },
-    .{ .relative_path = "prompts/decanus.md", .content = embedded.decanus_prompt },
-    .{ .relative_path = "prompts/faber.md", .content = embedded.faber_prompt },
-    .{ .relative_path = "prompts/artifex.md", .content = embedded.artifex_prompt },
-    .{ .relative_path = "prompts/architectus.md", .content = embedded.architectus_prompt },
-    .{ .relative_path = "prompts/tesserarius.md", .content = embedded.tesserarius_prompt },
-    .{ .relative_path = "prompts/explorator.md", .content = embedded.explorator_prompt },
-    .{ .relative_path = "prompts/signifer.md", .content = embedded.signifer_prompt },
-    .{ .relative_path = "prompts/praeco.md", .content = embedded.praeco_prompt },
-    .{ .relative_path = "prompts/calo.md", .content = embedded.calo_prompt },
-    .{ .relative_path = "prompts/mulus.md", .content = embedded.mulus_prompt },
+    .{ .relative_path = "ARCHITECTURE.md", .content = embedded.architecture_md },
+    .{ .relative_path = "PLAN.md", .content = embedded.plan_md },
+    .{ .relative_path = "PROJECT_CONTEXT.md", .content = embedded.project_context_md },
 };
 
 const AppConfig = struct {
@@ -85,10 +75,12 @@ const ProviderConfig = struct {
 
 const PathsConfig = struct {
     state_file: []const u8 = default_state_path,
-    prompts_dir: []const u8 = default_prompts_dir,
     logs_dir: []const u8 = default_logs_dir,
     project_memory_file: []const u8 = default_project_memory_path,
     global_memory_file: []const u8 = default_global_memory_path,
+    architecture_file: []const u8 = default_architecture_path,
+    plan_file: []const u8 = default_plan_path,
+    project_context_file: []const u8 = default_project_context_path,
 };
 
 const PolicyConfig = struct {
@@ -304,6 +296,7 @@ const DecanusDecision = struct {
     action: []const u8 = "",
     reasoning: []const u8 = "",
     current_goal: []const u8 = "",
+    agent_call: []const u8 = "",
     lane: []const u8 = "",
     actor: []const u8 = "",
     objective: []const u8 = "",
@@ -394,10 +387,16 @@ const RuntimeMemoryLayer = struct {
 };
 
 const RuntimeMemorySnapshot = struct {
+    architecture: RuntimeMemoryLayer,
+    plan: RuntimeMemoryLayer,
+    project_context: RuntimeMemoryLayer,
     project: RuntimeMemoryLayer,
     global: RuntimeMemoryLayer,
 
     fn deinit(self: RuntimeMemorySnapshot, allocator: std.mem.Allocator) void {
+        self.architecture.deinit(allocator);
+        self.plan.deinit(allocator);
+        self.project_context.deinit(allocator);
         self.project.deinit(allocator);
         self.global.deinit(allocator);
     }
@@ -406,6 +405,18 @@ const RuntimeMemorySnapshot = struct {
 const PromptBuildResult = struct {
     user_prompt: []const u8,
     memory: RuntimeMemorySnapshot,
+};
+
+const GlobalAssetLayout = struct {
+    root: []const u8,
+    agents_root: []const u8,
+    shared_root: []const u8,
+    adapters_root: []const u8,
+};
+
+const AgentCallSpec = struct {
+    actor: Actor,
+    action_name: []const u8 = "",
 };
 
 const StateManager = struct {
@@ -636,6 +647,8 @@ const StateManager = struct {
         objective: []const u8,
         completion_signal: []const u8,
         dependencies: []const []const u8,
+        agent_call: []const u8,
+        action_name: []const u8,
     ) void {
         const task = taskForLane(self.state, lane);
         task.status = .in_progress;
@@ -645,11 +658,14 @@ const StateManager = struct {
             .requested_by = .decanus,
             .target = actor,
             .lane = lane,
+            .agent_call = agent_call,
+            .action_name = action_name,
             .iteration = self.state.agent_loop.iteration,
             .objective = objective,
             .completion_signal = completion_signal,
             .context = .{
                 .project = self.state.project_name,
+                .files = dependencies,
                 .constraints = self.state.mission.constraints,
                 .dependencies = dependencies,
             },
@@ -679,8 +695,10 @@ const StateManager = struct {
         objective: []const u8,
         completion_signal: []const u8,
         dependencies: []const []const u8,
+        agent_call: []const u8,
+        action_name: []const u8,
     ) !void {
-        self.prepareInvocation(lane, actor, objective, completion_signal, dependencies);
+        self.prepareInvocation(lane, actor, objective, completion_signal, dependencies, agent_call, action_name);
         try appendHistory(allocator, self.state, .{
             .iteration = self.state.agent_loop.iteration,
             .type = "tool_call",
@@ -1316,7 +1334,7 @@ fn printUsage() !void {
 
 fn cmdInit(allocator: std.mem.Allocator) !void {
     try scaffoldProject(allocator);
-    try stdoutPrint("initialized project runtime in {s} and {s}\n", .{ runtime_dir_name, agents_dir_name });
+    try stdoutPrint("initialized project runtime in {s}\n", .{runtime_dir_name});
 }
 
 fn cmdDoctor(allocator: std.mem.Allocator) !void {
@@ -2651,136 +2669,9 @@ fn executeStep(allocator: std.mem.Allocator, config: AppConfig, state: *AppState
     emitStateSnapshot(hooks, config, state.*);
 
     if (state.current_actor != .decanus) {
-        return try blockUnsupportedSpecialistTurn(allocator, config, state, hooks, state.current_actor);
+        return try executeSpecialistTurn(allocator, config, state, hooks);
     }
     return try executeDecanusTurn(allocator, config, state, hooks);
-}
-
-fn blockSingleAgentRuntimeViolation(
-    allocator: std.mem.Allocator,
-    state: *AppState,
-    actor: Actor,
-    lane: Lane,
-    message: []const u8,
-    detail: []const u8,
-    history_type: []const u8,
-    history_actor: []const u8,
-    history_lane: []const u8,
-    mark_invocation_blocked: bool,
-) !RuntimeFailure {
-    if (mark_invocation_blocked and lane != .command) {
-        const task = taskForLane(state, lane);
-        task.status = .blocked;
-        task.invocation.status = .blocked;
-    }
-
-    state.current_actor = .decanus;
-    state.agent_loop.active_tool = null;
-
-    const failure = buildRuntimeFailure(state, .decanus, .command, "SINGLE_AGENT_RUNTIME_ONLY", message, .{
-        .tool = if (lane == .command) "" else actorName(actor),
-        .target = if (lane == .command) "" else laneName(lane),
-        .detail = detail,
-    });
-    recordRuntimeFailure(state, failure);
-    stateManager(state).markBlocked(.decanus, .command, message);
-    try appendHistory(allocator, state, .{
-        .iteration = state.agent_loop.iteration,
-        .type = history_type,
-        .actor = history_actor,
-        .lane = history_lane,
-        .summary = message,
-        .artifacts = &.{},
-        .timestamp = try unixTimestampString(allocator),
-    });
-    return failure;
-}
-
-fn blockUnsupportedSpecialistTurn(
-    allocator: std.mem.Allocator,
-    config: AppConfig,
-    state: *AppState,
-    hooks: RuntimeHooks,
-    actor: Actor,
-) !StepOutcome {
-    const lane = laneForActor(actor);
-    const task = taskForLane(state, lane);
-    const detail = if (task.invocation.objective.len > 0) task.invocation.objective else "pending specialist execution";
-    const message = try std.fmt.allocPrint(
-        allocator,
-        "phase 6 only supports decanus as the active runtime actor; specialist execution for {s} is disabled",
-        .{actorName(actor)},
-    );
-    const failure = try blockSingleAgentRuntimeViolation(
-        allocator,
-        state,
-        actor,
-        lane,
-        message,
-        detail,
-        "specialist_execution_blocked",
-        actorName(actor),
-        laneName(lane),
-        true,
-    );
-    try logRuntimeEvent(allocator, config, state, .{
-        .actor = .decanus,
-        .lane = .command,
-        .action = "specialist_execution_blocked",
-        .status = "blocked",
-        .tool = actorName(actor),
-        .summary = message,
-        .error_text = message,
-        .failure = failure,
-        .include_snapshot = true,
-    });
-    emitLog(hooks, .danger, "runtime", "Single Agent Only", message, .plain);
-    emitStateSnapshot(hooks, config, state.*);
-    return .blocked;
-}
-
-fn blockUnsupportedSpecialistInvocation(
-    allocator: std.mem.Allocator,
-    config: AppConfig,
-    state: *AppState,
-    hooks: RuntimeHooks,
-    actor: Actor,
-    lane: Lane,
-    objective: []const u8,
-) !StepOutcome {
-    const detail = if (objective.len > 0) objective else "invoke_specialist";
-    const message = try std.fmt.allocPrint(
-        allocator,
-        "phase 6 only supports decanus as the active runtime actor; use runtime tools instead of invoking {s}",
-        .{actorName(actor)},
-    );
-    const failure = try blockSingleAgentRuntimeViolation(
-        allocator,
-        state,
-        actor,
-        lane,
-        message,
-        detail,
-        "specialist_invocation_blocked",
-        "decanus",
-        laneName(lane),
-        false,
-    );
-    try logRuntimeEvent(allocator, config, state, .{
-        .actor = .decanus,
-        .lane = .command,
-        .action = "specialist_invocation_blocked",
-        .status = "blocked",
-        .tool = actorName(actor),
-        .summary = message,
-        .input = objective,
-        .error_text = message,
-        .failure = failure,
-        .include_snapshot = true,
-    });
-    emitLog(hooks, .danger, "decanus", "Single Agent Only", message, .plain);
-    emitStateSnapshot(hooks, config, state.*);
-    return .blocked;
 }
 
 fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *AppState, hooks: RuntimeHooks) !StepOutcome {
@@ -2795,12 +2686,9 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
         .include_snapshot = true,
     });
 
-    const system_prompt = try assembleSystemPrompt(
-        allocator,
-        config.paths.prompts_dir,
-        "decanus",
-        "shared/decanus-schema.json",
-    );
+    const asset_layout = try resolveGlobalAssetLayout(allocator);
+    defer deinitGlobalAssetLayout(allocator, asset_layout);
+    const system_prompt = try assembleSystemPrompt(allocator, asset_layout, state, .decanus);
     const prompt_build = buildPromptWithContextBudget(allocator, config, state, hooks, system_prompt, .decanus, "") catch |err| {
         if (err == error.ContextBudgetExceeded or err == error.MemoryLoadBlocked) return .blocked;
         return err;
@@ -2962,7 +2850,8 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
     }
 
     if (eql(decision.action, "invoke_specialist")) {
-        const requested_actor = if (decision.actor.len > 0) parseActor(decision.actor) else null;
+        const parsed_call = parseAgentCall(decision.agent_call);
+        const requested_actor = if (parsed_call) |call| call.actor else if (decision.actor.len > 0) parseActor(decision.actor) else null;
         const lane = if (decision.lane.len > 0)
             std.meta.stringToEnum(Lane, decision.lane) orelse (if (requested_actor) |actor| laneForActor(actor) else .bulk_ops)
         else if (requested_actor) |actor|
@@ -2970,7 +2859,37 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
         else
             .bulk_ops;
         const actor = requested_actor orelse actorForLane(lane);
-        return try blockUnsupportedSpecialistInvocation(allocator, config, state, hooks, actor, lane, decision.objective);
+        const action_name = if (parsed_call) |call| call.action_name else "";
+        try stateManager(state).prepareInvocationWithHistory(
+            allocator,
+            lane,
+            actor,
+            if (decision.objective.len > 0) decision.objective else "complete the assigned scope",
+            if (decision.completion_signal.len > 0) decision.completion_signal else "return a structured result to decanus",
+            decision.dependencies,
+            decision.agent_call,
+            action_name,
+        );
+        try logRuntimeEvent(allocator, config, state, .{
+            .actor = .decanus,
+            .lane = .command,
+            .action = "specialist_invoked",
+            .status = "success",
+            .tool = actorName(actor),
+            .summary = if (decision.agent_call.len > 0) decision.agent_call else actorName(actor),
+            .input = decision.objective,
+            .include_snapshot = true,
+        });
+        emitLog(
+            hooks,
+            .tool,
+            "decanus",
+            "Specialist Invoked",
+            if (decision.agent_call.len > 0) decision.agent_call else actorName(actor),
+            .plain,
+        );
+        emitStateSnapshot(hooks, config, state.*);
+        return .advanced;
     }
 
     if (eql(decision.action, "ask_user")) {
@@ -3030,8 +2949,9 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
         .include_snapshot = true,
     });
 
-    const schema_path = "shared/specialist-schema.json";
-    const system_prompt = try assembleSystemPrompt(allocator, config.paths.prompts_dir, actorName(actor), schema_path);
+    const asset_layout = try resolveGlobalAssetLayout(allocator);
+    defer deinitGlobalAssetLayout(allocator, asset_layout);
+    const system_prompt = try assembleSystemPrompt(allocator, asset_layout, state, actor);
     const prompt_build = buildPromptWithContextBudget(allocator, config, state, hooks, system_prompt, .specialist, laneName(lane)) catch |err| {
         if (err == error.ContextBudgetExceeded or err == error.MemoryLoadBlocked) return .blocked;
         return err;
@@ -3177,7 +3097,11 @@ fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state:
     }
 
     if (eql(result.action, "complete") or eql(result.status, "complete") or eql(result.status, "partial")) {
-        const invocation_result = try materializeInvocationResult(allocator, result, .complete);
+        const invocation_result = try materializeInvocationResult(
+            allocator,
+            result,
+            if (eql(result.status, "partial")) .partial else .complete,
+        );
         try stateManager(state).finalizeInvocationWithHistory(allocator, lane, actor, invocation_result, result.description);
         try logRuntimeEvent(allocator, config, state, .{
             .actor = actor,
@@ -3456,8 +3380,20 @@ fn runtimeMemoryPromptText(layer: RuntimeMemoryLayer) []const u8 {
 fn summarizeRuntimeMemorySnapshot(allocator: std.mem.Allocator, memory: RuntimeMemorySnapshot) ![]const u8 {
     return try std.fmt.allocPrint(
         allocator,
-        "project={s} status={s} source_chars={d} prompt_chars={d}\nglobal={s} status={s} source_chars={d} prompt_chars={d}",
+        "architecture={s} status={s} source_chars={d} prompt_chars={d}\nplan={s} status={s} source_chars={d} prompt_chars={d}\nproject_context={s} status={s} source_chars={d} prompt_chars={d}\nproject_memory={s} status={s} source_chars={d} prompt_chars={d}\nglobal_memory={s} status={s} source_chars={d} prompt_chars={d}",
         .{
+            memory.architecture.path,
+            runtimeMemoryStatusLabel(memory.architecture),
+            memory.architecture.source_chars,
+            memory.architecture.content.len,
+            memory.plan.path,
+            runtimeMemoryStatusLabel(memory.plan),
+            memory.plan.source_chars,
+            memory.plan.content.len,
+            memory.project_context.path,
+            runtimeMemoryStatusLabel(memory.project_context),
+            memory.project_context.source_chars,
+            memory.project_context.content.len,
             memory.project.path,
             runtimeMemoryStatusLabel(memory.project),
             memory.project.source_chars,
@@ -3478,26 +3414,32 @@ fn buildDecanusUserPrompt(
 ) ![]const u8 {
     const history = try recentHistoryText(allocator, state.agent_loop.history, config.context.max_history_events);
     const task_summary = try taskSummaryText(allocator, state.tasks);
+    const constraints = try joinStrings(allocator, state.mission.constraints, ", ");
+    const success_criteria = try joinStrings(allocator, state.mission.success_criteria, ", ");
     var buffer: std.ArrayList(u8) = .empty;
     const writer = buffer.writer(allocator);
 
     try writer.print(
-        \\Mission
-        \\-------
-        \\Initial prompt:
-        \\{s}
-        \\
-        \\Current goal:
-        \\{s}
-        \\
-        \\Constraints:
-        \\{s}
-        \\
-        \\Success criteria:
-        \\{s}
-        \\
-        \\External memory
+        \\Project Context
         \\---------------
+        \\Architecture file: {s}
+        \\Architecture status: {s}
+        \\Architecture source chars: {d}
+        \\Architecture:
+        \\{s}
+        \\
+        \\Plan file: {s}
+        \\Plan status: {s}
+        \\Plan source chars: {d}
+        \\Plan:
+        \\{s}
+        \\
+        \\Project context file: {s}
+        \\Project context status: {s}
+        \\Project context source chars: {d}
+        \\Project context:
+        \\{s}
+        \\
         \\Project memory file: {s}
         \\Project memory status: {s}
         \\Project memory source chars: {d}
@@ -3510,8 +3452,45 @@ fn buildDecanusUserPrompt(
         \\Global memory:
         \\{s}
         \\
-        \\Loop state
+    ,
+        .{
+            memory.architecture.path,
+            runtimeMemoryStatusLabel(memory.architecture),
+            memory.architecture.source_chars,
+            runtimeMemoryPromptText(memory.architecture),
+            memory.plan.path,
+            runtimeMemoryStatusLabel(memory.plan),
+            memory.plan.source_chars,
+            runtimeMemoryPromptText(memory.plan),
+            memory.project_context.path,
+            runtimeMemoryStatusLabel(memory.project_context),
+            memory.project_context.source_chars,
+            runtimeMemoryPromptText(memory.project_context),
+            memory.project.path,
+            runtimeMemoryStatusLabel(memory.project),
+            memory.project.source_chars,
+            runtimeMemoryPromptText(memory.project),
+            memory.global.path,
+            runtimeMemoryStatusLabel(memory.global),
+            memory.global.source_chars,
+            runtimeMemoryPromptText(memory.global),
+        },
+    );
+    try writer.print(
+        \\Live State
         \\----------
+        \\Initial prompt:
+        \\{s}
+        \\
+        \\Current goal:
+        \\{s}
+        \\
+        \\Constraints:
+        \\{s}
+        \\
+        \\Success criteria:
+        \\{s}
+        \\
         \\Iteration: {d}
         \\Status: {s}
         \\Active tool: {s}
@@ -3532,16 +3511,8 @@ fn buildDecanusUserPrompt(
         .{
             state.mission.initial_prompt,
             state.mission.current_goal,
-            try joinStrings(allocator, state.mission.constraints, ", "),
-            try joinStrings(allocator, state.mission.success_criteria, ", "),
-            memory.project.path,
-            runtimeMemoryStatusLabel(memory.project),
-            memory.project.source_chars,
-            runtimeMemoryPromptText(memory.project),
-            memory.global.path,
-            runtimeMemoryStatusLabel(memory.global),
-            memory.global.source_chars,
-            runtimeMemoryPromptText(memory.global),
+            constraints,
+            success_criteria,
             state.agent_loop.iteration,
             @tagName(state.agent_loop.status),
             maybeActorName(state.agent_loop.active_tool),
@@ -3565,23 +3536,36 @@ fn buildSpecialistUserPrompt(
     const lane_value = std.meta.stringToEnum(Lane, lane) orelse .bulk_ops;
     const task = taskForLaneConst(state, lane_value);
     const history = try recentHistoryText(allocator, state.agent_loop.history, config.context.max_history_events);
+    const context_files = try joinStrings(allocator, task.invocation.context.files, ", ");
+    const context_constraints = try joinStrings(allocator, task.invocation.context.constraints, ", ");
+    const context_dependencies = try joinStrings(allocator, task.invocation.context.dependencies, ", ");
+    const allowed_actions = try joinStrings(allocator, task.invocation.scope.allowed_actions, ", ");
+    const restricted_actions = try joinStrings(allocator, task.invocation.scope.restricted_actions, ", ");
+    const relevant_memory = try joinStrings(allocator, task.invocation.memory.relevant, ", ");
     var buffer: std.ArrayList(u8) = .empty;
     const writer = buffer.writer(allocator);
 
     try writer.print(
-        \\Mission
-        \\-------
-        \\Initial prompt:
-        \\{s}
-        \\
-        \\Current goal:
-        \\{s}
-        \\
-        \\Active lane:
-        \\{s}
-        \\
-        \\External memory
+        \\Project Context
         \\---------------
+        \\Architecture file: {s}
+        \\Architecture status: {s}
+        \\Architecture source chars: {d}
+        \\Architecture:
+        \\{s}
+        \\
+        \\Plan file: {s}
+        \\Plan status: {s}
+        \\Plan source chars: {d}
+        \\Plan:
+        \\{s}
+        \\
+        \\Project context file: {s}
+        \\Project context status: {s}
+        \\Project context source chars: {d}
+        \\Project context:
+        \\{s}
+        \\
         \\Project memory file: {s}
         \\Project memory status: {s}
         \\Project memory source chars: {d}
@@ -3594,9 +3578,47 @@ fn buildSpecialistUserPrompt(
         \\Global memory:
         \\{s}
         \\
+    ,
+        .{
+            memory.architecture.path,
+            runtimeMemoryStatusLabel(memory.architecture),
+            memory.architecture.source_chars,
+            runtimeMemoryPromptText(memory.architecture),
+            memory.plan.path,
+            runtimeMemoryStatusLabel(memory.plan),
+            memory.plan.source_chars,
+            runtimeMemoryPromptText(memory.plan),
+            memory.project_context.path,
+            runtimeMemoryStatusLabel(memory.project_context),
+            memory.project_context.source_chars,
+            runtimeMemoryPromptText(memory.project_context),
+            memory.project.path,
+            runtimeMemoryStatusLabel(memory.project),
+            memory.project.source_chars,
+            runtimeMemoryPromptText(memory.project),
+            memory.global.path,
+            runtimeMemoryStatusLabel(memory.global),
+            memory.global.source_chars,
+            runtimeMemoryPromptText(memory.global),
+        },
+    );
+    try writer.print(
+        \\Live State
+        \\----------
+        \\Initial prompt:
+        \\{s}
+        \\
+        \\Current goal:
+        \\{s}
+        \\
+        \\Active lane:
+        \\{s}
+        \\
         \\Invocation
         \\----------
         \\Status: {s}
+        \\Agent call: {s}
+        \\Selected action: {s}
         \\Objective: {s}
         \\Completion signal: {s}
         \\Context.project: {s}
@@ -3623,26 +3645,20 @@ fn buildSpecialistUserPrompt(
             state.mission.initial_prompt,
             state.mission.current_goal,
             lane,
-            memory.project.path,
-            runtimeMemoryStatusLabel(memory.project),
-            memory.project.source_chars,
-            runtimeMemoryPromptText(memory.project),
-            memory.global.path,
-            runtimeMemoryStatusLabel(memory.global),
-            memory.global.source_chars,
-            runtimeMemoryPromptText(memory.global),
             @tagName(task.invocation.status),
+            task.invocation.agent_call,
+            task.invocation.action_name,
             task.invocation.objective,
             task.invocation.completion_signal,
             task.invocation.context.project,
-            try joinStrings(allocator, task.invocation.context.files, ", "),
-            try joinStrings(allocator, task.invocation.context.constraints, ", "),
-            try joinStrings(allocator, task.invocation.context.dependencies, ", "),
-            try joinStrings(allocator, task.invocation.scope.allowed_actions, ", "),
-            try joinStrings(allocator, task.invocation.scope.restricted_actions, ", "),
+            context_files,
+            context_constraints,
+            context_dependencies,
+            allowed_actions,
+            restricted_actions,
             task.invocation.memory.mission,
             task.invocation.memory.project,
-            try joinStrings(allocator, task.invocation.memory.relevant, ", "),
+            relevant_memory,
             state.agent_loop.last_tool_result,
             history,
         },
@@ -3653,20 +3669,33 @@ fn buildSpecialistUserPrompt(
 
 fn assembleSystemPrompt(
     allocator: std.mem.Allocator,
-    prompts_dir: []const u8,
-    actor: []const u8,
-    schema_relative_path: []const u8,
+    layout: GlobalAssetLayout,
+    state: *const AppState,
+    actor: Actor,
 ) ![]const u8 {
-    const base = try readPrompt(allocator, prompts_dir, "shared/base.md");
-    const policy = try readPrompt(allocator, prompts_dir, "shared/tool-policy.md");
-    const role_file = try std.fmt.allocPrint(allocator, "{s}.md", .{actor});
-    const role_prompt = try readPrompt(allocator, prompts_dir, role_file);
-    const schema = try readPrompt(allocator, prompts_dir, schema_relative_path);
-    return try std.fmt.allocPrint(
+    const base = try readSharedAsset(allocator, layout, "patterns/RUNTIME_BASE.md");
+    defer allocator.free(base);
+    const policy = try readSharedAsset(allocator, layout, "patterns/TOOL_POLICY.md");
+    defer allocator.free(policy);
+    const soul = try readAgentAsset(allocator, layout, actor, "SOUL.md");
+    defer allocator.free(soul);
+    const contract = try readAgentAsset(allocator, layout, actor, "CONTRACT.md");
+    defer allocator.free(contract);
+    const skill = try readAgentAsset(allocator, layout, actor, "SKILL.md");
+    defer allocator.free(skill);
+    const schema = try readSharedAsset(
         allocator,
-        "{s}\n\n{s}\n\n{s}\n\nResponse schema reference:\n{s}\n",
-        .{ base, policy, role_prompt, schema },
+        layout,
+        if (actor == .decanus) "templates/DECANUS_DECISION_SCHEMA.json" else "templates/SPECIALIST_RESULT_SCHEMA.json",
     );
+    defer allocator.free(schema);
+
+    var buffer: std.ArrayList(u8) = .empty;
+    const writer = buffer.writer(allocator);
+    try writer.print("{s}\n\n{s}\n\n{s}\n\n{s}\n\n{s}\n", .{ base, policy, soul, contract, skill });
+    try appendSelectedActionSections(allocator, writer, layout, state, actor);
+    try writer.print("\nResponse schema reference:\n{s}\n", .{schema});
+    return try buffer.toOwnedSlice(allocator);
 }
 
 fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !AppConfig {
@@ -3745,8 +3774,10 @@ fn saveRuntimeRunLog(allocator: std.mem.Allocator, path: []const u8, log: Runtim
 fn runDoctorCheck(allocator: std.mem.Allocator) ![]const u8 {
     const config = try loadProjectConfig(allocator);
     var state = try loadState(allocator, config.paths.state_file);
+    const asset_layout = try resolveGlobalAssetLayout(allocator);
+    defer deinitGlobalAssetLayout(allocator, asset_layout);
 
-    try ensurePromptFiles(config.paths.prompts_dir);
+    try ensureGlobalAssetFiles(allocator, asset_layout);
     try ensureMemoryFiles(config.paths);
 
     const models = try providerListModels(allocator, config.provider);
@@ -3769,7 +3800,7 @@ fn runDoctorCheck(allocator: std.mem.Allocator) ![]const u8 {
 
     return try std.fmt.allocPrint(
         allocator,
-        "prompt assets: ok\nbackend reachable: ok ({s})\nconfigured model: ok ({s})\nstructured output smoke test: ok",
+        "global agent assets: ok\nproject context files: ok\nbackend reachable: ok ({s})\nconfigured model: ok ({s})\nstructured output smoke test: ok",
         .{ config.provider.type, config.provider.model },
     );
 }
@@ -3795,36 +3826,59 @@ fn missionOutcomeSummary(allocator: std.mem.Allocator, state: AppState) ![]const
     );
 }
 
-fn ensurePromptFiles(prompts_dir: []const u8) !void {
+fn ensureGlobalAssetFiles(allocator: std.mem.Allocator, layout: GlobalAssetLayout) !void {
     const required = [_][]const u8{
-        "shared/base.md",
-        "shared/tool-policy.md",
-        "shared/decanus-schema.json",
-        "shared/specialist-schema.json",
-        "decanus.md",
-        "faber.md",
-        "artifex.md",
-        "architectus.md",
-        "tesserarius.md",
-        "explorator.md",
-        "signifer.md",
-        "praeco.md",
-        "calo.md",
-        "mulus.md",
+        "AGENT_LOOP.md",
+        "AGENT_ARCHITECTURE.md",
+        "AGENT_COMPATIBILITY.md",
+        "_schemas/SOUL_SCHEMA.md",
+        "_schemas/CONTRACT_SCHEMA.md",
+        "_schemas/SKILL_SCHEMA.md",
+        "_schemas/ACTION_SCHEMA.md",
+        "decanus/SOUL.md",
+        "decanus/CONTRACT.md",
+        "decanus/SKILL.md",
+        "faber/SOUL.md",
+        "artifex/SOUL.md",
+        "architectus/SOUL.md",
+        "tesserarius/SOUL.md",
+        "explorator/SOUL.md",
+        "signifer/SOUL.md",
+        "praeco/SOUL.md",
+        "calo/SOUL.md",
+        "mulus/SOUL.md",
     };
 
     for (required) |relative| {
-        const full_path = try std.fs.path.join(std.heap.page_allocator, &.{ prompts_dir, relative });
-        defer std.heap.page_allocator.free(full_path);
+        const full_path = try std.fs.path.join(allocator, &.{ layout.agents_root, relative });
+        defer allocator.free(full_path);
         std.fs.cwd().access(full_path, .{}) catch {
-            stderrPrint("missing prompt asset: {s}\n", .{full_path}) catch {};
-            return error.MissingPromptAsset;
+            stderrPrint("missing global agent asset: {s}\n", .{full_path}) catch {};
+            return error.MissingAgentAsset;
+        };
+    }
+
+    const shared_required = [_][]const u8{
+        "patterns/RUNTIME_BASE.md",
+        "patterns/TOOL_POLICY.md",
+        "templates/DECANUS_DECISION_SCHEMA.json",
+        "templates/SPECIALIST_RESULT_SCHEMA.json",
+    };
+    for (shared_required) |relative| {
+        const full_path = try std.fs.path.join(allocator, &.{ layout.shared_root, relative });
+        defer allocator.free(full_path);
+        std.fs.cwd().access(full_path, .{}) catch {
+            stderrPrint("missing shared asset: {s}\n", .{full_path}) catch {};
+            return error.MissingAgentAsset;
         };
     }
 }
 
 fn ensureMemoryFiles(paths: PathsConfig) !void {
     const required = [_][]const u8{
+        paths.architecture_file,
+        paths.plan_file,
+        paths.project_context_file,
         paths.project_memory_file,
         paths.global_memory_file,
     };
@@ -3837,9 +3891,98 @@ fn ensureMemoryFiles(paths: PathsConfig) !void {
     }
 }
 
-fn readPrompt(allocator: std.mem.Allocator, prompts_dir: []const u8, relative_path: []const u8) ![]const u8 {
-    const full_path = try std.fs.path.join(allocator, &.{ prompts_dir, relative_path });
+fn readSharedAsset(allocator: std.mem.Allocator, layout: GlobalAssetLayout, relative_path: []const u8) ![]const u8 {
+    const full_path = try std.fs.path.join(allocator, &.{ layout.shared_root, relative_path });
+    defer allocator.free(full_path);
     return try std.fs.cwd().readFileAlloc(allocator, full_path, max_file_bytes);
+}
+
+fn readAgentAsset(
+    allocator: std.mem.Allocator,
+    layout: GlobalAssetLayout,
+    actor: Actor,
+    relative_path: []const u8,
+) ![]const u8 {
+    const full_path = try std.fs.path.join(allocator, &.{ layout.agents_root, actorName(actor), relative_path });
+    defer allocator.free(full_path);
+    return try std.fs.cwd().readFileAlloc(allocator, full_path, max_file_bytes);
+}
+
+fn readAgentActionAsset(
+    allocator: std.mem.Allocator,
+    layout: GlobalAssetLayout,
+    actor: Actor,
+    action_name: []const u8,
+) ![]const u8 {
+    const file_name = try std.fmt.allocPrint(allocator, "{s}.md", .{action_name});
+    defer allocator.free(file_name);
+    const full_path = try std.fs.path.join(allocator, &.{ layout.agents_root, actorName(actor), "actions", file_name });
+    defer allocator.free(full_path);
+    return try std.fs.cwd().readFileAlloc(allocator, full_path, max_file_bytes);
+}
+
+fn defaultActionNameForActor(actor: Actor) []const u8 {
+    return switch (actor) {
+        .decanus => "EVALUATE_LOOP",
+        .faber => "IMPLEMENT_BACKEND",
+        .artifex => "IMPLEMENT_INTERFACE",
+        .architectus => "CONFIGURE_SYSTEM",
+        .tesserarius => "VALIDATE_SCOPE",
+        .explorator => "RESEARCH_SCOPE",
+        .signifer => "DEFINE_VISUAL_SYSTEM",
+        .praeco => "WRITE_MESSAGE",
+        .calo => "UPDATE_DOCUMENTATION",
+        .mulus => "APPLY_BULK_TRANSFORM",
+    };
+}
+
+fn parseAgentCall(agent_call: []const u8) ?AgentCallSpec {
+    const trimmed = trimAscii(agent_call);
+    if (trimmed.len == 0) return null;
+    if (std.mem.indexOf(u8, trimmed, "::")) |separator| {
+        const actor_value = parseActor(trimmed[0..separator]) orelse return null;
+        return .{
+            .actor = actor_value,
+            .action_name = trimmed[separator + 2 ..],
+        };
+    }
+    return .{
+        .actor = parseActor(trimmed) orelse return null,
+        .action_name = "",
+    };
+}
+
+fn appendActionSection(
+    allocator: std.mem.Allocator,
+    writer: anytype,
+    layout: GlobalAssetLayout,
+    actor: Actor,
+    action_name: []const u8,
+) !void {
+    const action_text = try readAgentActionAsset(allocator, layout, actor, action_name);
+    defer allocator.free(action_text);
+    try writer.print("\nSelected action: {s}::{s}\n{s}\n", .{ actorName(actor), action_name, action_text });
+}
+
+fn appendSelectedActionSections(
+    allocator: std.mem.Allocator,
+    writer: anytype,
+    layout: GlobalAssetLayout,
+    state: *const AppState,
+    actor: Actor,
+) !void {
+    try writer.writeAll("\nSelected actions:\n");
+    if (actor == .decanus) {
+        try appendActionSection(allocator, writer, layout, actor, "EVALUATE_LOOP");
+        try appendActionSection(allocator, writer, layout, actor, "INVOKE_SPECIALIST");
+        try appendActionSection(allocator, writer, layout, actor, "FINISH_MISSION");
+        return;
+    }
+
+    const lane = laneForActor(actor);
+    const task = taskForLaneConst(state, lane);
+    const selected_action = if (task.invocation.action_name.len > 0) task.invocation.action_name else defaultActionNameForActor(actor);
+    try appendActionSection(allocator, writer, layout, actor, selected_action);
 }
 
 fn providerListModels(allocator: std.mem.Allocator, provider: ProviderConfig) ![][]const u8 {
@@ -4891,6 +5034,30 @@ fn globalMemorySpec(config: AppConfig) RuntimeMemorySpec {
     };
 }
 
+fn architectureSpec(config: AppConfig) RuntimeMemorySpec {
+    return .{
+        .kind = "architecture",
+        .path = config.paths.architecture_file,
+        .max_chars = config.context.max_project_memory_chars,
+    };
+}
+
+fn planSpec(config: AppConfig) RuntimeMemorySpec {
+    return .{
+        .kind = "plan",
+        .path = config.paths.plan_file,
+        .max_chars = config.context.max_project_memory_chars,
+    };
+}
+
+fn projectContextSpec(config: AppConfig) RuntimeMemorySpec {
+    return .{
+        .kind = "project_context",
+        .path = config.paths.project_context_file,
+        .max_chars = config.context.max_project_memory_chars,
+    };
+}
+
 fn loadRuntimeMemoryLayer(allocator: std.mem.Allocator, spec: RuntimeMemorySpec) !RuntimeMemoryLayer {
     const memory_path = trimAscii(spec.path);
     if (memory_path.len == 0 or !pathIsSafeForWorkspace(memory_path)) {
@@ -4994,6 +5161,27 @@ fn loadPromptMemorySnapshot(
     state: *AppState,
     hooks: RuntimeHooks,
 ) !RuntimeMemorySnapshot {
+    const architecture_spec = architectureSpec(config);
+    const architecture = loadRuntimeMemoryLayer(allocator, architecture_spec) catch |err| {
+        try blockForMemoryLoadFailure(allocator, config, state, hooks, architecture_spec, err);
+        return error.MemoryLoadBlocked;
+    };
+    errdefer architecture.deinit(allocator);
+
+    const plan_spec = planSpec(config);
+    const plan = loadRuntimeMemoryLayer(allocator, plan_spec) catch |err| {
+        try blockForMemoryLoadFailure(allocator, config, state, hooks, plan_spec, err);
+        return error.MemoryLoadBlocked;
+    };
+    errdefer plan.deinit(allocator);
+
+    const project_context_spec = projectContextSpec(config);
+    const project_context = loadRuntimeMemoryLayer(allocator, project_context_spec) catch |err| {
+        try blockForMemoryLoadFailure(allocator, config, state, hooks, project_context_spec, err);
+        return error.MemoryLoadBlocked;
+    };
+    errdefer project_context.deinit(allocator);
+
     const project_spec = projectMemorySpec(config);
     const project = loadRuntimeMemoryLayer(allocator, project_spec) catch |err| {
         try blockForMemoryLoadFailure(allocator, config, state, hooks, project_spec, err);
@@ -5008,6 +5196,9 @@ fn loadPromptMemorySnapshot(
     };
 
     return .{
+        .architecture = architecture,
+        .plan = plan,
+        .project_context = project_context,
         .project = project,
         .global = global,
     };
@@ -5103,7 +5294,12 @@ fn buildPromptWithContextBudget(
     const memory = try loadPromptMemorySnapshot(allocator, config, state, hooks);
     errdefer memory.deinit(allocator);
 
-    if (memory.project.truncated or memory.global.truncated) {
+    if (memory.architecture.truncated or
+        memory.plan.truncated or
+        memory.project_context.truncated or
+        memory.project.truncated or
+        memory.global.truncated)
+    {
         emitLog(
             hooks,
             .warning,
@@ -5591,15 +5787,10 @@ fn scaffoldProject(allocator: std.mem.Allocator) !void {
         defer allocator.free(destination);
         try writeFileIfMissing(destination, asset.content);
     }
-    try scaffoldAgentAssets(allocator);
 }
 
 fn runtimePath(allocator: std.mem.Allocator, relative_path: []const u8) ![]const u8 {
     return try std.fs.path.join(allocator, &.{ runtime_dir_name, relative_path });
-}
-
-fn agentPath(allocator: std.mem.Allocator, relative_path: []const u8) ![]const u8 {
-    return try std.fs.path.join(allocator, &.{ agents_dir_name, relative_path });
 }
 
 fn resolveContuberniumHome(allocator: std.mem.Allocator) ![]const u8 {
@@ -5613,16 +5804,14 @@ fn resolveContuberniumHome(allocator: std.mem.Allocator) ![]const u8 {
     };
 }
 
-fn resolveAgentAssetSource(allocator: std.mem.Allocator) ![]const u8 {
-    const contubernium_home = try resolveContuberniumHome(allocator);
-    defer allocator.free(contubernium_home);
+fn deinitGlobalAssetLayout(allocator: std.mem.Allocator, layout: GlobalAssetLayout) void {
+    allocator.free(layout.root);
+    allocator.free(layout.agents_root);
+    allocator.free(layout.shared_root);
+    allocator.free(layout.adapters_root);
+}
 
-    const installed_agents = try std.fs.path.join(allocator, &.{ contubernium_home, "agents" });
-    const installed_loop = try std.fs.path.join(allocator, &.{ installed_agents, "AGENT_LOOP.md" });
-    defer allocator.free(installed_loop);
-    if (pathExists(installed_loop)) return installed_agents;
-    allocator.free(installed_agents);
-
+fn resolveSourceAssetRoot(allocator: std.mem.Allocator) ![]const u8 {
     const exe_path = try std.fs.selfExePathAlloc(allocator);
     defer allocator.free(exe_path);
     const exe_dir = std.fs.path.dirname(exe_path) orelse return error.AgentAssetSourceNotFound;
@@ -5631,15 +5820,17 @@ fn resolveAgentAssetSource(allocator: std.mem.Allocator) ![]const u8 {
     errdefer allocator.free(current_dir);
 
     while (true) {
-        const candidate = try std.fs.path.join(allocator, &.{ current_dir, ".agents" });
-        errdefer allocator.free(candidate);
-        const candidate_loop = try std.fs.path.join(allocator, &.{ candidate, "AGENT_LOOP.md" });
+        const candidate_agents = try std.fs.path.join(allocator, &.{ current_dir, ".agents" });
+        errdefer allocator.free(candidate_agents);
+        const candidate_loop = try std.fs.path.join(allocator, &.{ candidate_agents, "AGENT_LOOP.md" });
         defer allocator.free(candidate_loop);
-        if (pathExists(candidate_loop)) {
+        const candidate_shared = try std.fs.path.join(allocator, &.{ current_dir, "shared", "patterns", "RUNTIME_BASE.md" });
+        defer allocator.free(candidate_shared);
+        if (pathExists(candidate_loop) and pathExists(candidate_shared)) {
             allocator.free(current_dir);
-            return candidate;
+            return candidate_agents;
         }
-        allocator.free(candidate);
+        allocator.free(candidate_agents);
 
         const parent = std.fs.path.dirname(current_dir) orelse break;
         if (parent.len == current_dir.len and eql(parent, current_dir)) break;
@@ -5655,42 +5846,48 @@ fn resolveAgentAssetSource(allocator: std.mem.Allocator) ![]const u8 {
     return error.AgentAssetSourceNotFound;
 }
 
-fn copyTreeIfMissing(allocator: std.mem.Allocator, source_root: []const u8, target_root: []const u8) !void {
-    var source_dir = try std.fs.cwd().openDir(source_root, .{ .iterate = true });
-    defer source_dir.close();
-    try copyTreeFromDirIfMissing(allocator, source_root, target_root, source_dir);
-}
+fn resolveGlobalAssetLayout(allocator: std.mem.Allocator) !GlobalAssetLayout {
+    const contubernium_home = try resolveContuberniumHome(allocator);
+    errdefer allocator.free(contubernium_home);
 
-fn copyTreeFromDirIfMissing(
-    allocator: std.mem.Allocator,
-    source_root: []const u8,
-    target_root: []const u8,
-    source_dir: std.fs.Dir,
-) !void {
-    var iterator = source_dir.iterate();
-    while (try iterator.next()) |entry| {
-        const source_path = try std.fs.path.join(allocator, &.{ source_root, entry.name });
-        defer allocator.free(source_path);
-        const target_path = try std.fs.path.join(allocator, &.{ target_root, entry.name });
-        defer allocator.free(target_path);
-
-        switch (entry.kind) {
-            .file => try copyFileIfMissing(allocator, source_path, target_path),
-            .directory => {
-                try std.fs.cwd().makePath(target_path);
-                var child = try source_dir.openDir(entry.name, .{ .iterate = true });
-                defer child.close();
-                try copyTreeFromDirIfMissing(allocator, source_path, target_path, child);
-            },
-            else => {},
-        }
+    const home_agents = try std.fs.path.join(allocator, &.{ contubernium_home, "agents" });
+    errdefer allocator.free(home_agents);
+    const home_shared = try std.fs.path.join(allocator, &.{ contubernium_home, "shared" });
+    errdefer allocator.free(home_shared);
+    const home_adapters = try std.fs.path.join(allocator, &.{ contubernium_home, "adapters" });
+    errdefer allocator.free(home_adapters);
+    const home_loop = try std.fs.path.join(allocator, &.{ home_agents, "AGENT_LOOP.md" });
+    defer allocator.free(home_loop);
+    const home_base = try std.fs.path.join(allocator, &.{ home_shared, "patterns", "RUNTIME_BASE.md" });
+    defer allocator.free(home_base);
+    if (pathExists(home_loop) and pathExists(home_base)) {
+        return .{
+            .root = contubernium_home,
+            .agents_root = home_agents,
+            .shared_root = home_shared,
+            .adapters_root = home_adapters,
+        };
     }
-}
+    allocator.free(home_adapters);
+    allocator.free(home_shared);
+    allocator.free(home_agents);
+    allocator.free(contubernium_home);
 
-fn scaffoldAgentAssets(allocator: std.mem.Allocator) !void {
-    const source_root = try resolveAgentAssetSource(allocator);
-    defer allocator.free(source_root);
-    try copyTreeIfMissing(allocator, source_root, agents_dir_name);
+    const source_agents = try resolveSourceAssetRoot(allocator);
+    errdefer allocator.free(source_agents);
+    const source_root = std.fs.path.dirname(source_agents) orelse return error.AgentAssetSourceNotFound;
+    const root = try allocator.dupe(u8, source_root);
+    errdefer allocator.free(root);
+    const shared_root = try std.fs.path.join(allocator, &.{ root, "shared" });
+    errdefer allocator.free(shared_root);
+    const adapters_root = try std.fs.path.join(allocator, &.{ root, "adapters" });
+    errdefer allocator.free(adapters_root);
+    return .{
+        .root = root,
+        .agents_root = source_agents,
+        .shared_root = shared_root,
+        .adapters_root = adapters_root,
+    };
 }
 
 fn writeFileIfMissing(path: []const u8, content: []const u8) !void {
@@ -6321,6 +6518,8 @@ test "invocation loop transitions keep shared state and history aligned" {
         "implement state helpers",
         "return structured result",
         &.{"src/main.zig"},
+        "faber::IMPLEMENT_BACKEND",
+        "IMPLEMENT_BACKEND",
     );
 
     try testing.expectEqual(Actor.faber, state.current_actor);
@@ -6330,8 +6529,11 @@ test "invocation loop transitions keep shared state and history aligned" {
     try testing.expectEqual(Actor.faber, state.agent_loop.active_tool.?);
     try testing.expectEqual(TaskStatus.in_progress, state.tasks.backend.status);
     try testing.expectEqual(InvocationStatus.ready, state.tasks.backend.invocation.status);
+    try testing.expectEqualStrings("faber::IMPLEMENT_BACKEND", state.tasks.backend.invocation.agent_call);
+    try testing.expectEqualStrings("IMPLEMENT_BACKEND", state.tasks.backend.invocation.action_name);
     try testing.expectEqualStrings("centralize state transitions", state.tasks.backend.invocation.memory.mission);
     try testing.expectEqualStrings("read_file src/main.zig", state.tasks.backend.invocation.memory.project);
+    try testing.expectEqual(@as(usize, 1), state.tasks.backend.invocation.context.files.len);
     try testing.expectEqual(@as(usize, 1), state.agent_loop.history.len);
     try testing.expectEqualStrings("tool_call", state.agent_loop.history[0].type);
 
@@ -6355,68 +6557,18 @@ test "invocation loop transitions keep shared state and history aligned" {
     try testing.expectEqualStrings("tool_result", state.agent_loop.history[1].type);
 }
 
-test "single-agent runtime blocks active specialist turns and returns control to decanus" {
+test "parseAgentCall extracts actor and action name" {
     const testing = std.testing;
-    const allocator = std.heap.page_allocator;
-    const config = AppConfig{};
-    var state = AppState{};
-    state.mission.initial_prompt = "complete phase 6";
-    state.current_actor = .faber;
-    state.global_status = .waiting_on_tool;
-    state.agent_loop.iteration = 2;
-    state.agent_loop.active_tool = .faber;
-    state.tasks.backend.status = .in_progress;
-    state.tasks.backend.invocation.status = .running;
-    state.tasks.backend.invocation.objective = "implement the backend slice";
-
-    try stateManager(&state).beginTurn(allocator, config);
-    const outcome = try blockUnsupportedSpecialistTurn(allocator, config, &state, .{}, .faber);
-
-    try testing.expectEqual(StepOutcome.blocked, outcome);
-    try testing.expectEqual(Actor.decanus, state.current_actor);
-    try testing.expectEqual(GlobalStatus.waiting_on_tool, state.global_status);
-    try testing.expectEqual(LoopStatus.blocked, state.agent_loop.status);
-    try testing.expectEqual(RuntimeStatus.blocked, state.runtime_session.status);
-    try testing.expect(state.agent_loop.active_tool == null);
-    try testing.expectEqual(TaskStatus.blocked, state.tasks.backend.status);
-    try testing.expectEqual(InvocationStatus.blocked, state.tasks.backend.invocation.status);
-    try testing.expectEqualStrings("SINGLE_AGENT_RUNTIME_ONLY", state.runtime_session.last_failure.error_code);
-    try testing.expectEqualStrings("implement the backend slice", state.runtime_session.last_failure.context.detail);
-    try testing.expectEqualStrings("specialist_execution_blocked", state.agent_loop.history[0].type);
+    const parsed = parseAgentCall("architectus::CONFIGURE_SYSTEM").?;
+    try testing.expectEqual(Actor.architectus, parsed.actor);
+    try testing.expectEqualStrings("CONFIGURE_SYSTEM", parsed.action_name);
 }
 
-test "single-agent runtime rejects specialist invocations from decanus" {
+test "parseAgentCall handles bare agent targets" {
     const testing = std.testing;
-    const allocator = std.heap.page_allocator;
-    const config = AppConfig{};
-    var state = AppState{};
-    state.mission.initial_prompt = "complete phase 6";
-    state.current_actor = .decanus;
-    state.global_status = .planning;
-    state.agent_loop.status = .thinking;
-    state.agent_loop.iteration = 4;
-
-    const outcome = try blockUnsupportedSpecialistInvocation(
-        allocator,
-        config,
-        &state,
-        .{},
-        .faber,
-        .backend,
-        "implement the backend slice",
-    );
-
-    try testing.expectEqual(StepOutcome.blocked, outcome);
-    try testing.expectEqual(Actor.decanus, state.current_actor);
-    try testing.expectEqual(GlobalStatus.waiting_on_tool, state.global_status);
-    try testing.expectEqual(LoopStatus.blocked, state.agent_loop.status);
-    try testing.expectEqual(RuntimeStatus.blocked, state.runtime_session.status);
-    try testing.expect(state.agent_loop.active_tool == null);
-    try testing.expectEqual(TaskStatus.pending, state.tasks.backend.status);
-    try testing.expectEqual(InvocationStatus.idle, state.tasks.backend.invocation.status);
-    try testing.expectEqualStrings("SINGLE_AGENT_RUNTIME_ONLY", state.runtime_session.last_failure.error_code);
-    try testing.expectEqualStrings("implement the backend slice", state.runtime_session.last_failure.context.detail);
-    try testing.expectEqualStrings("specialist_invocation_blocked", state.agent_loop.history[0].type);
+    const parsed = parseAgentCall("faber").?;
+    try testing.expectEqual(Actor.faber, parsed.actor);
+    try testing.expectEqualStrings("", parsed.action_name);
 }
 
 test "mission completion records the finish step and history" {
@@ -6481,7 +6633,7 @@ test "loadRuntimeMemoryLayer truncates oversized external memory content" {
     try testing.expect(std.mem.indexOf(u8, layer.content, "...[truncated]...") != null);
 }
 
-test "buildDecanusUserPrompt includes project and global memory layers" {
+test "buildDecanusUserPrompt includes project context and memory layers" {
     const testing = std.testing;
     const allocator = std.heap.page_allocator;
     var state = AppState{};
@@ -6489,6 +6641,24 @@ test "buildDecanusUserPrompt includes project and global memory layers" {
     state.mission.current_goal = "hook memory layers into the runtime";
 
     const prompt = try buildDecanusUserPrompt(allocator, AppConfig{}, &state, .{
+        .architecture = .{
+            .kind = "architecture",
+            .path = ".contubernium/ARCHITECTURE.md",
+            .content = "System structure lives here.",
+            .source_chars = 26,
+        },
+        .plan = .{
+            .kind = "plan",
+            .path = ".contubernium/PLAN.md",
+            .content = "Current execution order lives here.",
+            .source_chars = 35,
+        },
+        .project_context = .{
+            .kind = "project_context",
+            .path = ".contubernium/PROJECT_CONTEXT.md",
+            .content = "Goals and constraints live here.",
+            .source_chars = 32,
+        },
         .project = .{
             .kind = "project",
             .path = ".contubernium/project.md",
@@ -6503,6 +6673,8 @@ test "buildDecanusUserPrompt includes project and global memory layers" {
         },
     });
 
+    try testing.expect(std.mem.indexOf(u8, prompt, "Architecture file: .contubernium/ARCHITECTURE.md") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "System structure lives here.") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Project memory file: .contubernium/project.md") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Architecture decisions live here.") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Global memory file: .contubernium/global.md") != null);
@@ -6520,9 +6692,21 @@ test "buildPromptWithContextBudget blocks when a required memory layer is missin
     try tmp.dir.setAsCwd();
     defer original_cwd.setAsCwd() catch {};
 
+    var architecture_file = try tmp.dir.createFile("ARCHITECTURE.md", .{ .truncate = true });
+    defer architecture_file.close();
+    try architecture_file.writeAll("Architecture");
+
+    var plan_file = try tmp.dir.createFile("PLAN.md", .{ .truncate = true });
+    defer plan_file.close();
+    try plan_file.writeAll("Plan");
+
+    var project_context_file = try tmp.dir.createFile("PROJECT_CONTEXT.md", .{ .truncate = true });
+    defer project_context_file.close();
+    try project_context_file.writeAll("Project context");
+
     var project_file = try tmp.dir.createFile("project.md", .{ .truncate = true });
     defer project_file.close();
-    try project_file.writeAll("Project context");
+    try project_file.writeAll("Project memory");
 
     var state = AppState{};
     state.current_actor = .decanus;
@@ -6531,6 +6715,9 @@ test "buildPromptWithContextBudget blocks when a required memory layer is missin
 
     const config = AppConfig{
         .paths = .{
+            .architecture_file = "ARCHITECTURE.md",
+            .plan_file = "PLAN.md",
+            .project_context_file = "PROJECT_CONTEXT.md",
             .project_memory_file = "project.md",
             .global_memory_file = "global.md",
         },
@@ -6546,7 +6733,7 @@ test "buildPromptWithContextBudget blocks when a required memory layer is missin
     try testing.expectEqualStrings("memory_load_blocked", state.agent_loop.history[0].type);
 }
 
-test "scaffoldProject creates canonical runtime and agent assets" {
+test "scaffoldProject creates canonical runtime and context assets" {
     const testing = std.testing;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -6560,12 +6747,13 @@ test "scaffoldProject creates canonical runtime and agent assets" {
 
     try testing.expect(pathExists(".contubernium/state.json"));
     try testing.expect(pathExists(".contubernium/config.json"));
+    try testing.expect(pathExists(".contubernium/ARCHITECTURE.md"));
+    try testing.expect(pathExists(".contubernium/PLAN.md"));
+    try testing.expect(pathExists(".contubernium/PROJECT_CONTEXT.md"));
     try testing.expect(pathExists(".contubernium/project.md"));
     try testing.expect(pathExists(".contubernium/global.md"));
-    try testing.expect(pathExists(".contubernium/prompts/decanus.md"));
-    try testing.expect(pathExists(".agents/AGENT_LOOP.md"));
-    try testing.expect(pathExists(".agents/decanus/SOUL.md"));
-    try testing.expect(pathExists(".agents/architectus/CONTRACT.md"));
+    try testing.expect(!pathExists(".contubernium/prompts"));
+    try testing.expect(!pathExists(".agents"));
 }
 
 test "estimatePromptBudget reserves response headroom" {

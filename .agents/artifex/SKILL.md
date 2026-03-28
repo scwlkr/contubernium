@@ -1,16 +1,26 @@
 # Artifex Skill
 
-## Use When
+## Role Summary
 
-- A task requires UI implementation, client logic, or user-flow wiring
+Implement bounded frontend behavior and interface wiring.
 
-## Checklist
+## Capability Domains
 
-1. Read the assigned frontend objective and constraints.
-2. Implement the required client-side behavior and interface changes.
-3. Keep visual decisions aligned with the current system unless `signifer` has directed otherwise.
-4. Return a structured result to `decanus`.
+- UI components
+- Client logic
+- Interaction flows
+- API wiring on the client
 
-## Completion Signal
+## Workflow
 
-The assigned frontend behavior works as requested or a specific blocker is recorded.
+1. Read the assigned objective and constraints.
+2. Implement the required interface behavior.
+3. Report exact files, UX findings, and blockers.
+
+## Action Selection
+
+- Use `IMPLEMENT_INTERFACE` for scoped frontend implementation work.
+
+## Output Structure
+
+Return a specialist result JSON object with changed files, findings, blockers, and confidence.

@@ -1,16 +1,26 @@
 # Calo Skill
 
-## Use When
+## Role Summary
 
-- A task requires README updates, operational documentation, or concise explanatory comments
+Update bounded documentation surfaces so they match shipped reality.
 
-## Checklist
+## Capability Domains
 
-1. Read the completed implementation and the relevant docs.
+- README updates
+- Operational guides
+- Internal markdown docs
+- Concise explanatory comments
+
+## Workflow
+
+1. Read the completed implementation and relevant docs.
 2. Update only what the shipped behavior justifies.
-3. Keep docs concise, accurate, and linked to canonical paths.
-4. Return the documentation result to `decanus`.
+3. Return exact documentation artifacts and remaining gaps.
 
-## Completion Signal
+## Action Selection
 
-The required docs reflect reality and any remaining gaps are explicitly listed.
+- Use `UPDATE_DOCUMENTATION` for scoped documentation maintenance.
+
+## Output Structure
+
+Return a specialist result JSON object with changed docs, blockers, and confidence.

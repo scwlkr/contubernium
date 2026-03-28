@@ -1,16 +1,26 @@
 # Signifer Skill
 
-## Use When
+## Role Summary
 
-- A task requires brand direction, design-system decisions, or visual consistency work
+Define the minimum visual system guidance needed to unblock the next design decision.
 
-## Checklist
+## Capability Domains
 
-1. Read the product context and current visual language.
-2. Define the smallest set of design rules needed for the task.
-3. Keep guidance concrete enough for implementation.
-4. Return the direction to `decanus`.
+- Brand direction
+- Layout systems
+- Typography and spacing rules
+- Visual consistency
 
-## Completion Signal
+## Workflow
 
-The required visual direction is explicit, consistent, and scoped to the assignment.
+1. Read the product context and existing visual language.
+2. Define the smallest decisive set of design rules.
+3. Return constraints and direction that implementation can follow.
+
+## Action Selection
+
+- Use `DEFINE_VISUAL_SYSTEM` for brand or design-system authority tasks.
+
+## Output Structure
+
+Return a specialist result JSON object with design direction, findings, blockers, and confidence.

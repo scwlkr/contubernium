@@ -1,0 +1,34 @@
+{
+  "action": "optional: complete | tool_request | ask_user | blocked",
+  "reasoning": "short explanation",
+  "status": "complete | partial | blocked",
+  "summary": "what was done or learned",
+  "changes": [
+    "changed files or produced outputs"
+  ],
+  "findings": [
+    "important observations for decanus"
+  ],
+  "blockers": [
+    "blocking issue if status is blocked"
+  ],
+  "next_recommended_agent": "optional: faber | artifex | architectus | tesserarius | explorator | signifer | praeco | calo | mulus",
+  "confidence": 0.0,
+  "description": "optional detail field",
+  "result_summary": "optional legacy summary field",
+  "artifacts": [
+    "optional legacy change list"
+  ],
+  "question": "required when action is ask_user",
+  "blocked_reason": "required when action is blocked",
+  "tool_requests": [
+    {
+      "tool": "list_files | read_file | search_text | run_command | write_file | ask_user",
+      "description": "why the tool is needed",
+      "path": "",
+      "pattern": "",
+      "command": "",
+      "content": ""
+    }
+  ]
+}

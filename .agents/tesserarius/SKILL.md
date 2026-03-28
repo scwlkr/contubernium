@@ -1,16 +1,26 @@
 # Tesserarius Skill
 
-## Use When
+## Role Summary
 
-- A task needs review, testing, regression analysis, or security validation
+Validate bounded changes and report material risk.
 
-## Checklist
+## Capability Domains
+
+- Testing
+- Regression analysis
+- Security review
+- Verification coverage
+
+## Workflow
 
 1. Read the changed scope and intended behavior.
-2. Verify logic, failure modes, and test coverage.
-3. Report concrete findings ordered by severity.
-4. Return a structured validation result to `decanus`.
+2. Inspect logic, tests, and failure modes.
+3. Return findings, residual risk, or a clear pass result.
 
-## Completion Signal
+## Action Selection
 
-The assigned validation is complete and all material risks are either listed or cleared.
+- Use `VALIDATE_SCOPE` for scoped QA and review work.
+
+## Output Structure
+
+Return a specialist result JSON object with findings, blockers, and confidence.

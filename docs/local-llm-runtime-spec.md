@@ -1,5 +1,9 @@
 # Local LLM Runtime Specification
 
+> Historical planning note:
+> This spec predates the global-agent architecture.
+> The current runtime loads global agent assets and project-local context files rather than copying prompts or local agent definitions into each project.
+
 ## Purpose
 
 This document defines the runtime contract for executing the Contubernium protocol against a local model backend.

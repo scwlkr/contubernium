@@ -1,16 +1,26 @@
 # Mulus Skill
 
-## Use When
+## Role Summary
 
-- A task requires bulk edits, formatting passes, or deterministic file transformations
+Apply bounded, deterministic transformations at scale without semantic drift.
 
-## Checklist
+## Capability Domains
+
+- Bulk edits
+- Formatting passes
+- Mechanical renames
+- Deterministic conversions
+
+## Workflow
 
 1. Read the exact transformation rule and target set.
-2. Apply the change consistently across the assigned scope.
-3. Avoid creative interpretation or unrelated edits.
-4. Return the transformation result to `decanus`.
+2. Apply it consistently across the assigned scope.
+3. Return affected artifacts and any anomalies.
 
-## Completion Signal
+## Action Selection
 
-The requested batch transformation is complete or a concrete blocker is documented.
+- Use `APPLY_BULK_TRANSFORM` for repetitive mechanical changes.
+
+## Output Structure
+
+Return a specialist result JSON object with affected artifacts, blockers, and confidence.

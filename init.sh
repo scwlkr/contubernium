@@ -52,7 +52,7 @@ template_path() {
 }
 
 select_asset_root() {
-    if [[ -d "$CONTUBERNIUM_HOME/agents" && -d "$CONTUBERNIUM_HOME/prompts" && -d "$CONTUBERNIUM_HOME/templates" ]]; then
+    if [[ -d "$CONTUBERNIUM_HOME/agents" && -d "$CONTUBERNIUM_HOME/shared" && -d "$CONTUBERNIUM_HOME/templates" ]]; then
         printf '%s\n' "$CONTUBERNIUM_HOME"
         return
     fi
@@ -61,37 +61,37 @@ select_asset_root() {
 }
 
 ASSET_ROOT="$(select_asset_root)"
-AGENTS_SOURCE="$ASSET_ROOT/agents"
-PROMPTS_SOURCE="$ASSET_ROOT/prompts"
 TEMPLATES_SOURCE="$ASSET_ROOT/templates"
 
 if [[ "$ASSET_ROOT" == "$SCRIPT_DIR" ]]; then
-    AGENTS_SOURCE="$SCRIPT_DIR/.agents"
-    PROMPTS_SOURCE="$SCRIPT_DIR/prompts"
+    :
 fi
 
 STATE_TEMPLATE="$(template_path "$TEMPLATES_SOURCE" "state.json" "contubernium_state.template.json")"
 CONFIG_TEMPLATE="$(template_path "$TEMPLATES_SOURCE" "config.json" "contubernium.config.template.json")"
 PROJECT_TEMPLATE="$(template_path "$TEMPLATES_SOURCE" "project.md" "project.template.md")"
 GLOBAL_TEMPLATE="$(template_path "$TEMPLATES_SOURCE" "global.md" "global.template.md")"
+ARCHITECTURE_TEMPLATE="$(template_path "$TEMPLATES_SOURCE" "architecture.md" "architecture.template.md")"
+PLAN_TEMPLATE="$(template_path "$TEMPLATES_SOURCE" "plan.md" "plan.template.md")"
+PROJECT_CONTEXT_TEMPLATE="$(template_path "$TEMPLATES_SOURCE" "project_context.md" "project_context.template.md")"
 
-require_path "$AGENTS_SOURCE" "agents source"
-require_path "$PROMPTS_SOURCE" "prompts source"
 require_path "$STATE_TEMPLATE" "state template"
 require_path "$CONFIG_TEMPLATE" "config template"
 require_path "$PROJECT_TEMPLATE" "project memory template"
 require_path "$GLOBAL_TEMPLATE" "global memory template"
+require_path "$ARCHITECTURE_TEMPLATE" "architecture template"
+require_path "$PLAN_TEMPLATE" "plan template"
+require_path "$PROJECT_CONTEXT_TEMPLATE" "project context template"
 
 mkdir -p "$PROJECT_DIR/.contubernium/logs"
-mkdir -p "$PROJECT_DIR/.agents"
 
 copy_if_missing "$STATE_TEMPLATE" "$PROJECT_DIR/.contubernium/state.json"
 copy_if_missing "$CONFIG_TEMPLATE" "$PROJECT_DIR/.contubernium/config.json"
 copy_if_missing "$PROJECT_TEMPLATE" "$PROJECT_DIR/.contubernium/project.md"
 copy_if_missing "$GLOBAL_TEMPLATE" "$PROJECT_DIR/.contubernium/global.md"
-copy_tree_if_missing "$PROMPTS_SOURCE" "$PROJECT_DIR/.contubernium/prompts"
-copy_tree_if_missing "$AGENTS_SOURCE" "$PROJECT_DIR/.agents"
+copy_if_missing "$ARCHITECTURE_TEMPLATE" "$PROJECT_DIR/.contubernium/ARCHITECTURE.md"
+copy_if_missing "$PLAN_TEMPLATE" "$PROJECT_DIR/.contubernium/PLAN.md"
+copy_if_missing "$PROJECT_CONTEXT_TEMPLATE" "$PROJECT_DIR/.contubernium/PROJECT_CONTEXT.md"
 
 echo "Initialized Contubernium in $PROJECT_DIR"
 echo "  - $PROJECT_DIR/.contubernium"
-echo "  - $PROJECT_DIR/.agents"

@@ -16,6 +16,18 @@ Messaging and release communication authority.
 - Owning design-system decisions
 - Owning technical implementation
 
-## Output
+## Guarantees
+
+- Claims remain tied to verified behavior
+- Audience assumptions are explicit
+- Control returns to `decanus`
+
+## Escalation
+
+- Escalate to `signifer` for unresolved brand direction
+- Escalate when the product behavior is not yet verified
+- Block when messaging would require invented claims
+
+## Handoff
 
 Return structured copy artifacts and assumptions, then return control to `decanus`.

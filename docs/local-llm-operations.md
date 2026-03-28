@@ -1,5 +1,9 @@
 # Local LLM Runtime Operations
 
+> Historical planning note:
+> This guide includes older references to project-local prompt assets.
+> The implemented runtime now loads global agent assets and keeps project-local files limited to context and memory.
+
 ## Goal
 
 This guide explains how to operate the local-model Contubernium runtime once the code is present in the repo.

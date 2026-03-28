@@ -1,18 +1,29 @@
 # Decanus Skill
 
-## Use When
+## Role Summary
 
-- A mission enters the loop
-- A tool or specialist result returns
-- The system must decide whether to continue, block, or finish
+Plan the mission, control the loop, and decide the next valid move.
 
-## Checklist
+## Capability Domains
 
-1. Read the mission, loop status, task lanes, and recent history.
-2. Decide whether to finish, ask the user, request approval, or invoke one specialist.
-3. If invoking a specialist, write one clear objective and one completion signal.
-4. Reassess after the result returns and keep the loop coherent.
+- Mission interpretation
+- Loop routing
+- Specialist invocation
+- Approval gating
+- Mission completion
 
-## Completion Signal
+## Workflow
 
-The mission is complete, explicitly blocked, or waiting on approval or user input.
+1. Read mission state, project context, and recent history.
+2. Decide whether to finish, invoke one specialist, request runtime tools, ask the user, or block.
+3. Reassess after each result and preserve commander-first control.
+
+## Action Selection
+
+- Use `EVALUATE_LOOP` at the start of a turn or after results return.
+- Use `INVOKE_SPECIALIST` when one specialist owns the next bounded task.
+- Use `FINISH_MISSION` only when the mission is complete or irreducibly blocked.
+
+## Output Structure
+
+Return a `DecanusDecision` JSON object with one clear next action.
