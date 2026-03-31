@@ -186,23 +186,6 @@ const makeTurnId = core.makeTurnId;
 const truncateText = core.truncateText;
 const truncateOwnedText = core.truncateOwnedText;
 const unixTimestampString = core.unixTimestampString;
-const parseJson = core.parseJson;
-const parseModelJson = core.parseModelJson;
-const parseDecanusDecisionModelJson = core.parseDecanusDecisionModelJson;
-const parseSpecialistResultModelJson = core.parseSpecialistResultModelJson;
-const parseToolRequestModelJson = core.parseToolRequestModelJson;
-const parseModelValueTree = core.parseModelValueTree;
-const requireJsonObject = core.requireJsonObject;
-const dupJsonObjectStringFieldOrDefault = core.dupJsonObjectStringFieldOrDefault;
-const dupJsonStringValueOrDefault = core.dupJsonStringValueOrDefault;
-const dupJsonObjectStringArrayFieldOrDefault = core.dupJsonObjectStringArrayFieldOrDefault;
-const dupJsonStringArrayValueOrDefault = core.dupJsonStringArrayValueOrDefault;
-const dupJsonObjectToolRequestsFieldOrDefault = core.dupJsonObjectToolRequestsFieldOrDefault;
-const dupToolRequestsValueOrDefault = core.dupToolRequestsValueOrDefault;
-const dupToolRequestFromJsonValue = core.dupToolRequestFromJsonValue;
-const jsonObjectFloatFieldOrDefault = core.jsonObjectFloatFieldOrDefault;
-const prettyPrintJson = core.prettyPrintJson;
-const normalizeModelJson = core.normalizeModelJson;
 const containsString = core.containsString;
 const eql = core.eql;
 const trimAscii = core.trimAscii;
@@ -329,6 +312,15 @@ pub fn specialistRoutingGuideText(allocator: std.mem.Allocator) ![]const u8 {
     return try buffer.toOwnedSlice(allocator);
 }
 
+pub fn decanusMissionHandlingGuidanceText() []const u8 {
+    return
+        "- Treat the initial prompt as the source of mission intent.\n" ++
+        "- If the prompt is only a greeting, presence check, or other conversational request that does not ask for project work, return `action: \"finish\"` with a direct reply in `final_response`.\n" ++
+        "- Do not invoke a specialist just because routing options exist.\n" ++
+        "- Do not invent follow-on implementation work from the routing table or from unassigned task lanes.\n" ++
+        "- The task summary only reflects specialist work that has been explicitly assigned during this mission.\n";
+}
+
 pub fn buildDecanusUserPrompt(
     allocator: std.mem.Allocator,
     config: AppConfig,
@@ -422,14 +414,18 @@ pub fn buildDecanusUserPrompt(
         \\Valid lane values: backend, frontend, systems, qa, research, brand, media, docs, bulk_ops
         \\When `action` is `invoke_specialist`, prefer a bare agent name in `agent_call`. Use an exact `agent::ACTION` only when it matches a real Contubernium action file.
         \\
+        \\Mission handling rules
+        \\----------------------
+        \\{s}
+        \\
         \\Iteration: {d}
         \\Status: {s}
         \\Active tool: {s}
         \\Last decision: {s}
         \\Last tool result: {s}
         \\
-        \\Tasks
-        \\-----
+        \\Assigned specialist tasks
+        \\-------------------------
         \\{s}
         \\
         \\Recent history
@@ -445,6 +441,7 @@ pub fn buildDecanusUserPrompt(
             constraints,
             success_criteria,
             specialist_routing,
+            decanusMissionHandlingGuidanceText(),
             state.agent_loop.iteration,
             @tagName(state.agent_loop.status),
             maybeActorName(state.agent_loop.active_tool),
@@ -626,6 +623,13 @@ pub fn assembleSystemPrompt(
     const writer = buffer.writer(allocator);
     try writer.print("{s}\n\n{s}\n\n{s}\n\n{s}\n\n{s}\n", .{ base, policy, soul, contract, skill });
     try appendSelectedActionSections(allocator, writer, layout, state, actor);
+    if (actor == .decanus) {
+        try writer.writeAll(
+            "\nDecision output rules:\n" ++
+                "- The JSON `action` field must be one of: `finish`, `invoke_specialist`, `tool_request`, `ask_user`, or `blocked`.\n" ++
+                "- Do not use action file names such as `EVALUATE_LOOP`, `INVOKE_SPECIALIST`, or `FINISH_MISSION` as the JSON `action` value.\n",
+        );
+    }
     try writer.print("\nResponse schema reference:\n{s}\n", .{schema});
     return try buffer.toOwnedSlice(allocator);
 }

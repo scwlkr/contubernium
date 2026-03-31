@@ -1,5 +1,6 @@
 const std = @import("std");
 const core = @import("runtime_core.zig");
+const model_json = @import("runtime_model_json.zig");
 const assets_mod = @import("runtime_assets.zig");
 const prompting_mod = @import("runtime_prompting.zig");
 const provider_mod = @import("runtime_provider.zig");
@@ -189,23 +190,8 @@ const makeTurnId = core.makeTurnId;
 const truncateText = core.truncateText;
 const truncateOwnedText = core.truncateOwnedText;
 const unixTimestampString = core.unixTimestampString;
-const parseJson = core.parseJson;
-const parseModelJson = core.parseModelJson;
-const parseDecanusDecisionModelJson = core.parseDecanusDecisionModelJson;
-const parseSpecialistResultModelJson = core.parseSpecialistResultModelJson;
-const parseToolRequestModelJson = core.parseToolRequestModelJson;
-const parseModelValueTree = core.parseModelValueTree;
-const requireJsonObject = core.requireJsonObject;
-const dupJsonObjectStringFieldOrDefault = core.dupJsonObjectStringFieldOrDefault;
-const dupJsonStringValueOrDefault = core.dupJsonStringValueOrDefault;
-const dupJsonObjectStringArrayFieldOrDefault = core.dupJsonObjectStringArrayFieldOrDefault;
-const dupJsonStringArrayValueOrDefault = core.dupJsonStringArrayValueOrDefault;
-const dupJsonObjectToolRequestsFieldOrDefault = core.dupJsonObjectToolRequestsFieldOrDefault;
-const dupToolRequestsValueOrDefault = core.dupToolRequestsValueOrDefault;
-const dupToolRequestFromJsonValue = core.dupToolRequestFromJsonValue;
-const jsonObjectFloatFieldOrDefault = core.jsonObjectFloatFieldOrDefault;
-const prettyPrintJson = core.prettyPrintJson;
-const normalizeModelJson = core.normalizeModelJson;
+const parseModelJson = model_json.parseModelJson;
+const prettyPrintJson = model_json.prettyPrintJson;
 const containsString = core.containsString;
 const eql = core.eql;
 const trimAscii = core.trimAscii;
@@ -510,31 +496,97 @@ pub fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state
         emitLog(hooks, .danger, "decanus", "Commander Failed", message, .plain);
         return .blocked;
     };
-    const decision = response.value;
+    var decision = response.value;
+    var decision_raw_text = response.raw_text;
+    var normalized_action = resolvedDecanusControlAction(decision);
+    var repaired_decision = false;
+    if (normalized_action.len == 0) {
+        const action_label = if (decision.action.len > 0) decision.action else "(empty)";
+        const repair_message = try std.fmt.allocPrint(
+            allocator,
+            "decanus returned unsupported action `{s}`; requesting corrected JSON",
+            .{action_label},
+        );
+        defer allocator.free(repair_message);
+        try logRuntimeEvent(allocator, config, state, .{
+            .actor = .decanus,
+            .lane = .command,
+            .action = "semantic_repair",
+            .status = "retrying",
+            .summary = repair_message,
+            .output = response.raw_text,
+            .error_text = repair_message,
+        });
+        emitLog(hooks, .warning, "decanus", "Repair Retry", repair_message, .plain);
+
+        const repair_prompt = try std.fmt.allocPrint(
+            allocator,
+            "{s}\n\nYour previous response used an unsupported JSON action value `{s}`. Keep the same intent, but return corrected `DecanusDecision` JSON only. The `action` field must be one of: `finish`, `invoke_specialist`, `tool_request`, `ask_user`, or `blocked`. Do not use action file names such as `EVALUATE_LOOP`, `INVOKE_SPECIALIST`, or `FINISH_MISSION`.",
+            .{ user_prompt, action_label },
+        );
+        defer allocator.free(repair_prompt);
+        freeOwnedDecanusDecision(allocator, decision);
+
+        const repaired_response = structuredChatWithRepair(
+            allocator,
+            config,
+            system_prompt,
+            repair_prompt,
+            "decanus",
+            @min(@as(usize, 1), config.provider.max_retries),
+            DecanusDecision,
+            state,
+            hooks,
+        ) catch |err| {
+            const message = try std.fmt.allocPrint(allocator, "decanus repair failed: {s}", .{@errorName(err)});
+            const failure = buildRuntimeFailure(state, .decanus, .command, "DECANUS_ACTION_INVALID", message, .{
+                .detail = "unsupported decanus action",
+            });
+            recordRuntimeFailure(state, failure);
+            stateManager(state).markBlocked(.decanus, .command, message);
+            try logRuntimeEvent(allocator, config, state, .{
+                .actor = .decanus,
+                .lane = .command,
+                .action = "turn_blocked",
+                .status = "blocked",
+                .summary = message,
+                .error_text = message,
+                .failure = failure,
+                .include_snapshot = true,
+            });
+            emitLog(hooks, .danger, "decanus", "Blocked", message, .plain);
+            emitStateSnapshot(hooks, config, state.*);
+            return .blocked;
+        };
+        decision = repaired_response.value;
+        decision_raw_text = repaired_response.raw_text;
+        normalized_action = resolvedDecanusControlAction(decision);
+        repaired_decision = true;
+    }
     try logRuntimeEvent(allocator, config, state, .{
         .actor = .decanus,
         .lane = .command,
         .action = "model_output",
-        .status = "success",
+        .status = if (repaired_decision) "repaired" else "success",
         .summary = "raw decanus response",
-        .output = response.raw_text,
+        .output = decision_raw_text,
     });
-    const decision_summary = summarizeDecanusDecisionForUi(allocator, decision) catch prettyPrintJson(allocator, response.raw_text) catch response.raw_text;
+    const decision_summary = summarizeDecanusDecisionForUi(allocator, decision) catch prettyPrintJson(allocator, decision_raw_text) catch decision_raw_text;
     try logRuntimeEvent(allocator, config, state, .{
         .actor = .decanus,
         .lane = .command,
         .action = "parsed_output",
-        .status = "success",
+        .status = if (repaired_decision) "repaired" else "success",
         .summary = decision_summary,
-        .output = prettyPrintJson(allocator, response.raw_text) catch response.raw_text,
+        .output = prettyPrintJson(allocator, decision_raw_text) catch decision_raw_text,
     });
     emitStreamFinalize(hooks, "decanus", decision_summary, .summary);
 
     stateManager(state).setCurrentGoal(decision.current_goal);
-    stateManager(state).setLastDecision(decision.action);
+    stateManager(state).setLastDecision(if (normalized_action.len > 0) normalized_action else decision.action);
     emitStateSnapshot(hooks, config, state.*);
 
-    if (decision.tool_requests.len > 0 or eql(decision.action, "tool_request")) {
+    if (decision.tool_requests.len > 0 or eql(normalized_action, "tool_request")) {
         emitLog(
             hooks,
             .tool,
@@ -579,7 +631,7 @@ pub fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state
         return .advanced;
     }
 
-    if (eql(decision.action, "finish")) {
+    if (eql(normalized_action, "finish")) {
         try stateManager(state).completeMissionWithHistory(allocator, .decanus, .command, decision.final_response);
         try logRuntimeEvent(allocator, config, state, .{
             .actor = .decanus,
@@ -595,7 +647,7 @@ pub fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state
         return .complete;
     }
 
-    if (eql(decision.action, "invoke_specialist")) {
+    if (eql(normalized_action, "invoke_specialist")) {
         const invocation_resolution = resolveSpecialistInvocationFromDecision(allocator, asset_layout, decision) catch |err| {
             const message = try specialistInvocationResolutionMessage(allocator, decision, err);
             const failure = buildRuntimeFailure(state, .decanus, .command, "SPECIALIST_RESOLUTION_FAILED", message, .{
@@ -650,7 +702,7 @@ pub fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state
         return .advanced;
     }
 
-    if (eql(decision.action, "ask_user")) {
+    if (eql(normalized_action, "ask_user")) {
         const failure = buildRuntimeFailure(state, .decanus, .command, "USER_INPUT_REQUIRED", decision.question, .{
             .detail = "decanus requested user input",
         });
@@ -671,9 +723,18 @@ pub fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state
         return .blocked;
     }
 
-    const blocked_message = if (decision.blocked_reason.len > 0) decision.blocked_reason else "decanus returned a blocked state";
+    const blocked_message = if (normalized_action.len == 0)
+        try std.fmt.allocPrint(
+            allocator,
+            "decanus returned unsupported action `{s}`",
+            .{if (decision.action.len > 0) decision.action else "(empty)"},
+        )
+    else if (decision.blocked_reason.len > 0)
+        decision.blocked_reason
+    else
+        "decanus returned a blocked state";
     const blocked_failure = buildRuntimeFailure(state, .decanus, .command, "DECANUS_BLOCKED", blocked_message, .{
-        .detail = "decanus returned a blocked state",
+        .detail = if (normalized_action.len == 0) "unsupported decanus action" else "decanus returned a blocked state",
     });
     recordRuntimeFailure(state, blocked_failure);
     stateManager(state).markBlocked(.decanus, .command, state.runtime_session.last_error);
@@ -690,6 +751,38 @@ pub fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state
     emitLog(hooks, .danger, "decanus", "Blocked", state.runtime_session.last_error, .plain);
     emitStateSnapshot(hooks, config, state.*);
     return .blocked;
+}
+
+fn decanusHasInvocationPayload(decision: DecanusDecision) bool {
+    return decision.agent_call.len > 0 or
+        decision.actor.len > 0 or
+        decision.lane.len > 0 or
+        decision.objective.len > 0 or
+        decision.completion_signal.len > 0 or
+        decision.dependencies.len > 0;
+}
+
+pub fn resolvedDecanusControlAction(decision: DecanusDecision) []const u8 {
+    if (eql(decision.action, "finish") or
+        eql(decision.action, "invoke_specialist") or
+        eql(decision.action, "tool_request") or
+        eql(decision.action, "ask_user") or
+        eql(decision.action, "blocked"))
+    {
+        return decision.action;
+    }
+
+    if (eql(decision.action, "finish_mission")) return "finish";
+    if (eql(decision.action, "request_tools") or eql(decision.action, "use_tools")) return "tool_request";
+    if (eql(decision.action, "request_user") or eql(decision.action, "question")) return "ask_user";
+
+    if (decision.tool_requests.len > 0) return "tool_request";
+    if (decision.final_response.len > 0) return "finish";
+    if (decision.question.len > 0) return "ask_user";
+    if (decision.blocked_reason.len > 0) return "blocked";
+    if (decanusHasInvocationPayload(decision)) return "invoke_specialist";
+
+    return "";
 }
 
 pub fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, state: *AppState, hooks: RuntimeHooks) !StepOutcome {

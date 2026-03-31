@@ -365,7 +365,7 @@ pub const RuntimeMemoryLayer = struct {
     truncated: bool = false,
     owns_content: bool = false,
 
-    fn deinit(self: RuntimeMemoryLayer, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: RuntimeMemoryLayer, allocator: std.mem.Allocator) void {
         if (self.owns_content) allocator.free(self.content);
     }
 };
@@ -377,7 +377,7 @@ pub const RuntimeMemorySnapshot = struct {
     project: RuntimeMemoryLayer,
     global: RuntimeMemoryLayer,
 
-    fn deinit(self: RuntimeMemorySnapshot, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: RuntimeMemorySnapshot, allocator: std.mem.Allocator) void {
         self.architecture.deinit(allocator);
         self.plan.deinit(allocator);
         self.project_context.deinit(allocator);
@@ -472,7 +472,7 @@ pub const StateManager = struct {
         }
     }
 
-    fn beginTurn(self: StateManager, allocator: std.mem.Allocator, config: AppConfig) !void {
+    pub fn beginTurn(self: StateManager, allocator: std.mem.Allocator, config: AppConfig) !void {
         self.state.agent_loop.iteration += 1;
         self.state.runtime_session.status = .running;
         self.clearFailure();
@@ -488,7 +488,7 @@ pub const StateManager = struct {
         );
     }
 
-    fn beginCommanderThinking(self: StateManager) void {
+    pub fn beginCommanderThinking(self: StateManager) void {
         self.state.global_status = .planning;
         self.state.agent_loop.status = .thinking;
         setLoopStep(
@@ -500,7 +500,7 @@ pub const StateManager = struct {
         );
     }
 
-    fn beginSpecialistExecution(self: StateManager, actor: Actor, lane: Lane, objective: []const u8) void {
+    pub fn beginSpecialistExecution(self: StateManager, actor: Actor, lane: Lane, objective: []const u8) void {
         const task = taskForLane(self.state, lane);
         task.invocation.status = .running;
         self.state.global_status = .waiting_on_tool;
@@ -508,7 +508,7 @@ pub const StateManager = struct {
         setLoopStep(self.state, .execute, actor, lane, objective);
     }
 
-    fn markBlocked(self: StateManager, actor: Actor, lane: Lane, summary: []const u8) void {
+    pub fn markBlocked(self: StateManager, actor: Actor, lane: Lane, summary: []const u8) void {
         self.state.global_status = .waiting_on_tool;
         self.state.agent_loop.status = .blocked;
         self.state.runtime_session.status = .blocked;
@@ -544,12 +544,12 @@ pub const StateManager = struct {
         );
     }
 
-    fn setCurrentGoal(self: StateManager, goal: []const u8) void {
+    pub fn setCurrentGoal(self: StateManager, goal: []const u8) void {
         if (goal.len == 0) return;
         self.state.mission.current_goal = goal;
     }
 
-    fn setLastDecision(self: StateManager, decision: []const u8) void {
+    pub fn setLastDecision(self: StateManager, decision: []const u8) void {
         self.state.agent_loop.last_decision = decision;
     }
 
@@ -557,7 +557,7 @@ pub const StateManager = struct {
         self.state.agent_loop.last_tool_result = summary;
     }
 
-    fn recordRuntimeToolResultStep(
+    pub fn recordRuntimeToolResultStep(
         self: StateManager,
         allocator: std.mem.Allocator,
         actor: Actor,
@@ -586,7 +586,7 @@ pub const StateManager = struct {
         });
     }
 
-    fn appendIntermediateResult(
+    pub fn appendIntermediateResult(
         self: StateManager,
         allocator: std.mem.Allocator,
         kind: []const u8,
@@ -685,7 +685,7 @@ pub const StateManager = struct {
         setLoopStep(self.state, .invoke, .decanus, lane, objective);
     }
 
-    fn prepareInvocationWithHistory(
+    pub fn prepareInvocationWithHistory(
         self: StateManager,
         allocator: std.mem.Allocator,
         lane: Lane,
@@ -730,7 +730,7 @@ pub const StateManager = struct {
         setLoopStep(self.state, if (result.status == .blocked) .blocked else .result, actor, lane, result.summary);
     }
 
-    fn finalizeInvocationWithHistory(
+    pub fn finalizeInvocationWithHistory(
         self: StateManager,
         allocator: std.mem.Allocator,
         lane: Lane,
@@ -751,7 +751,7 @@ pub const StateManager = struct {
         });
     }
 
-    fn completeMissionWithHistory(
+    pub fn completeMissionWithHistory(
         self: StateManager,
         allocator: std.mem.Allocator,
         actor: Actor,
@@ -779,7 +779,7 @@ pub const StateManager = struct {
         self.state.runtime_session.context_budget.used_percent = estimate.used_percent;
     }
 
-    fn noteHealthCheck(self: StateManager, now: []const u8, config: AppConfig) void {
+    pub fn noteHealthCheck(self: StateManager, now: []const u8, config: AppConfig) void {
         self.state.runtime_session.last_health_check = now;
         self.state.runtime_session.provider = config.provider.type;
         self.state.runtime_session.model = config.provider.model;
@@ -788,11 +788,11 @@ pub const StateManager = struct {
         self.clearFailure();
     }
 
-    fn setActiveLogPath(self: StateManager, path: []const u8) void {
+    pub fn setActiveLogPath(self: StateManager, path: []const u8) void {
         self.state.runtime_session.active_log_path = path;
     }
 
-    fn setRepairAttempts(self: StateManager, attempts: usize) void {
+    pub fn setRepairAttempts(self: StateManager, attempts: usize) void {
         self.state.runtime_session.repair_attempts = attempts;
     }
 };
@@ -1023,21 +1023,21 @@ pub const RuntimeEventQueue = struct {
     mutex: std.Thread.Mutex = .{},
     items: std.ArrayList(RuntimeUiEvent) = .empty,
 
-    fn deinit(self: *RuntimeEventQueue) void {
+    pub fn deinit(self: *RuntimeEventQueue) void {
         for (self.items.items) |event| {
             freeRuntimeUiEvent(self.allocator, event);
         }
         self.items.deinit(self.allocator);
     }
 
-    fn push(self: *RuntimeEventQueue, event: RuntimeUiEvent) void {
+    pub fn push(self: *RuntimeEventQueue, event: RuntimeUiEvent) void {
         self.mutex.lock();
         defer self.mutex.unlock();
         const owned = self.cloneEvent(event) catch return;
         self.items.append(self.allocator, owned) catch {};
     }
 
-    fn drain(self: *RuntimeEventQueue, allocator: std.mem.Allocator) ![]RuntimeUiEvent {
+    pub fn drain(self: *RuntimeEventQueue, allocator: std.mem.Allocator) ![]RuntimeUiEvent {
         self.mutex.lock();
         defer self.mutex.unlock();
         var drained: std.ArrayList(RuntimeUiEvent) = .empty;
@@ -1146,20 +1146,20 @@ pub const RuntimeHooks = struct {
     interrupted_fn: ?*const fn (?*anyopaque) bool = null,
     approval_fn: ?*const fn (?*anyopaque, []const u8, []const u8) bool = null,
 
-    fn emit(self: RuntimeHooks, event: RuntimeUiEvent) void {
+    pub fn emit(self: RuntimeHooks, event: RuntimeUiEvent) void {
         if (self.emit_fn) |emit_fn| {
             emit_fn(self.context, event);
         }
     }
 
-    fn isInterrupted(self: RuntimeHooks) bool {
+    pub fn isInterrupted(self: RuntimeHooks) bool {
         if (self.interrupted_fn) |interrupted_fn| {
             return interrupted_fn(self.context);
         }
         return false;
     }
 
-    fn requestApproval(self: RuntimeHooks, tool_name: []const u8, detail: []const u8) ?bool {
+    pub fn requestApproval(self: RuntimeHooks, tool_name: []const u8, detail: []const u8) ?bool {
         if (self.approval_fn) |approval_fn| {
             return approval_fn(self.context, tool_name, detail);
         }
@@ -2071,7 +2071,33 @@ pub fn finalizeInvocation(
     stateManager(state).finalizeInvocation(lane, actor, result, description);
 }
 
+pub fn taskLaneHasAssignedWork(task: TaskLane) bool {
+    return task.status != .pending or
+        task.description.len > 0 or
+        task.artifacts.len > 0 or
+        task.invocation.status != .idle or
+        task.invocation.agent_call.len > 0 or
+        task.invocation.action_name.len > 0 or
+        task.invocation.objective.len > 0 or
+        task.invocation.completion_signal.len > 0 or
+        task.invocation.result.status != .idle or
+        task.invocation.result.summary.len > 0;
+}
+
+pub fn tasksHaveAssignedWork(tasks: Tasks) bool {
+    return taskLaneHasAssignedWork(tasks.backend) or
+        taskLaneHasAssignedWork(tasks.frontend) or
+        taskLaneHasAssignedWork(tasks.systems) or
+        taskLaneHasAssignedWork(tasks.qa) or
+        taskLaneHasAssignedWork(tasks.research) or
+        taskLaneHasAssignedWork(tasks.brand) or
+        taskLaneHasAssignedWork(tasks.media) or
+        taskLaneHasAssignedWork(tasks.docs) or
+        taskLaneHasAssignedWork(tasks.bulk_ops);
+}
+
 pub fn taskSummaryText(allocator: std.mem.Allocator, tasks: Tasks) ![]const u8 {
+    if (!tasksHaveAssignedWork(tasks)) return "none assigned";
     return try std.fmt.allocPrint(
         allocator,
         "backend={s}, frontend={s}, systems={s}, qa={s}, research={s}, brand={s}, media={s}, docs={s}, bulk_ops={s}",
@@ -2210,255 +2236,6 @@ pub fn truncateOwnedText(allocator: std.mem.Allocator, owned_text: []const u8, m
 
 pub fn unixTimestampString(allocator: std.mem.Allocator) ![]const u8 {
     return try std.fmt.allocPrint(allocator, "{d}", .{std.time.timestamp()});
-}
-
-pub fn parseJson(comptime T: type, allocator: std.mem.Allocator, text: []const u8) !T {
-    const parsed = try std.json.parseFromSlice(T, allocator, text, .{
-        .ignore_unknown_fields = true,
-    });
-    return parsed.value;
-}
-
-pub fn parseModelJson(comptime T: type, allocator: std.mem.Allocator, text: []const u8) !T {
-    const normalized = try normalizeModelJson(text);
-    if (T == DecanusDecision) return try parseDecanusDecisionModelJson(allocator, normalized);
-    if (T == SpecialistResult) return try parseSpecialistResultModelJson(allocator, normalized);
-    if (T == ToolRequest) return try parseToolRequestModelJson(allocator, normalized);
-    return try parseJson(T, allocator, normalized);
-}
-
-pub fn parseDecanusDecisionModelJson(allocator: std.mem.Allocator, text: []const u8) !DecanusDecision {
-    const parsed = try parseModelValueTree(allocator, text);
-    defer parsed.deinit();
-
-    const object = try requireJsonObject(parsed.value);
-    return .{
-        .action = try dupJsonObjectStringFieldOrDefault(allocator, object, "action", ""),
-        .reasoning = try dupJsonObjectStringFieldOrDefault(allocator, object, "reasoning", ""),
-        .current_goal = try dupJsonObjectStringFieldOrDefault(allocator, object, "current_goal", ""),
-        .agent_call = try dupJsonObjectStringFieldOrDefault(allocator, object, "agent_call", ""),
-        .lane = try dupJsonObjectStringFieldOrDefault(allocator, object, "lane", ""),
-        .actor = try dupJsonObjectStringFieldOrDefault(allocator, object, "actor", ""),
-        .objective = try dupJsonObjectStringFieldOrDefault(allocator, object, "objective", ""),
-        .completion_signal = try dupJsonObjectStringFieldOrDefault(allocator, object, "completion_signal", ""),
-        .dependencies = try dupJsonObjectStringArrayFieldOrDefault(allocator, object, "dependencies"),
-        .final_response = try dupJsonObjectStringFieldOrDefault(allocator, object, "final_response", ""),
-        .question = try dupJsonObjectStringFieldOrDefault(allocator, object, "question", ""),
-        .blocked_reason = try dupJsonObjectStringFieldOrDefault(allocator, object, "blocked_reason", ""),
-        .tool_requests = try dupJsonObjectToolRequestsFieldOrDefault(allocator, object, "tool_requests"),
-    };
-}
-
-pub fn parseSpecialistResultModelJson(allocator: std.mem.Allocator, text: []const u8) !SpecialistResult {
-    const parsed = try parseModelValueTree(allocator, text);
-    defer parsed.deinit();
-
-    const object = try requireJsonObject(parsed.value);
-    return .{
-        .action = try dupJsonObjectStringFieldOrDefault(allocator, object, "action", ""),
-        .reasoning = try dupJsonObjectStringFieldOrDefault(allocator, object, "reasoning", ""),
-        .status = try dupJsonObjectStringFieldOrDefault(allocator, object, "status", ""),
-        .summary = try dupJsonObjectStringFieldOrDefault(allocator, object, "summary", ""),
-        .changes = try dupJsonObjectStringArrayFieldOrDefault(allocator, object, "changes"),
-        .findings = try dupJsonObjectStringArrayFieldOrDefault(allocator, object, "findings"),
-        .blockers = try dupJsonObjectStringArrayFieldOrDefault(allocator, object, "blockers"),
-        .next_recommended_agent = try dupJsonObjectStringFieldOrDefault(allocator, object, "next_recommended_agent", ""),
-        .confidence = try jsonObjectFloatFieldOrDefault(object, "confidence", 0.0),
-        .description = try dupJsonObjectStringFieldOrDefault(allocator, object, "description", ""),
-        .result_summary = try dupJsonObjectStringFieldOrDefault(allocator, object, "result_summary", ""),
-        .artifacts = try dupJsonObjectStringArrayFieldOrDefault(allocator, object, "artifacts"),
-        .follow_up_needed = try dupJsonObjectStringFieldOrDefault(allocator, object, "follow_up_needed", ""),
-        .question = try dupJsonObjectStringFieldOrDefault(allocator, object, "question", ""),
-        .blocked_reason = try dupJsonObjectStringFieldOrDefault(allocator, object, "blocked_reason", ""),
-        .tool_requests = try dupJsonObjectToolRequestsFieldOrDefault(allocator, object, "tool_requests"),
-    };
-}
-
-pub fn parseToolRequestModelJson(allocator: std.mem.Allocator, text: []const u8) !ToolRequest {
-    const parsed = try parseModelValueTree(allocator, text);
-    defer parsed.deinit();
-    return try dupToolRequestFromJsonValue(allocator, parsed.value);
-}
-
-pub fn parseModelValueTree(allocator: std.mem.Allocator, text: []const u8) !std.json.Parsed(std.json.Value) {
-    return try std.json.parseFromSlice(std.json.Value, allocator, text, .{
-        .ignore_unknown_fields = true,
-    });
-}
-
-pub fn requireJsonObject(value: std.json.Value) !std.json.ObjectMap {
-    return switch (value) {
-        .object => |object| object,
-        else => error.UnexpectedToken,
-    };
-}
-
-pub fn dupJsonObjectStringFieldOrDefault(
-    allocator: std.mem.Allocator,
-    object: std.json.ObjectMap,
-    field_name: []const u8,
-    default_value: []const u8,
-) ![]const u8 {
-    const value = object.get(field_name) orelse return try allocator.dupe(u8, default_value);
-    return try dupJsonStringValueOrDefault(allocator, value, default_value);
-}
-
-pub fn dupJsonStringValueOrDefault(
-    allocator: std.mem.Allocator,
-    value: std.json.Value,
-    default_value: []const u8,
-) ![]const u8 {
-    return switch (value) {
-        .null => try allocator.dupe(u8, default_value),
-        .string => |text| try allocator.dupe(u8, text),
-        .number_string => |text| try allocator.dupe(u8, text),
-        else => error.UnexpectedToken,
-    };
-}
-
-pub fn dupJsonObjectStringArrayFieldOrDefault(
-    allocator: std.mem.Allocator,
-    object: std.json.ObjectMap,
-    field_name: []const u8,
-) ![]const []const u8 {
-    const value = object.get(field_name) orelse return try allocator.alloc([]const u8, 0);
-    return try dupJsonStringArrayValueOrDefault(allocator, value);
-}
-
-pub fn dupJsonStringArrayValueOrDefault(
-    allocator: std.mem.Allocator,
-    value: std.json.Value,
-) ![]const []const u8 {
-    return switch (value) {
-        .null => try allocator.alloc([]const u8, 0),
-        .array => |array| {
-            var items = try allocator.alloc([]const u8, array.items.len);
-            errdefer allocator.free(items);
-
-            var index: usize = 0;
-            errdefer {
-                while (index > 0) {
-                    index -= 1;
-                    allocator.free(items[index]);
-                }
-            }
-
-            for (array.items, 0..) |item, i| {
-                items[i] = try dupJsonStringValueOrDefault(allocator, item, "");
-                index = i + 1;
-            }
-            return items;
-        },
-        else => error.UnexpectedToken,
-    };
-}
-
-pub fn dupJsonObjectToolRequestsFieldOrDefault(
-    allocator: std.mem.Allocator,
-    object: std.json.ObjectMap,
-    field_name: []const u8,
-) ![]const ToolRequest {
-    const value = object.get(field_name) orelse return try allocator.alloc(ToolRequest, 0);
-    return try dupToolRequestsValueOrDefault(allocator, value);
-}
-
-pub fn dupToolRequestsValueOrDefault(
-    allocator: std.mem.Allocator,
-    value: std.json.Value,
-) ![]const ToolRequest {
-    return switch (value) {
-        .null => try allocator.alloc(ToolRequest, 0),
-        .array => |array| {
-            var items = try allocator.alloc(ToolRequest, array.items.len);
-            errdefer allocator.free(items);
-
-            var index: usize = 0;
-            errdefer {
-                while (index > 0) {
-                    index -= 1;
-                    freeOwnedToolRequest(allocator, items[index]);
-                }
-            }
-
-            for (array.items, 0..) |item, i| {
-                items[i] = try dupToolRequestFromJsonValue(allocator, item);
-                index = i + 1;
-            }
-            return items;
-        },
-        else => error.UnexpectedToken,
-    };
-}
-
-pub fn dupToolRequestFromJsonValue(allocator: std.mem.Allocator, value: std.json.Value) !ToolRequest {
-    const object = try requireJsonObject(value);
-    return .{
-        .tool = try dupJsonObjectStringFieldOrDefault(allocator, object, "tool", ""),
-        .description = try dupJsonObjectStringFieldOrDefault(allocator, object, "description", ""),
-        .path = try dupJsonObjectStringFieldOrDefault(allocator, object, "path", ""),
-        .pattern = try dupJsonObjectStringFieldOrDefault(allocator, object, "pattern", ""),
-        .command = try dupJsonObjectStringFieldOrDefault(allocator, object, "command", ""),
-        .content = try dupJsonObjectStringFieldOrDefault(allocator, object, "content", ""),
-    };
-}
-
-pub fn jsonObjectFloatFieldOrDefault(
-    object: std.json.ObjectMap,
-    field_name: []const u8,
-    default_value: f32,
-) !f32 {
-    const value = object.get(field_name) orelse return default_value;
-    return switch (value) {
-        .null => default_value,
-        .integer => |integer| @as(f32, @floatFromInt(integer)),
-        .float => |float| @as(f32, @floatCast(float)),
-        .number_string, .string => |text| try std.fmt.parseFloat(f32, text),
-        else => error.UnexpectedToken,
-    };
-}
-
-pub fn prettyPrintJson(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
-    const normalized = try normalizeModelJson(text);
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, normalized, .{
-        .ignore_unknown_fields = true,
-    });
-    defer parsed.deinit();
-    return try std.fmt.allocPrint(
-        allocator,
-        "{f}",
-        .{std.json.fmt(parsed.value, .{ .whitespace = .indent_2 })},
-    );
-}
-
-pub fn normalizeModelJson(text: []const u8) ![]const u8 {
-    var normalized = trimAscii(text);
-    if (normalized.len == 0) return error.EmptyModelOutput;
-
-    if (std.mem.startsWith(u8, normalized, "```")) {
-        if (std.mem.indexOfScalar(u8, normalized, '\n')) |first_newline| {
-            normalized = trimAscii(normalized[first_newline + 1 ..]);
-            if (std.mem.lastIndexOf(u8, normalized, "```")) |last_fence| {
-                normalized = trimAscii(normalized[0..last_fence]);
-            }
-        }
-    }
-
-    if (normalized.len == 0) return error.EmptyModelOutput;
-    if (normalized[0] == '{' or normalized[0] == '[') return normalized;
-
-    if (std.mem.indexOfScalar(u8, normalized, '{')) |start| {
-        if (std.mem.lastIndexOfScalar(u8, normalized, '}')) |finish| {
-            if (finish > start) return trimAscii(normalized[start .. finish + 1]);
-        }
-    }
-
-    if (std.mem.indexOfScalar(u8, normalized, '[')) |start| {
-        if (std.mem.lastIndexOfScalar(u8, normalized, ']')) |finish| {
-            if (finish > start) return trimAscii(normalized[start .. finish + 1]);
-        }
-    }
-
-    return normalized;
 }
 
 pub fn containsString(items: []const []const u8, needle: []const u8) bool {
