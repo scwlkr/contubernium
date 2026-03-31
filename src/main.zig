@@ -417,6 +417,20 @@ const GlobalAssetLayout = struct {
 const AgentCallSpec = struct {
     actor: Actor,
     action_name: []const u8 = "",
+    explicit_action: bool = false,
+};
+
+const ResolvedAgentCall = struct {
+    actor: Actor,
+    action_name: []const u8,
+    agent_call: []const u8,
+};
+
+const ResolvedSpecialistInvocation = struct {
+    actor: Actor,
+    lane: Lane,
+    agent_call: []const u8,
+    action_name: []const u8,
 };
 
 const StateManager = struct {
@@ -2850,33 +2864,45 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
     }
 
     if (eql(decision.action, "invoke_specialist")) {
-        const parsed_call = parseAgentCall(decision.agent_call);
-        const requested_actor = if (parsed_call) |call| call.actor else if (decision.actor.len > 0) parseActor(decision.actor) else null;
-        const lane = if (decision.lane.len > 0)
-            std.meta.stringToEnum(Lane, decision.lane) orelse (if (requested_actor) |actor| laneForActor(actor) else .bulk_ops)
-        else if (requested_actor) |actor|
-            laneForActor(actor)
-        else
-            .bulk_ops;
-        const actor = requested_actor orelse actorForLane(lane);
-        const action_name = if (parsed_call) |call| call.action_name else "";
+        const invocation_resolution = resolveSpecialistInvocationFromDecision(allocator, asset_layout, decision) catch |err| {
+            const message = try specialistInvocationResolutionMessage(allocator, decision, err);
+            const failure = buildRuntimeFailure(state, .decanus, .command, "SPECIALIST_RESOLUTION_FAILED", message, .{
+                .target = if (decision.agent_call.len > 0) decision.agent_call else if (decision.actor.len > 0) decision.actor else decision.lane,
+                .detail = @errorName(err),
+            });
+            recordRuntimeFailure(state, failure);
+            stateManager(state).markBlocked(.decanus, .command, message);
+            try logRuntimeEvent(allocator, config, state, .{
+                .actor = .decanus,
+                .lane = .command,
+                .action = "turn_blocked",
+                .status = "blocked",
+                .summary = message,
+                .error_text = message,
+                .failure = failure,
+                .include_snapshot = true,
+            });
+            emitLog(hooks, .danger, "decanus", "Resolver Blocked", message, .plain);
+            emitStateSnapshot(hooks, config, state.*);
+            return .blocked;
+        };
         try stateManager(state).prepareInvocationWithHistory(
             allocator,
-            lane,
-            actor,
+            invocation_resolution.lane,
+            invocation_resolution.actor,
             if (decision.objective.len > 0) decision.objective else "complete the assigned scope",
             if (decision.completion_signal.len > 0) decision.completion_signal else "return a structured result to decanus",
             decision.dependencies,
-            decision.agent_call,
-            action_name,
+            invocation_resolution.agent_call,
+            invocation_resolution.action_name,
         );
         try logRuntimeEvent(allocator, config, state, .{
             .actor = .decanus,
             .lane = .command,
             .action = "specialist_invoked",
             .status = "success",
-            .tool = actorName(actor),
-            .summary = if (decision.agent_call.len > 0) decision.agent_call else actorName(actor),
+            .tool = actorName(invocation_resolution.actor),
+            .summary = invocation_resolution.agent_call,
             .input = decision.objective,
             .include_snapshot = true,
         });
@@ -2885,7 +2911,7 @@ fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state: *A
             .tool,
             "decanus",
             "Specialist Invoked",
-            if (decision.agent_call.len > 0) decision.agent_call else actorName(actor),
+            invocation_resolution.agent_call,
             .plain,
         );
         emitStateSnapshot(hooks, config, state.*);
@@ -3827,7 +3853,7 @@ fn missionOutcomeSummary(allocator: std.mem.Allocator, state: AppState) ![]const
 }
 
 fn ensureGlobalAssetFiles(allocator: std.mem.Allocator, layout: GlobalAssetLayout) !void {
-    const required = [_][]const u8{
+    const required_agent_docs = [_][]const u8{
         "AGENT_LOOP.md",
         "AGENT_ARCHITECTURE.md",
         "AGENT_COMPATIBILITY.md",
@@ -3835,21 +3861,9 @@ fn ensureGlobalAssetFiles(allocator: std.mem.Allocator, layout: GlobalAssetLayou
         "_schemas/CONTRACT_SCHEMA.md",
         "_schemas/SKILL_SCHEMA.md",
         "_schemas/ACTION_SCHEMA.md",
-        "decanus/SOUL.md",
-        "decanus/CONTRACT.md",
-        "decanus/SKILL.md",
-        "faber/SOUL.md",
-        "artifex/SOUL.md",
-        "architectus/SOUL.md",
-        "tesserarius/SOUL.md",
-        "explorator/SOUL.md",
-        "signifer/SOUL.md",
-        "praeco/SOUL.md",
-        "calo/SOUL.md",
-        "mulus/SOUL.md",
     };
 
-    for (required) |relative| {
+    for (required_agent_docs) |relative| {
         const full_path = try std.fs.path.join(allocator, &.{ layout.agents_root, relative });
         defer allocator.free(full_path);
         std.fs.cwd().access(full_path, .{}) catch {
@@ -3871,6 +3885,43 @@ fn ensureGlobalAssetFiles(allocator: std.mem.Allocator, layout: GlobalAssetLayou
             stderrPrint("missing shared asset: {s}\n", .{full_path}) catch {};
             return error.MissingAgentAsset;
         };
+    }
+
+    const actors = [_]Actor{
+        .decanus,
+        .faber,
+        .artifex,
+        .architectus,
+        .tesserarius,
+        .explorator,
+        .signifer,
+        .praeco,
+        .calo,
+        .mulus,
+    };
+    const core_assets = [_][]const u8{
+        "SOUL.md",
+        "CONTRACT.md",
+        "SKILL.md",
+    };
+
+    for (actors) |actor| {
+        for (core_assets) |relative| {
+            const full_path = resolveAgentAssetPath(allocator, layout, actor, relative) catch {
+                stderrPrint("missing global agent asset: {s}/{s}\n", .{ actorName(actor), relative }) catch {};
+                return error.MissingAgentAsset;
+            };
+            allocator.free(full_path);
+        }
+
+        const required_actions = requiredActionNamesForActor(actor);
+        for (required_actions) |action_name| {
+            const full_path = resolveAgentActionPath(allocator, layout, actor, action_name) catch {
+                stderrPrint("missing global agent action: {s}/{s}.md\n", .{ actorName(actor), action_name }) catch {};
+                return error.MissingAgentAsset;
+            };
+            allocator.free(full_path);
+        }
     }
 }
 
@@ -3897,15 +3948,71 @@ fn readSharedAsset(allocator: std.mem.Allocator, layout: GlobalAssetLayout, rela
     return try std.fs.cwd().readFileAlloc(allocator, full_path, max_file_bytes);
 }
 
-fn readAgentAsset(
+fn resolveAgentAssetPath(
     allocator: std.mem.Allocator,
     layout: GlobalAssetLayout,
     actor: Actor,
     relative_path: []const u8,
 ) ![]const u8 {
     const full_path = try std.fs.path.join(allocator, &.{ layout.agents_root, actorName(actor), relative_path });
+    errdefer allocator.free(full_path);
+    if (!pathExists(full_path)) return error.MissingAgentAsset;
+    return full_path;
+}
+
+fn readAgentAsset(
+    allocator: std.mem.Allocator,
+    layout: GlobalAssetLayout,
+    actor: Actor,
+    relative_path: []const u8,
+) ![]const u8 {
+    const full_path = try resolveAgentAssetPath(allocator, layout, actor, relative_path);
     defer allocator.free(full_path);
     return try std.fs.cwd().readFileAlloc(allocator, full_path, max_file_bytes);
+}
+
+fn isCanonicalActionName(text: []const u8) bool {
+    const trimmed = trimAscii(text);
+    if (trimmed.len == 0) return false;
+    if (trimmed[0] < 'A' or trimmed[0] > 'Z') return false;
+    if (trimmed[trimmed.len - 1] == '_') return false;
+
+    var previous_was_underscore = false;
+    for (trimmed) |char| {
+        if (char >= 'A' and char <= 'Z') {
+            previous_was_underscore = false;
+            continue;
+        }
+        if (char >= '0' and char <= '9') {
+            previous_was_underscore = false;
+            continue;
+        }
+        if (char == '_') {
+            if (previous_was_underscore) return false;
+            previous_was_underscore = true;
+            continue;
+        }
+        return false;
+    }
+
+    return true;
+}
+
+fn resolveAgentActionPath(
+    allocator: std.mem.Allocator,
+    layout: GlobalAssetLayout,
+    actor: Actor,
+    action_name: []const u8,
+) ![]const u8 {
+    const trimmed_action = trimAscii(action_name);
+    if (!isCanonicalActionName(trimmed_action)) return error.InvalidActionName;
+
+    const file_name = try std.fmt.allocPrint(allocator, "{s}.md", .{trimmed_action});
+    defer allocator.free(file_name);
+    const full_path = try std.fs.path.join(allocator, &.{ layout.agents_root, actorName(actor), "actions", file_name });
+    errdefer allocator.free(full_path);
+    if (!pathExists(full_path)) return error.MissingAgentAsset;
+    return full_path;
 }
 
 fn readAgentActionAsset(
@@ -3914,9 +4021,7 @@ fn readAgentActionAsset(
     actor: Actor,
     action_name: []const u8,
 ) ![]const u8 {
-    const file_name = try std.fmt.allocPrint(allocator, "{s}.md", .{action_name});
-    defer allocator.free(file_name);
-    const full_path = try std.fs.path.join(allocator, &.{ layout.agents_root, actorName(actor), "actions", file_name });
+    const full_path = try resolveAgentActionPath(allocator, layout, actor, action_name);
     defer allocator.free(full_path);
     return try std.fs.cwd().readFileAlloc(allocator, full_path, max_file_bytes);
 }
@@ -3936,19 +4041,178 @@ fn defaultActionNameForActor(actor: Actor) []const u8 {
     };
 }
 
+fn requiredActionNamesForActor(actor: Actor) []const []const u8 {
+    return switch (actor) {
+        .decanus => &.{
+            "EVALUATE_LOOP",
+            "INVOKE_SPECIALIST",
+            "FINISH_MISSION",
+        },
+        else => &.{defaultActionNameForActor(actor)},
+    };
+}
+
 fn parseAgentCall(agent_call: []const u8) ?AgentCallSpec {
     const trimmed = trimAscii(agent_call);
     if (trimmed.len == 0) return null;
     if (std.mem.indexOf(u8, trimmed, "::")) |separator| {
-        const actor_value = parseActor(trimmed[0..separator]) orelse return null;
+        const actor_value = parseActor(trimAscii(trimmed[0..separator])) orelse return null;
+        const action_name = trimAscii(trimmed[separator + 2 ..]);
+        if (action_name.len == 0) return null;
         return .{
             .actor = actor_value,
-            .action_name = trimmed[separator + 2 ..],
+            .action_name = action_name,
+            .explicit_action = true,
         };
     }
     return .{
         .actor = parseActor(trimmed) orelse return null,
         .action_name = "",
+        .explicit_action = false,
+    };
+}
+
+fn validateAgentCoreAssets(
+    allocator: std.mem.Allocator,
+    layout: GlobalAssetLayout,
+    actor: Actor,
+) !void {
+    const core_assets = [_][]const u8{
+        "SOUL.md",
+        "CONTRACT.md",
+        "SKILL.md",
+    };
+
+    for (core_assets) |relative_path| {
+        const full_path = try resolveAgentAssetPath(allocator, layout, actor, relative_path);
+        allocator.free(full_path);
+    }
+}
+
+fn resolveAgentCallTarget(
+    allocator: std.mem.Allocator,
+    layout: GlobalAssetLayout,
+    agent_call: []const u8,
+) !ResolvedAgentCall {
+    const parsed = parseAgentCall(agent_call) orelse return error.InvalidAgentCall;
+    try validateAgentCoreAssets(allocator, layout, parsed.actor);
+    const selected_action = if (parsed.explicit_action) parsed.action_name else defaultActionNameForActor(parsed.actor);
+    const action_path = try resolveAgentActionPath(allocator, layout, parsed.actor, selected_action);
+    allocator.free(action_path);
+
+    return .{
+        .actor = parsed.actor,
+        .action_name = selected_action,
+        .agent_call = if (parsed.explicit_action) trimAscii(agent_call) else actorName(parsed.actor),
+    };
+}
+
+fn resolveSpecialistInvocationFromDecision(
+    allocator: std.mem.Allocator,
+    layout: GlobalAssetLayout,
+    decision: DecanusDecision,
+) !ResolvedSpecialistInvocation {
+    const requested_actor = if (decision.actor.len > 0)
+        parseActor(decision.actor) orelse return error.InvalidAgentCall
+    else
+        null;
+    const requested_lane = if (decision.lane.len > 0)
+        std.meta.stringToEnum(Lane, decision.lane) orelse return error.InvalidLane
+    else
+        null;
+
+    if (requested_actor) |actor| {
+        if (requested_lane) |lane| {
+            if (lane != laneForActor(actor)) return error.AgentLaneConflict;
+        }
+    }
+
+    if (decision.agent_call.len > 0) {
+        const resolved = try resolveAgentCallTarget(allocator, layout, decision.agent_call);
+        if (requested_actor) |actor| {
+            if (actor != resolved.actor) return error.AgentCallConflict;
+        }
+        if (requested_lane) |lane| {
+            if (lane != laneForActor(resolved.actor)) return error.AgentLaneConflict;
+        }
+        return .{
+            .actor = resolved.actor,
+            .lane = laneForActor(resolved.actor),
+            .agent_call = resolved.agent_call,
+            .action_name = resolved.action_name,
+        };
+    }
+
+    const actor = if (requested_actor) |value|
+        value
+    else if (requested_lane) |lane|
+        actorForLane(lane)
+    else
+        return error.MissingSpecialistTarget;
+
+    const resolved = try resolveAgentCallTarget(allocator, layout, actorName(actor));
+    return .{
+        .actor = resolved.actor,
+        .lane = laneForActor(resolved.actor),
+        .agent_call = resolved.agent_call,
+        .action_name = resolved.action_name,
+    };
+}
+
+fn specialistInvocationResolutionMessage(
+    allocator: std.mem.Allocator,
+    decision: DecanusDecision,
+    err: anyerror,
+) ![]const u8 {
+    const call_label = if (decision.agent_call.len > 0)
+        decision.agent_call
+    else if (decision.actor.len > 0)
+        decision.actor
+    else if (decision.lane.len > 0)
+        decision.lane
+    else
+        "none";
+
+    return switch (err) {
+        error.MissingSpecialistTarget => try allocator.dupe(
+            u8,
+            "invoke_specialist requires a resolvable target in `agent` or `agent::ACTION` form.",
+        ),
+        error.InvalidAgentCall => try std.fmt.allocPrint(
+            allocator,
+            "invalid specialist target `{s}`; use `agent` or `agent::ACTION` with a known agent name.",
+            .{call_label},
+        ),
+        error.InvalidLane => try std.fmt.allocPrint(
+            allocator,
+            "invalid specialist lane `{s}`; the lane must match a known Contubernium agent lane.",
+            .{decision.lane},
+        ),
+        error.InvalidActionName => try std.fmt.allocPrint(
+            allocator,
+            "invalid action in `{s}`; action names must be uppercase snake case and map to a real action file.",
+            .{call_label},
+        ),
+        error.AgentLaneConflict => try std.fmt.allocPrint(
+            allocator,
+            "specialist target conflict: `{s}` does not match the requested lane `{s}`.",
+            .{ call_label, decision.lane },
+        ),
+        error.AgentCallConflict => try std.fmt.allocPrint(
+            allocator,
+            "specialist target conflict: `{s}` does not match the requested actor `{s}`.",
+            .{ call_label, decision.actor },
+        ),
+        error.MissingAgentAsset => try std.fmt.allocPrint(
+            allocator,
+            "resolved agent assets for `{s}` are incomplete; required core files or action files are missing.",
+            .{call_label},
+        ),
+        else => try std.fmt.allocPrint(
+            allocator,
+            "failed to resolve specialist target `{s}`: {s}",
+            .{ call_label, @errorName(err) },
+        ),
     };
 }
 
@@ -6562,6 +6826,7 @@ test "parseAgentCall extracts actor and action name" {
     const parsed = parseAgentCall("architectus::CONFIGURE_SYSTEM").?;
     try testing.expectEqual(Actor.architectus, parsed.actor);
     try testing.expectEqualStrings("CONFIGURE_SYSTEM", parsed.action_name);
+    try testing.expect(parsed.explicit_action);
 }
 
 test "parseAgentCall handles bare agent targets" {
@@ -6569,6 +6834,45 @@ test "parseAgentCall handles bare agent targets" {
     const parsed = parseAgentCall("faber").?;
     try testing.expectEqual(Actor.faber, parsed.actor);
     try testing.expectEqualStrings("", parsed.action_name);
+    try testing.expect(!parsed.explicit_action);
+}
+
+test "parseAgentCall rejects an empty explicit action" {
+    const testing = std.testing;
+    try testing.expect(parseAgentCall("artifex::") == null);
+}
+
+test "resolveAgentCallTarget resolves bare agent calls to a default action" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const layout = try resolveGlobalAssetLayout(allocator);
+    defer deinitGlobalAssetLayout(allocator, layout);
+
+    const resolved = try resolveAgentCallTarget(allocator, layout, "artifex");
+    try testing.expectEqual(Actor.artifex, resolved.actor);
+    try testing.expectEqualStrings("IMPLEMENT_INTERFACE", resolved.action_name);
+    try testing.expectEqualStrings("artifex", resolved.agent_call);
+}
+
+test "resolveAgentCallTarget resolves explicit agent actions" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const layout = try resolveGlobalAssetLayout(allocator);
+    defer deinitGlobalAssetLayout(allocator, layout);
+
+    const resolved = try resolveAgentCallTarget(allocator, layout, "artifex::WIRE_USER_FLOW");
+    try testing.expectEqual(Actor.artifex, resolved.actor);
+    try testing.expectEqualStrings("WIRE_USER_FLOW", resolved.action_name);
+    try testing.expectEqualStrings("artifex::WIRE_USER_FLOW", resolved.agent_call);
+}
+
+test "resolveAgentCallTarget rejects invalid action casing" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const layout = try resolveGlobalAssetLayout(allocator);
+    defer deinitGlobalAssetLayout(allocator, layout);
+
+    try testing.expectError(error.InvalidActionName, resolveAgentCallTarget(allocator, layout, "artifex::wire_user_flow"));
 }
 
 test "mission completion records the finish step and history" {
