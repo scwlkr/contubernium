@@ -1291,6 +1291,7 @@ fn runMain(allocator: std.mem.Allocator, args: []const []const u8) !void {
             .init => try cmdInit(allocator),
             .doctor => try cmdDoctor(allocator),
             .models_list => try cmdModelsList(allocator),
+            .mission_compose => try cmdMissionCompose(allocator),
             .mission_start => try cmdMissionStart(allocator, invocation.args),
             .mission_continue => try cmdMissionContinue(allocator),
             .mission_step => try cmdMissionStep(allocator),
@@ -1316,6 +1317,351 @@ fn cmdModelsList(allocator: std.mem.Allocator) !void {
     for (models) |model| {
         try stdoutPrint("{s}\n", .{model});
     }
+}
+
+const interactive_alt_screen_on = "\x1b[?1049h";
+const interactive_alt_screen_off = "\x1b[?1049l";
+const interactive_cursor_hide = "\x1b[?25l";
+const interactive_cursor_show = "\x1b[?25h";
+const interactive_clear_home = "\x1b[2J\x1b[H";
+const interactive_reset = "\x1b[0m";
+const interactive_color_gold = "\x1b[38;5;179m";
+const interactive_color_ivory = "\x1b[38;5;230m";
+const interactive_color_muted = "\x1b[38;5;245m";
+const interactive_color_blue = "\x1b[38;5;75m";
+const interactive_color_prompt = "\x1b[38;5;215m";
+const interactive_color_cursor = "\x1b[38;5;220m";
+const interactive_color_danger = "\x1b[38;5;203m";
+
+const InteractiveKey = union(enum) {
+    character: u8,
+    enter,
+    escape,
+    backspace,
+    delete,
+    left,
+    right,
+    up,
+    down,
+    ctrl_c,
+    ignore,
+};
+
+const RawTerminalMode = struct {
+    original: std.posix.termios,
+    active: bool = false,
+
+    fn enter() !RawTerminalMode {
+        const original = try std.posix.tcgetattr(std.posix.STDIN_FILENO);
+        var raw = original;
+        raw.iflag.ICRNL = false;
+        raw.iflag.IXON = false;
+        raw.lflag.ECHO = false;
+        raw.lflag.ICANON = false;
+        raw.lflag.IEXTEN = false;
+        raw.lflag.ISIG = false;
+        raw.cc[@intFromEnum(std.c.V.MIN)] = 1;
+        raw.cc[@intFromEnum(std.c.V.TIME)] = 0;
+        try std.posix.tcsetattr(std.posix.STDIN_FILENO, .NOW, raw);
+        return .{
+            .original = original,
+            .active = true,
+        };
+    }
+
+    fn restore(self: *RawTerminalMode) void {
+        if (!self.active) return;
+        std.posix.tcsetattr(std.posix.STDIN_FILENO, .NOW, self.original) catch {};
+        self.active = false;
+    }
+};
+
+const MissionComposerState = struct {
+    prompt: std.ArrayList(u8) = .empty,
+    cursor: usize = 0,
+    models: []const []const u8 = &.{},
+    selected_model: usize = 0,
+    provider_name: []const u8 = "",
+    roster_note: []const u8 = "",
+};
+
+const MissionComposerResult = struct {
+    prompt: []const u8,
+    selected_model: []const u8,
+};
+
+fn cmdMissionCompose(allocator: std.mem.Allocator) !void {
+    if (!std.posix.isatty(std.posix.STDIN_FILENO) or !std.posix.isatty(std.posix.STDOUT_FILENO)) {
+        try stderrPrint("interactive mission launcher requires a TTY; use `contubernium mission start \"...\"`\n", .{});
+        return error.InvalidArguments;
+    }
+
+    try scaffoldProject(allocator);
+    const config = try loadProjectConfig(allocator);
+
+    const roster = try loadMissionComposerRoster(allocator, config.provider);
+    var state = MissionComposerState{
+        .models = roster.models,
+        .selected_model = roster.selected_index,
+        .provider_name = config.provider.type,
+        .roster_note = roster.note,
+    };
+    defer state.prompt.deinit(allocator);
+
+    var raw_mode = try RawTerminalMode.enter();
+    defer raw_mode.restore();
+
+    try stdoutPrint("{s}{s}", .{ interactive_alt_screen_on, interactive_cursor_hide });
+    var screen_active = true;
+    defer if (screen_active) {
+        stdoutPrint("{s}{s}", .{ interactive_cursor_show, interactive_alt_screen_off }) catch {};
+    };
+
+    const result = try runMissionComposer(allocator, &state);
+
+    try stdoutPrint("{s}{s}", .{ interactive_cursor_show, interactive_alt_screen_off });
+    screen_active = false;
+    raw_mode.restore();
+
+    if (result == null) {
+        try stdoutPrint("mission canceled\n", .{});
+        return;
+    }
+
+    const launch = result.?;
+    if (launch.selected_model.len > 0 and !eql(launch.selected_model, config.provider.model)) {
+        _ = try saveSelectedModelByName(allocator, launch.selected_model);
+    }
+
+    try cmdMissionStart(allocator, &.{launch.prompt});
+}
+
+const MissionComposerRoster = struct {
+    models: []const []const u8,
+    selected_index: usize,
+    note: []const u8,
+};
+
+fn loadMissionComposerRoster(allocator: std.mem.Allocator, provider: ProviderConfig) !MissionComposerRoster {
+    var collected: std.ArrayList([]const u8) = .empty;
+    errdefer collected.deinit(allocator);
+
+    var note: []const u8 = "";
+    const configured_model = trimAscii(provider.model);
+
+    const listed_models = providerListModels(allocator, provider) catch |err| blk: {
+        note = try friendlyRuntimeError(allocator, err);
+        break :blk &.{}; // fall back to configured model only
+    };
+
+    for (listed_models) |model| {
+        if (!containsString(collected.items, model)) {
+            try collected.append(allocator, model);
+        }
+    }
+
+    if (configured_model.len > 0 and !containsString(collected.items, configured_model)) {
+        try collected.append(allocator, configured_model);
+    }
+
+    if (collected.items.len == 0) {
+        try collected.append(allocator, if (configured_model.len > 0) configured_model else "unconfigured");
+    }
+
+    var selected_index: usize = 0;
+    if (configured_model.len > 0) {
+        for (collected.items, 0..) |model, index| {
+            if (eql(model, configured_model)) {
+                selected_index = index;
+                break;
+            }
+        }
+    }
+
+    return .{
+        .models = try collected.toOwnedSlice(allocator),
+        .selected_index = selected_index,
+        .note = note,
+    };
+}
+
+fn runMissionComposer(allocator: std.mem.Allocator, state: *MissionComposerState) !?MissionComposerResult {
+    while (true) {
+        const screen = try renderMissionComposerScreen(allocator, state.*);
+        defer allocator.free(screen);
+        try stdoutPrint("{s}", .{screen});
+
+        switch (try readInteractiveKey()) {
+            .enter => {
+                const prompt = trimAscii(state.prompt.items);
+                if (prompt.len == 0) continue;
+                return .{
+                    .prompt = try allocator.dupe(u8, prompt),
+                    .selected_model = state.models[state.selected_model],
+                };
+            },
+            .escape, .ctrl_c => return null,
+            .backspace => deletePromptBackward(state),
+            .delete => deletePromptForward(state),
+            .left => state.cursor = previousUtf8Index(state.prompt.items, state.cursor),
+            .right => state.cursor = nextUtf8Index(state.prompt.items, state.cursor),
+            .up => {
+                if (state.models.len > 0) {
+                    state.selected_model = if (state.selected_model == 0) state.models.len - 1 else state.selected_model - 1;
+                }
+            },
+            .down => {
+                if (state.models.len > 0) {
+                    state.selected_model = (state.selected_model + 1) % state.models.len;
+                }
+            },
+            .character => |char| try insertPromptCharacter(allocator, state, char),
+            .ignore => {},
+        }
+    }
+}
+
+fn renderMissionComposerScreen(allocator: std.mem.Allocator, state: MissionComposerState) ![]const u8 {
+    var buffer: std.ArrayList(u8) = .empty;
+    errdefer buffer.deinit(allocator);
+    const writer = buffer.writer(allocator);
+    const selected_model = state.models[state.selected_model];
+    const prompt_before = state.prompt.items[0..state.cursor];
+    const prompt_after = state.prompt.items[state.cursor..];
+    const prompt_empty = state.prompt.items.len == 0;
+
+    try writer.writeAll(interactive_clear_home);
+    try writer.print("{s}CONTUBERNIUM MISSION{s}\n", .{ interactive_color_gold, interactive_reset });
+    try writer.print("{s}Interactive launcher for the plain CLI.{s}\n\n", .{ interactive_color_muted, interactive_reset });
+    try writer.print("{s}Model{s}    {s}{d}/{d}{s}  {s}{s}{s}\n", .{
+        interactive_color_muted,
+        interactive_reset,
+        interactive_color_blue,
+        state.selected_model + 1,
+        state.models.len,
+        interactive_reset,
+        interactive_color_ivory,
+        selected_model,
+        interactive_reset,
+    });
+    try writer.print("{s}Provider{s} {s}{s}{s}\n", .{
+        interactive_color_muted,
+        interactive_reset,
+        interactive_color_ivory,
+        if (state.provider_name.len > 0) state.provider_name else "unconfigured",
+        interactive_reset,
+    });
+    if (state.roster_note.len > 0) {
+        try writer.print("{s}Note{s}     {s}{s}{s}\n", .{
+            interactive_color_muted,
+            interactive_reset,
+            interactive_color_danger,
+            state.roster_note,
+            interactive_reset,
+        });
+    }
+    try writer.writeAll("\n");
+    try writer.print("{s}Prompt{s}\n", .{ interactive_color_muted, interactive_reset });
+    try writer.writeAll("  ");
+    if (prompt_empty) {
+        try writer.print("{s}|Describe the mission...{s}\n", .{ interactive_color_cursor, interactive_reset });
+    } else {
+        try writer.print("{s}{s}{s}|{s}{s}{s}\n", .{
+            interactive_color_prompt,
+            prompt_before,
+            interactive_color_cursor,
+            interactive_color_prompt,
+            prompt_after,
+            interactive_reset,
+        });
+    }
+    try writer.writeAll("\n");
+    try writer.print("{s}Enter{s} start mission  {s}Up/Down{s} switch model  {s}Left/Right{s} move cursor  {s}Esc{s} cancel\n", .{
+        interactive_color_gold,
+        interactive_reset,
+        interactive_color_gold,
+        interactive_reset,
+        interactive_color_gold,
+        interactive_reset,
+        interactive_color_gold,
+        interactive_reset,
+    });
+
+    return try buffer.toOwnedSlice(allocator);
+}
+
+fn insertPromptCharacter(allocator: std.mem.Allocator, state: *MissionComposerState, char: u8) !void {
+    if (char < 32 or char == 127) return;
+    try state.prompt.insert(allocator, state.cursor, char);
+    state.cursor += 1;
+}
+
+fn deletePromptBackward(state: *MissionComposerState) void {
+    if (state.cursor == 0) return;
+    const start = previousUtf8Index(state.prompt.items, state.cursor);
+    deletePromptRange(state, start, state.cursor);
+    state.cursor = start;
+}
+
+fn deletePromptForward(state: *MissionComposerState) void {
+    if (state.cursor >= state.prompt.items.len) return;
+    const finish = nextUtf8Index(state.prompt.items, state.cursor);
+    deletePromptRange(state, state.cursor, finish);
+}
+
+fn deletePromptRange(state: *MissionComposerState, start: usize, finish: usize) void {
+    if (finish <= start or finish > state.prompt.items.len) return;
+    const tail = state.prompt.items[finish..];
+    std.mem.copyForwards(u8, state.prompt.items[start .. start + tail.len], tail);
+    state.prompt.shrinkRetainingCapacity(state.prompt.items.len - (finish - start));
+}
+
+fn previousUtf8Index(text: []const u8, index: usize) usize {
+    if (index == 0) return 0;
+    var cursor = index - 1;
+    while (cursor > 0 and (text[cursor] & 0b1100_0000) == 0b1000_0000) : (cursor -= 1) {}
+    return cursor;
+}
+
+fn nextUtf8Index(text: []const u8, index: usize) usize {
+    if (index >= text.len) return text.len;
+    const scalar = decodeUtf8Scalar(text, index);
+    if (scalar.byte_len == 0) return text.len;
+    return @min(text.len, index + scalar.byte_len);
+}
+
+fn readInteractiveByte() !u8 {
+    var byte: [1]u8 = undefined;
+    const read_len = try std.posix.read(std.posix.STDIN_FILENO, &byte);
+    if (read_len == 0) return error.EndOfStream;
+    return byte[0];
+}
+
+fn readInteractiveKey() !InteractiveKey {
+    const byte = try readInteractiveByte();
+    return switch (byte) {
+        3 => .ctrl_c,
+        10, 13 => .enter,
+        8, 127 => .backspace,
+        27 => blk: {
+            if (!try pollInput(20)) break :blk .escape;
+            const first = try readInteractiveByte();
+            if (first != '[') break :blk .escape;
+            const second = try readInteractiveByte();
+            break :blk switch (second) {
+                'A' => .up,
+                'B' => .down,
+                'C' => .right,
+                'D' => .left,
+                '3' => del: {
+                    if (try pollInput(20) and (try readInteractiveByte()) == '~') break :del .delete;
+                    break :del .ignore;
+                },
+                else => .ignore,
+            };
+        },
+        else => if (byte >= 32) .{ .character = byte } else .ignore,
+    };
 }
 
 fn cmdMissionStart(allocator: std.mem.Allocator, prompt_args: []const []const u8) !void {

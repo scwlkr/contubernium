@@ -240,6 +240,7 @@ For scripted control instead of the terminal UI:
 
 ```bash
 contubernium help
+contubernium mission
 contubernium mission start "Add a release checklist to the docs"
 ```
 

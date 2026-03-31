@@ -4,6 +4,7 @@ pub const Action = enum {
     init,
     doctor,
     models_list,
+    mission_compose,
     mission_start,
     mission_continue,
     mission_step,
@@ -82,11 +83,13 @@ const mission_prompt_args = [_]ArgSpec{
 
 const root_usage = [_][]const u8{
     "contubernium <command>",
+    "contubernium mission",
     "contubernium ui",
     "contubernium mission start \"<prompt>\"",
 };
 
 const mission_usage = [_][]const u8{
+    "contubernium mission",
     "contubernium mission <command>",
 };
 
@@ -136,6 +139,7 @@ const models_examples = [_]Example{
 };
 
 const mission_examples = [_]Example{
+    .{ .command = "contubernium mission", .description = "Choose a model, type a mission, and start it interactively." },
     .{ .command = "contubernium mission start \"Add a release checklist to the docs\"", .description = "Start a new mission from the command line." },
     .{ .command = "contubernium mission continue", .description = "Continue the current mission after a block or interruption." },
     .{ .command = "contubernium mission step", .description = "Advance one loop step and stop." },
@@ -157,6 +161,7 @@ const mission_step_examples = [_]Example{
 const root_examples = [_]Example{
     .{ .command = "contubernium", .description = "Open the terminal UI." },
     .{ .command = "contubernium init", .description = "Bootstrap the current project." },
+    .{ .command = "contubernium mission", .description = "Choose a model, type a mission, and start it interactively." },
     .{ .command = "contubernium mission start \"Add a release checklist to the docs\"", .description = "Start a new mission from the command line." },
     .{ .command = "contubernium mission continue", .description = "Continue the current mission after a block or interruption." },
     .{ .command = "contubernium models", .description = "Show models available through the active provider." },
@@ -250,11 +255,12 @@ const mission_children = [_]*const Command{
 const mission_command = Command{
     .name = "mission",
     .path_label = "mission",
-    .summary = "Start, continue, or inspect mission execution.",
-    .description = "Use mission commands for scripted control outside the terminal UI.",
+    .summary = "Compose a mission interactively, or use subcommands for direct control.",
+    .description = "Launch the plain terminal mission composer, or use subcommands when you want explicit scripted control.",
     .usage = mission_usage[0..],
     .examples = mission_examples[0..],
     .children = mission_children[0..],
+    .action = .mission_compose,
 };
 
 const models_list_alias = Command{
@@ -359,6 +365,7 @@ const start_group_entries = [_]*const Command{
 };
 
 const mission_group_entries = [_]*const Command{
+    &mission_command,
     &mission_start_command,
     &mission_continue_command,
     &mission_step_command,
@@ -940,7 +947,7 @@ test "parse reports missing mission subcommands" {
     const testing = std.testing;
     const decision = parse(&.{ "mission" });
     switch (decision) {
-        .failure => |failure| try testing.expectEqual(FailureKind.missing_subcommand, failure.kind),
+        .action => |invocation| try testing.expectEqual(Action.mission_compose, invocation.action),
         else => return error.UnexpectedValue,
     }
 }

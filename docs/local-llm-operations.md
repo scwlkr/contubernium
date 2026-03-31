@@ -88,6 +88,19 @@ This should pass before real missions are attempted.
 ### 7. Start a mission
 
 ```bash
+contubernium mission
+```
+
+This opens the plain CLI mission launcher:
+
+- `Up` / `Down` switches models
+- mission text is rendered in a distinct prompt color
+- `Enter` starts the mission
+- `Esc` cancels
+
+If you want a direct non-interactive command instead:
+
+```bash
 contubernium mission start "Add a release checklist to the docs"
 ```
 

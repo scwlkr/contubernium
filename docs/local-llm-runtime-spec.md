@@ -17,6 +17,7 @@ Supported commands:
 - `contubernium init`
 - `contubernium doctor`
 - `contubernium models`
+- `contubernium mission`
 - `contubernium mission start "<mission>"`
 - `contubernium mission step`
 - `contubernium mission continue`
@@ -41,6 +42,13 @@ Supported commands:
 - Verifies backend reachability.
 - Verifies configured model availability.
 - Runs a structured-output smoke test.
+
+`mission`
+- Requires a TTY.
+- Opens the plain CLI mission launcher.
+- Uses `Up` / `Down` to switch models before launch.
+- Renders mission input in a distinct prompt color while typing.
+- Starts the mission when `Enter` is pressed.
 
 `models`
 - Auto-scaffolds `.contubernium/` if it is missing.
