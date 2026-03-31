@@ -1,4 +1,5 @@
 const std = @import("std");
+const cli = @import("cli.zig");
 const embedded = @import("embedded_assets.zig");
 const protocol = @import("runtime_protocol.zig");
 
@@ -1273,77 +1274,30 @@ pub fn main() !void {
 }
 
 fn runMain(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (args.len < 2) {
-        try cmdUi(allocator, &.{});
-        return;
-    }
-
-    const command = args[1];
-    if (eql(command, "help") or eql(command, "--help") or eql(command, "-h")) {
-        try printUsage();
-        return;
-    }
-    if (eql(command, "init")) {
-        try cmdInit(allocator);
-        return;
-    }
-    if (eql(command, "doctor")) {
-        try cmdDoctor(allocator);
-        return;
-    }
-    if (eql(command, "models")) {
-        if (args.len < 3 or !eql(args[2], "list")) {
-            try stderrPrint("usage: contubernium models list\n", .{});
+    const decision = cli.parse(if (args.len > 1) args[1..] else &.{});
+    switch (decision) {
+        .help => |command| {
+            const text = try cli.renderHelp(allocator, command);
+            defer allocator.free(text);
+            try stdoutPrint("{s}\n", .{text});
+        },
+        .failure => |failure| {
+            const text = try cli.renderFailure(allocator, failure);
+            defer allocator.free(text);
+            try stderrPrint("{s}\n", .{text});
             return error.InvalidArguments;
-        }
-        try cmdModelsList(allocator);
-        return;
+        },
+        .action => |invocation| switch (invocation.action) {
+            .init => try cmdInit(allocator),
+            .doctor => try cmdDoctor(allocator),
+            .models_list => try cmdModelsList(allocator),
+            .mission_start => try cmdMissionStart(allocator, invocation.args),
+            .mission_continue => try cmdMissionContinue(allocator),
+            .mission_step => try cmdMissionStep(allocator),
+            .ui => try cmdUi(allocator),
+            .ui_bridge => try cmdUiBridge(allocator),
+        },
     }
-    if (eql(command, "run")) {
-        try cmdRun(allocator, args);
-        return;
-    }
-    if (eql(command, "step")) {
-        try cmdStep(allocator);
-        return;
-    }
-    if (eql(command, "resume")) {
-        try cmdResume(allocator);
-        return;
-    }
-    if (eql(command, "ui") or eql(command, "chat")) {
-        try cmdUi(allocator, args[2..]);
-        return;
-    }
-    if (eql(command, "ui-bridge")) {
-        try cmdUiBridge(allocator);
-        return;
-    }
-
-    try stderrPrint("unknown command: {s}\n", .{command});
-    try printUsage();
-    return error.InvalidArguments;
-}
-
-fn printUsage() !void {
-    try stdoutPrint(
-        \\Contubernium local runtime
-        \\
-        \\usage:
-        \\  contubernium
-        \\  contubernium init
-        \\  contubernium doctor
-        \\  contubernium models list
-        \\  contubernium run "mission prompt"
-        \\  contubernium step
-        \\  contubernium resume
-        \\  contubernium ui
-        \\
-        \\`contubernium` scaffolds .contubernium and .agents in the current directory if needed
-        \\and starts the OpenTUI interface.
-        \\`contubernium init` only writes the runtime scaffold.
-        \\
-    , .{});
 }
 
 fn cmdInit(allocator: std.mem.Allocator) !void {
@@ -1364,20 +1318,15 @@ fn cmdModelsList(allocator: std.mem.Allocator) !void {
     }
 }
 
-fn cmdRun(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (args.len < 3) {
-        try stderrPrint("usage: contubernium run \"mission prompt\"\n", .{});
-        return error.InvalidArguments;
-    }
-
-    const mission_prompt = try joinArgs(allocator, args[2..]);
+fn cmdMissionStart(allocator: std.mem.Allocator, prompt_args: []const []const u8) !void {
+    const mission_prompt = try joinArgs(allocator, prompt_args);
     try runMission(allocator, mission_prompt);
     const config = try loadProjectConfig(allocator);
     const state = try loadState(allocator, config.paths.state_file);
     try stdoutPrint("{s}\n", .{try missionOutcomeSummary(allocator, state)});
 }
 
-fn cmdStep(allocator: std.mem.Allocator) !void {
+fn cmdMissionStep(allocator: std.mem.Allocator) !void {
     const config = try loadProjectConfig(allocator);
     var state = try loadState(allocator, config.paths.state_file);
     initializeRuntimeSession(allocator, &state, config);
@@ -1386,7 +1335,7 @@ fn cmdStep(allocator: std.mem.Allocator) !void {
     try stdoutPrint("{s}\n", .{try missionOutcomeSummary(allocator, state)});
 }
 
-fn cmdResume(allocator: std.mem.Allocator) !void {
+fn cmdMissionContinue(allocator: std.mem.Allocator) !void {
     const config = try loadProjectConfig(allocator);
     var state = try loadState(allocator, config.paths.state_file);
     initializeRuntimeSession(allocator, &state, config);
@@ -1395,12 +1344,8 @@ fn cmdResume(allocator: std.mem.Allocator) !void {
     try stdoutPrint("{s}\n", .{try missionOutcomeSummary(allocator, state)});
 }
 
-fn cmdUi(allocator: std.mem.Allocator, args: []const []const u8) !void {
+fn cmdUi(allocator: std.mem.Allocator) !void {
     try scaffoldProject(allocator);
-    if (args.len > 0) {
-        try stderrPrint("usage: contubernium ui\n", .{});
-        return error.InvalidArguments;
-    }
     try launchOpenTuiFrontend(allocator);
 }
 
@@ -2659,7 +2604,7 @@ fn runLoop(allocator: std.mem.Allocator, config: AppConfig, state: *AppState, ho
 
 fn executeStep(allocator: std.mem.Allocator, config: AppConfig, state: *AppState, hooks: RuntimeHooks) !StepOutcome {
     if (state.mission.initial_prompt.len == 0) {
-        try stderrPrint("mission prompt is empty; use `contubernium run`\n", .{});
+        try stderrPrint("mission prompt is empty; use `contubernium mission start`\n", .{});
         return error.MissionNotInitialized;
     }
 

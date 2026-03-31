@@ -16,10 +16,10 @@ Supported commands:
 
 - `contubernium init`
 - `contubernium doctor`
-- `contubernium models list`
-- `contubernium run "<mission>"`
-- `contubernium step`
-- `contubernium resume`
+- `contubernium models`
+- `contubernium mission start "<mission>"`
+- `contubernium mission step`
+- `contubernium mission continue`
 - `contubernium ui`
 - `contubernium`
 
@@ -42,20 +42,20 @@ Supported commands:
 - Verifies configured model availability.
 - Runs a structured-output smoke test.
 
-`models list`
+`models`
 - Auto-scaffolds `.contubernium/` if it is missing.
 - Queries the active provider and prints the model identifiers it can serve.
 
-`run`
+`mission start`
 - Sets the mission prompt if supplied.
 - Initializes `runtime_session`.
 - Executes turns until the run finishes or blocks.
 
-`step`
+`mission step`
 - Auto-scaffolds `.contubernium/` if it is missing.
 - Executes exactly one actor turn.
 
-`resume`
+`mission continue`
 - Auto-scaffolds `.contubernium/` if it is missing.
 - Continues execution from the current state and runtime session.
 
@@ -428,8 +428,8 @@ Each turn writes a log entry containing:
 
 - `doctor` catches missing prompts
 - `doctor` catches missing model
-- `run` can start a new mission
-- `step` advances one actor turn
-- `resume` continues from a blocked state
+- `mission start` can start a new mission
+- `mission step` advances one actor turn
+- `mission continue` continues from a blocked state
 - invalid JSON produces repair attempts
 - denial of confirmation produces a blocked state

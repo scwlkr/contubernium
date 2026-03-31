@@ -94,6 +94,7 @@ const palette = {
   ivory: "#e8dfd1",
   muted: "#8f877c",
   blue: "#5e95d8",
+  bronze: "#d99152",
   success: "#8fd19a",
   danger: "#d47b72",
 }
@@ -145,9 +146,17 @@ function toneColor(tone: string): string {
       return palette.gold
     case "agent":
       return palette.blue
+    case "mission":
+      return palette.bronze
     default:
       return palette.ivory
   }
+}
+
+function entryTextColor(entry: TimelineEntry): string {
+  if (entry.streaming) return palette.blue
+  if (entry.tone === "mission") return palette.bronze
+  return palette.ivory
 }
 
 function formatHeading(entry: TimelineEntry): string {
@@ -267,6 +276,23 @@ function App() {
 
   const sendBridge = (payload: Record<string, unknown>) => {
     bridgeRef.current?.stdin.write(`${JSON.stringify(payload)}\n`)
+  }
+
+  const cycleModel = (direction: "up" | "down") => {
+    if (models.length === 0) {
+      sendBridge({ type: "models" })
+      setStatusNote("Model roster requested")
+      return
+    }
+
+    const currentIndex = models.findIndex((model) => model === snapshot.model)
+    const startIndex = currentIndex >= 0 ? currentIndex : 0
+    const offset = direction === "up" ? -1 : 1
+    const nextIndex = (startIndex + offset + models.length) % models.length
+    const nextModel = models[nextIndex]
+
+    sendBridge({ type: "set_model", model: nextModel })
+    setStatusNote(`Requested model ${nextModel}`)
   }
 
   const appendLocalEntry = (title: string, text: string, tone = "info") => {
@@ -446,6 +472,14 @@ function App() {
       setActivePane((current) => (current === "timeline" ? "logs" : "timeline"))
       return
     }
+    if (key.name === "up") {
+      cycleModel("up")
+      return
+    }
+    if (key.name === "down") {
+      cycleModel("down")
+      return
+    }
     if (key.ctrl && key.name === "r") {
       sendBridge({ type: "resume" })
       setStatusNote("Resume requested")
@@ -474,6 +508,11 @@ function App() {
 
   const showRail = width >= 124
   const transcriptEntries = activePane === "timeline" ? timeline : logEntries
+  const composerTrimmed = composer.trimStart()
+  const composerLooksLikeCommand = composerTrimmed.startsWith("/")
+  const composerTextColor =
+    composerTrimmed.length === 0 ? palette.ivory : composerLooksLikeCommand ? palette.blue : palette.bronze
+  const composerPlaceholderColor = composerLooksLikeCommand ? palette.blue : palette.muted
 
   const submitComposer = (value: string) => {
     const input = value.trim()
@@ -599,7 +638,7 @@ function App() {
         >
           <ascii-font text="CONTUBERNIUM" font="tiny" />
           <text fg={palette.gold}>OpenTUI command tent for the Zig runtime</text>
-          <text fg={palette.muted}>Enter a mission below or use Ctrl+R, Ctrl+D, Ctrl+M.</text>
+          <text fg={palette.muted}>Enter a mission below or use Up/Down, Ctrl+R, Ctrl+D, Ctrl+M.</text>
         </box>
       ) : null}
 
@@ -650,7 +689,7 @@ function App() {
                     {formatHeading(entry)}
                     {entry.actor ? <span fg={palette.muted}> • {entry.actor}</span> : null}
                   </text>
-                  <text fg={entry.streaming ? palette.blue : palette.ivory}>{entry.text || "…"}</text>
+                  <text fg={entryTextColor(entry)}>{entry.text || "…"}</text>
                 </box>
               ))
             )}
@@ -695,6 +734,7 @@ function App() {
           <text fg={palette.gold}>Model</text>
           <text fg={palette.ivory}>{snapshot.model || "unassigned"}</text>
           <text fg={palette.muted}>{snapshot.provider_type || "provider unavailable"}</text>
+          <text fg={palette.muted}>Up/Down cycle roster</text>
 
           {modelOptions.length > 0 ? (
             <box title="Models" style={{ border: true, borderColor: palette.border, height: 8 }}>
@@ -749,6 +789,9 @@ function App() {
           placeholder="Mission or /resume /doctor /models /model <n|name> /interrupt /status /clear /exit"
           focused={!pendingApproval}
           value={composer}
+          textColor={composerTextColor}
+          focusedTextColor={composerTextColor}
+          placeholderColor={composerPlaceholderColor}
           onInput={setComposer}
           onSubmit={submitComposer}
         />
@@ -756,7 +799,7 @@ function App() {
 
       <box style={{ flexDirection: "row", justifyContent: "space-between", paddingLeft: 1, paddingRight: 1 }}>
         <text fg={palette.muted}>{projectCwd}</text>
-        <text fg={palette.muted}>{statusNote} • Ctrl+L transcript/log • Esc exit</text>
+        <text fg={palette.muted}>{statusNote} • Up/Down models • Ctrl+L transcript/log • Esc exit</text>
       </box>
     </box>
   )

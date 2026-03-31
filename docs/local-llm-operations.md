@@ -88,13 +88,13 @@ This should pass before real missions are attempted.
 ### 7. Start a mission
 
 ```bash
-contubernium run "Add a release checklist to the docs"
+contubernium mission start "Add a release checklist to the docs"
 ```
 
 ### 8. Resume if needed
 
 ```bash
-contubernium resume
+contubernium mission continue
 ```
 
 ### 9. Start the interactive UI
@@ -137,13 +137,13 @@ Keyboard controls:
 List models:
 
 ```bash
-contubernium models list
+contubernium models
 ```
 
 Advance only one turn:
 
 ```bash
-contubernium step
+contubernium mission step
 ```
 
 ## Approval Behavior
@@ -157,7 +157,7 @@ That means:
 - shell commands require confirmation
 - explicitly blocked commands never run
 
-If a command is denied, the runtime records the blocked condition in state and logs. Use `resume` after changing the situation.
+If a command is denied, the runtime records the blocked condition in state and logs. Use `mission continue` after changing the situation.
 
 Inside OpenTUI, those confirmations appear inline in the command tent instead of as blocking terminal prompts from the worker thread.
 
