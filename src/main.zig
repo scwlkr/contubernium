@@ -1332,6 +1332,9 @@ const interactive_color_blue = "\x1b[38;5;75m";
 const interactive_color_prompt = "\x1b[38;5;215m";
 const interactive_color_cursor = "\x1b[38;5;220m";
 const interactive_color_danger = "\x1b[38;5;203m";
+const interactive_color_success = "\x1b[38;5;114m";
+const interactive_style_italic = "\x1b[3m";
+const interactive_clear_line = "\r\x1b[2K";
 
 const InteractiveKey = union(enum) {
     character: u8,
@@ -1664,30 +1667,278 @@ fn readInteractiveKey() !InteractiveKey {
     };
 }
 
+const CliSpinnerState = struct {
+    mutex: std.Thread.Mutex = .{},
+    active: bool = false,
+    rendered: bool = false,
+    shutdown: bool = false,
+    phase: usize = 0,
+    actor_len: usize = 0,
+    actor_buf: [32]u8 = [_]u8{0} ** 32,
+};
+
+const CliSpinner = struct {
+    state: CliSpinnerState = .{},
+    thread: ?std.Thread = null,
+    enabled: bool = false,
+
+    fn init() !CliSpinner {
+        if (!terminalUiEnabled(std.posix.STDERR_FILENO)) return .{};
+
+        var spinner = CliSpinner{
+            .enabled = true,
+        };
+        spinner.thread = try std.Thread.spawn(.{}, cliSpinnerMain, .{&spinner.state});
+        return spinner;
+    }
+
+    fn hooks(self: *CliSpinner) RuntimeHooks {
+        if (!self.enabled) return .{};
+        return .{
+            .context = &self.state,
+            .emit_fn = cliSpinnerEmit,
+        };
+    }
+
+    fn deinit(self: *CliSpinner) void {
+        if (!self.enabled) return;
+        self.state.mutex.lock();
+        self.state.shutdown = true;
+        self.state.active = false;
+        self.state.mutex.unlock();
+        if (self.thread) |thread| thread.join();
+    }
+};
+
+fn cliSpinnerEmit(context: ?*anyopaque, event: RuntimeUiEvent) void {
+    const state: *CliSpinnerState = @ptrCast(@alignCast(context.?));
+    state.mutex.lock();
+    defer state.mutex.unlock();
+
+    switch (event.kind) {
+        .stream_start => {
+            state.active = true;
+            state.phase = 0;
+            const actor = if (event.actor.len > 0) event.actor else "decanus";
+            const actor_len = @min(actor.len, state.actor_buf.len);
+            @memcpy(state.actor_buf[0..actor_len], actor[0..actor_len]);
+            state.actor_len = actor_len;
+        },
+        .stream_finalize, .approval_request => {
+            state.active = false;
+        },
+        .state_snapshot => {
+            if (eql(event.runtime_status, "blocked") or eql(event.runtime_status, "complete") or eql(event.runtime_status, "idle")) {
+                state.active = false;
+            }
+        },
+        else => {},
+    }
+}
+
+fn cliSpinnerMain(state: *CliSpinnerState) void {
+    const frames = [_][]const u8{ "I", "II", "III", "IV", "V", "VI" };
+
+    while (true) {
+        var shutdown = false;
+        var active = false;
+        var clear_line = false;
+        var actor_len: usize = 0;
+        var actor_buf: [32]u8 = undefined;
+        var frame: []const u8 = "";
+
+        state.mutex.lock();
+        shutdown = state.shutdown;
+        active = state.active;
+        clear_line = state.rendered and !state.active;
+        if (active) {
+            frame = frames[state.phase % frames.len];
+            state.phase = (state.phase + 1) % frames.len;
+            state.rendered = true;
+            actor_len = state.actor_len;
+            @memcpy(actor_buf[0..actor_len], state.actor_buf[0..actor_len]);
+        } else if (clear_line) {
+            state.rendered = false;
+        }
+        state.mutex.unlock();
+
+        if (shutdown) {
+            cliClearSpinnerLine();
+            return;
+        }
+
+        if (active) {
+            cliRenderSpinnerFrame(frame, actor_buf[0..actor_len]);
+            std.Thread.sleep(120 * std.time.ns_per_ms);
+            continue;
+        }
+
+        if (clear_line) {
+            cliClearSpinnerLine();
+        }
+        std.Thread.sleep(60 * std.time.ns_per_ms);
+    }
+}
+
+fn cliRenderSpinnerFrame(frame: []const u8, actor: []const u8) void {
+    const label = if (actor.len > 0) actor else "decanus";
+    stderrPrint("{s}{s}{s}{s} {s}testudo advancing{s} {s}{s}{s}", .{
+        interactive_clear_line,
+        interactive_color_gold,
+        frame,
+        interactive_reset,
+        interactive_color_muted,
+        interactive_reset,
+        interactive_color_blue,
+        label,
+        interactive_reset,
+    }) catch {};
+}
+
+fn cliClearSpinnerLine() void {
+    stderrPrint("{s}", .{interactive_clear_line}) catch {};
+}
+
+fn envFlagEnabled(name: [:0]const u8) bool {
+    const value = std.posix.getenv(name) orelse return false;
+    const text = std.mem.trim(u8, value, " \t\r\n");
+    if (text.len == 0) return false;
+    if (eql(text, "0")) return false;
+    if (std.ascii.eqlIgnoreCase(text, "false")) return false;
+    if (std.ascii.eqlIgnoreCase(text, "no")) return false;
+    return true;
+}
+
+fn envFlagPresent(name: [:0]const u8) bool {
+    return std.posix.getenv(name) != null;
+}
+
+fn terminalUiEnabled(file_no: std.posix.fd_t) bool {
+    if (!std.posix.isatty(file_no)) return false;
+    const term = std.posix.getenv("TERM") orelse return true;
+    return !eql(term, "dumb");
+}
+
+fn cliStylesEnabled(file_no: std.posix.fd_t) bool {
+    if (envFlagPresent("NO_COLOR")) return false;
+    if (envFlagEnabled("CLICOLOR_FORCE")) return true;
+    if (envFlagEnabled("FORCE_COLOR")) return true;
+    return terminalUiEnabled(file_no);
+}
+
+fn renderCliMissionOutcome(allocator: std.mem.Allocator, state: AppState) ![]const u8 {
+    const styled = cliStylesEnabled(std.posix.STDOUT_FILENO);
+    var buffer: std.ArrayList(u8) = .empty;
+    errdefer buffer.deinit(allocator);
+    const writer = buffer.writer(allocator);
+
+    if (state.mission.final_response.len > 0 and state.global_status == .complete) {
+        try writeCliMissionStatus(writer, styled, "complete", interactive_color_success);
+        try writeCliMissionSection(writer, styled, "prompt", state.mission.initial_prompt, interactive_color_prompt, true);
+        try writeCliMissionSection(writer, styled, "response", state.mission.final_response, interactive_color_blue, false);
+        return try buffer.toOwnedSlice(allocator);
+    }
+
+    if (state.runtime_session.last_error.len > 0 and state.runtime_session.status == .blocked) {
+        try writeCliMissionStatus(writer, styled, "blocked", interactive_color_danger);
+        try writeCliMissionSection(writer, styled, "prompt", state.mission.initial_prompt, interactive_color_prompt, true);
+        try writeCliMissionSection(writer, styled, "error", state.runtime_session.last_error, interactive_color_danger, false);
+        return try buffer.toOwnedSlice(allocator);
+    }
+
+    try writeCliMissionStatus(writer, styled, "in progress", interactive_color_gold);
+    try writeCliMissionSection(writer, styled, "prompt", state.mission.initial_prompt, interactive_color_prompt, true);
+    if (state.agent_loop.active_tool) |active_tool| {
+        const status_text = try std.fmt.allocPrint(allocator, "current actor: {s}\nactive tool: {s}\niteration: {d}", .{
+            actorName(state.current_actor),
+            actorName(active_tool),
+            state.agent_loop.iteration,
+        });
+        defer allocator.free(status_text);
+        try writeCliMissionSection(
+            writer,
+            styled,
+            "status",
+            status_text,
+            interactive_color_blue,
+            false,
+        );
+        return try buffer.toOwnedSlice(allocator);
+    }
+
+    const status_text = try std.fmt.allocPrint(allocator, "status: {s}\ncurrent actor: {s}\niteration: {d}", .{
+        @tagName(state.global_status),
+        actorName(state.current_actor),
+        state.agent_loop.iteration,
+    });
+    defer allocator.free(status_text);
+    try writeCliMissionSection(
+        writer,
+        styled,
+        "status",
+        status_text,
+        interactive_color_blue,
+        false,
+    );
+    return try buffer.toOwnedSlice(allocator);
+}
+
+fn writeCliMissionStatus(writer: anytype, styled: bool, status: []const u8, color: []const u8) !void {
+    if (styled) {
+        try writer.print("{s}{s}{s}", .{ color, status, interactive_reset });
+    } else {
+        try writer.writeAll(status);
+    }
+}
+
+fn writeCliMissionSection(
+    writer: anytype,
+    styled: bool,
+    label: []const u8,
+    body: []const u8,
+    color: []const u8,
+    italic: bool,
+) !void {
+    if (body.len == 0) return;
+    if (styled) {
+        try writer.print("\n\n{s}{s}{s}\n  {s}", .{ interactive_color_muted, label, interactive_reset, color });
+        if (italic) try writer.writeAll(interactive_style_italic);
+        try writer.print("{s}{s}", .{ body, interactive_reset });
+    } else {
+        try writer.print("\n\n{s}\n  {s}", .{ label, body });
+    }
+}
+
 fn cmdMissionStart(allocator: std.mem.Allocator, prompt_args: []const []const u8) !void {
     const mission_prompt = try joinArgs(allocator, prompt_args);
-    try runMission(allocator, mission_prompt);
+    var spinner = try CliSpinner.init();
+    defer spinner.deinit();
+    try runMissionInternal(allocator, mission_prompt, spinner.hooks());
     const config = try loadProjectConfig(allocator);
     const state = try loadState(allocator, config.paths.state_file);
-    try stdoutPrint("{s}\n", .{try missionOutcomeSummary(allocator, state)});
+    try stdoutPrint("{s}\n", .{try renderCliMissionOutcome(allocator, state)});
 }
 
 fn cmdMissionStep(allocator: std.mem.Allocator) !void {
     const config = try loadProjectConfig(allocator);
     var state = try loadState(allocator, config.paths.state_file);
+    var spinner = try CliSpinner.init();
+    defer spinner.deinit();
     initializeRuntimeSession(allocator, &state, config);
-    _ = try executeStep(allocator, config, &state, .{});
+    _ = try executeStep(allocator, config, &state, spinner.hooks());
     try saveState(allocator, config.paths.state_file, state);
-    try stdoutPrint("{s}\n", .{try missionOutcomeSummary(allocator, state)});
+    try stdoutPrint("{s}\n", .{try renderCliMissionOutcome(allocator, state)});
 }
 
 fn cmdMissionContinue(allocator: std.mem.Allocator) !void {
     const config = try loadProjectConfig(allocator);
     var state = try loadState(allocator, config.paths.state_file);
+    var spinner = try CliSpinner.init();
+    defer spinner.deinit();
     initializeRuntimeSession(allocator, &state, config);
-    try runLoop(allocator, config, &state, .{});
+    try runLoop(allocator, config, &state, spinner.hooks());
     try saveState(allocator, config.paths.state_file, state);
-    try stdoutPrint("{s}\n", .{try missionOutcomeSummary(allocator, state)});
+    try stdoutPrint("{s}\n", .{try renderCliMissionOutcome(allocator, state)});
 }
 
 fn cmdUi(allocator: std.mem.Allocator) !void {
