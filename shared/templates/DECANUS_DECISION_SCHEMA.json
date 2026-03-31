@@ -2,9 +2,9 @@
   "action": "finish | invoke_specialist | tool_request | ask_user | blocked",
   "reasoning": "short explanation",
   "current_goal": "current mission focus",
-  "agent_call": "optional: faber | faber::IMPLEMENT_BACKEND",
+  "agent_call": "optional: prefer bare agent names like faber; exact calls must match a real Contubernium action file such as faber::IMPLEMENT_BACKEND",
   "actor": "optional fallback actor name",
-  "lane": "optional fallback lane name",
+  "lane": "optional fallback lane name: backend | frontend | systems | qa | research | brand | media | docs | bulk_ops",
   "objective": "required when action is invoke_specialist",
   "completion_signal": "required when action is invoke_specialist",
   "dependencies": [

@@ -1678,35 +1678,52 @@ const CliSpinnerState = struct {
 };
 
 const CliSpinner = struct {
-    state: CliSpinnerState = .{},
+    allocator: ?std.mem.Allocator = null,
+    state: ?*CliSpinnerState = null,
     thread: ?std.Thread = null,
     enabled: bool = false,
 
-    fn init() !CliSpinner {
-        if (!terminalUiEnabled(std.posix.STDERR_FILENO)) return .{};
+    fn init(allocator: std.mem.Allocator) !CliSpinner {
+        return initWithEnabled(allocator, terminalUiEnabled(std.posix.STDERR_FILENO));
+    }
+
+    fn initWithEnabled(allocator: std.mem.Allocator, enabled: bool) !CliSpinner {
+        if (!enabled) return .{};
+
+        const state = try allocator.create(CliSpinnerState);
+        errdefer allocator.destroy(state);
+        state.* = .{};
 
         var spinner = CliSpinner{
+            .allocator = allocator,
+            .state = state,
             .enabled = true,
         };
-        spinner.thread = try std.Thread.spawn(.{}, cliSpinnerMain, .{&spinner.state});
+        spinner.thread = try std.Thread.spawn(.{}, cliSpinnerMain, .{state});
         return spinner;
     }
 
     fn hooks(self: *CliSpinner) RuntimeHooks {
-        if (!self.enabled) return .{};
+        if (!self.enabled or self.state == null) return .{};
         return .{
-            .context = &self.state,
+            .context = self.state.?,
             .emit_fn = cliSpinnerEmit,
         };
     }
 
     fn deinit(self: *CliSpinner) void {
-        if (!self.enabled) return;
-        self.state.mutex.lock();
-        self.state.shutdown = true;
-        self.state.active = false;
-        self.state.mutex.unlock();
+        if (!self.enabled or self.state == null) return;
+        const state = self.state.?;
+        state.mutex.lock();
+        state.shutdown = true;
+        state.active = false;
+        state.mutex.unlock();
         if (self.thread) |thread| thread.join();
+        if (self.allocator) |allocator| allocator.destroy(state);
+        self.allocator = null;
+        self.state = null;
+        self.thread = null;
+        self.enabled = false;
     }
 };
 
@@ -1911,7 +1928,7 @@ fn writeCliMissionSection(
 
 fn cmdMissionStart(allocator: std.mem.Allocator, prompt_args: []const []const u8) !void {
     const mission_prompt = try joinArgs(allocator, prompt_args);
-    var spinner = try CliSpinner.init();
+    var spinner = try CliSpinner.init(allocator);
     defer spinner.deinit();
     try runMissionInternal(allocator, mission_prompt, spinner.hooks());
     const config = try loadProjectConfig(allocator);
@@ -1922,7 +1939,7 @@ fn cmdMissionStart(allocator: std.mem.Allocator, prompt_args: []const []const u8
 fn cmdMissionStep(allocator: std.mem.Allocator) !void {
     const config = try loadProjectConfig(allocator);
     var state = try loadState(allocator, config.paths.state_file);
-    var spinner = try CliSpinner.init();
+    var spinner = try CliSpinner.init(allocator);
     defer spinner.deinit();
     initializeRuntimeSession(allocator, &state, config);
     _ = try executeStep(allocator, config, &state, spinner.hooks());
@@ -1933,7 +1950,7 @@ fn cmdMissionStep(allocator: std.mem.Allocator) !void {
 fn cmdMissionContinue(allocator: std.mem.Allocator) !void {
     const config = try loadProjectConfig(allocator);
     var state = try loadState(allocator, config.paths.state_file);
-    var spinner = try CliSpinner.init();
+    var spinner = try CliSpinner.init(allocator);
     defer spinner.deinit();
     initializeRuntimeSession(allocator, &state, config);
     try runLoop(allocator, config, &state, spinner.hooks());
@@ -3974,6 +3991,37 @@ fn summarizeRuntimeMemorySnapshot(allocator: std.mem.Allocator, memory: RuntimeM
     );
 }
 
+fn specialistRoutingGuideText(allocator: std.mem.Allocator) ![]const u8 {
+    var buffer: std.ArrayList(u8) = .empty;
+    const writer = buffer.writer(allocator);
+    const specialists = [_]Actor{
+        .faber,
+        .artifex,
+        .architectus,
+        .tesserarius,
+        .explorator,
+        .signifer,
+        .praeco,
+        .calo,
+        .mulus,
+    };
+
+    for (specialists) |actor| {
+        try writer.print(
+            "- {s} -> lane={s} -> prefer `agent_call: \"{s}\"` -> exact default action `{s}::{s}`\n",
+            .{
+                actorName(actor),
+                laneName(laneForActor(actor)),
+                actorName(actor),
+                actorName(actor),
+                defaultActionNameForActor(actor),
+            },
+        );
+    }
+
+    return try buffer.toOwnedSlice(allocator);
+}
+
 fn buildDecanusUserPrompt(
     allocator: std.mem.Allocator,
     config: AppConfig,
@@ -3984,6 +4032,8 @@ fn buildDecanusUserPrompt(
     const task_summary = try taskSummaryText(allocator, state.tasks);
     const constraints = try joinStrings(allocator, state.mission.constraints, ", ");
     const success_criteria = try joinStrings(allocator, state.mission.success_criteria, ", ");
+    const specialist_routing = try specialistRoutingGuideText(allocator);
+    defer allocator.free(specialist_routing);
     var buffer: std.ArrayList(u8) = .empty;
     const writer = buffer.writer(allocator);
 
@@ -4059,6 +4109,12 @@ fn buildDecanusUserPrompt(
         \\Success criteria:
         \\{s}
         \\
+        \\Specialist routing
+        \\-----------------
+        \\{s}
+        \\Valid lane values: backend, frontend, systems, qa, research, brand, media, docs, bulk_ops
+        \\When `action` is `invoke_specialist`, prefer a bare agent name in `agent_call`. Use an exact `agent::ACTION` only when it matches a real Contubernium action file.
+        \\
         \\Iteration: {d}
         \\Status: {s}
         \\Active tool: {s}
@@ -4081,6 +4137,7 @@ fn buildDecanusUserPrompt(
             state.mission.current_goal,
             constraints,
             success_criteria,
+            specialist_routing,
             state.agent_loop.iteration,
             @tagName(state.agent_loop.status),
             maybeActorName(state.agent_loop.active_tool),
@@ -6872,7 +6929,200 @@ fn parseJson(comptime T: type, allocator: std.mem.Allocator, text: []const u8) !
 
 fn parseModelJson(comptime T: type, allocator: std.mem.Allocator, text: []const u8) !T {
     const normalized = try normalizeModelJson(text);
+    if (T == DecanusDecision) return try parseDecanusDecisionModelJson(allocator, normalized);
+    if (T == SpecialistResult) return try parseSpecialistResultModelJson(allocator, normalized);
+    if (T == ToolRequest) return try parseToolRequestModelJson(allocator, normalized);
     return try parseJson(T, allocator, normalized);
+}
+
+fn parseDecanusDecisionModelJson(allocator: std.mem.Allocator, text: []const u8) !DecanusDecision {
+    const parsed = try parseModelValueTree(allocator, text);
+    defer parsed.deinit();
+
+    const object = try requireJsonObject(parsed.value);
+    return .{
+        .action = try dupJsonObjectStringFieldOrDefault(allocator, object, "action", ""),
+        .reasoning = try dupJsonObjectStringFieldOrDefault(allocator, object, "reasoning", ""),
+        .current_goal = try dupJsonObjectStringFieldOrDefault(allocator, object, "current_goal", ""),
+        .agent_call = try dupJsonObjectStringFieldOrDefault(allocator, object, "agent_call", ""),
+        .lane = try dupJsonObjectStringFieldOrDefault(allocator, object, "lane", ""),
+        .actor = try dupJsonObjectStringFieldOrDefault(allocator, object, "actor", ""),
+        .objective = try dupJsonObjectStringFieldOrDefault(allocator, object, "objective", ""),
+        .completion_signal = try dupJsonObjectStringFieldOrDefault(allocator, object, "completion_signal", ""),
+        .dependencies = try dupJsonObjectStringArrayFieldOrDefault(allocator, object, "dependencies"),
+        .final_response = try dupJsonObjectStringFieldOrDefault(allocator, object, "final_response", ""),
+        .question = try dupJsonObjectStringFieldOrDefault(allocator, object, "question", ""),
+        .blocked_reason = try dupJsonObjectStringFieldOrDefault(allocator, object, "blocked_reason", ""),
+        .tool_requests = try dupJsonObjectToolRequestsFieldOrDefault(allocator, object, "tool_requests"),
+    };
+}
+
+fn parseSpecialistResultModelJson(allocator: std.mem.Allocator, text: []const u8) !SpecialistResult {
+    const parsed = try parseModelValueTree(allocator, text);
+    defer parsed.deinit();
+
+    const object = try requireJsonObject(parsed.value);
+    return .{
+        .action = try dupJsonObjectStringFieldOrDefault(allocator, object, "action", ""),
+        .reasoning = try dupJsonObjectStringFieldOrDefault(allocator, object, "reasoning", ""),
+        .status = try dupJsonObjectStringFieldOrDefault(allocator, object, "status", ""),
+        .summary = try dupJsonObjectStringFieldOrDefault(allocator, object, "summary", ""),
+        .changes = try dupJsonObjectStringArrayFieldOrDefault(allocator, object, "changes"),
+        .findings = try dupJsonObjectStringArrayFieldOrDefault(allocator, object, "findings"),
+        .blockers = try dupJsonObjectStringArrayFieldOrDefault(allocator, object, "blockers"),
+        .next_recommended_agent = try dupJsonObjectStringFieldOrDefault(allocator, object, "next_recommended_agent", ""),
+        .confidence = try jsonObjectFloatFieldOrDefault(object, "confidence", 0.0),
+        .description = try dupJsonObjectStringFieldOrDefault(allocator, object, "description", ""),
+        .result_summary = try dupJsonObjectStringFieldOrDefault(allocator, object, "result_summary", ""),
+        .artifacts = try dupJsonObjectStringArrayFieldOrDefault(allocator, object, "artifacts"),
+        .follow_up_needed = try dupJsonObjectStringFieldOrDefault(allocator, object, "follow_up_needed", ""),
+        .question = try dupJsonObjectStringFieldOrDefault(allocator, object, "question", ""),
+        .blocked_reason = try dupJsonObjectStringFieldOrDefault(allocator, object, "blocked_reason", ""),
+        .tool_requests = try dupJsonObjectToolRequestsFieldOrDefault(allocator, object, "tool_requests"),
+    };
+}
+
+fn parseToolRequestModelJson(allocator: std.mem.Allocator, text: []const u8) !ToolRequest {
+    const parsed = try parseModelValueTree(allocator, text);
+    defer parsed.deinit();
+    return try dupToolRequestFromJsonValue(allocator, parsed.value);
+}
+
+fn parseModelValueTree(allocator: std.mem.Allocator, text: []const u8) !std.json.Parsed(std.json.Value) {
+    return try std.json.parseFromSlice(std.json.Value, allocator, text, .{
+        .ignore_unknown_fields = true,
+    });
+}
+
+fn requireJsonObject(value: std.json.Value) !std.json.ObjectMap {
+    return switch (value) {
+        .object => |object| object,
+        else => error.UnexpectedToken,
+    };
+}
+
+fn dupJsonObjectStringFieldOrDefault(
+    allocator: std.mem.Allocator,
+    object: std.json.ObjectMap,
+    field_name: []const u8,
+    default_value: []const u8,
+) ![]const u8 {
+    const value = object.get(field_name) orelse return try allocator.dupe(u8, default_value);
+    return try dupJsonStringValueOrDefault(allocator, value, default_value);
+}
+
+fn dupJsonStringValueOrDefault(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+    default_value: []const u8,
+) ![]const u8 {
+    return switch (value) {
+        .null => try allocator.dupe(u8, default_value),
+        .string => |text| try allocator.dupe(u8, text),
+        .number_string => |text| try allocator.dupe(u8, text),
+        else => error.UnexpectedToken,
+    };
+}
+
+fn dupJsonObjectStringArrayFieldOrDefault(
+    allocator: std.mem.Allocator,
+    object: std.json.ObjectMap,
+    field_name: []const u8,
+) ![]const []const u8 {
+    const value = object.get(field_name) orelse return try allocator.alloc([]const u8, 0);
+    return try dupJsonStringArrayValueOrDefault(allocator, value);
+}
+
+fn dupJsonStringArrayValueOrDefault(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+) ![]const []const u8 {
+    return switch (value) {
+        .null => try allocator.alloc([]const u8, 0),
+        .array => |array| {
+            var items = try allocator.alloc([]const u8, array.items.len);
+            errdefer allocator.free(items);
+
+            var index: usize = 0;
+            errdefer {
+                while (index > 0) {
+                    index -= 1;
+                    allocator.free(items[index]);
+                }
+            }
+
+            for (array.items, 0..) |item, i| {
+                items[i] = try dupJsonStringValueOrDefault(allocator, item, "");
+                index = i + 1;
+            }
+            return items;
+        },
+        else => error.UnexpectedToken,
+    };
+}
+
+fn dupJsonObjectToolRequestsFieldOrDefault(
+    allocator: std.mem.Allocator,
+    object: std.json.ObjectMap,
+    field_name: []const u8,
+) ![]const ToolRequest {
+    const value = object.get(field_name) orelse return try allocator.alloc(ToolRequest, 0);
+    return try dupToolRequestsValueOrDefault(allocator, value);
+}
+
+fn dupToolRequestsValueOrDefault(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+) ![]const ToolRequest {
+    return switch (value) {
+        .null => try allocator.alloc(ToolRequest, 0),
+        .array => |array| {
+            var items = try allocator.alloc(ToolRequest, array.items.len);
+            errdefer allocator.free(items);
+
+            var index: usize = 0;
+            errdefer {
+                while (index > 0) {
+                    index -= 1;
+                    freeOwnedToolRequest(allocator, items[index]);
+                }
+            }
+
+            for (array.items, 0..) |item, i| {
+                items[i] = try dupToolRequestFromJsonValue(allocator, item);
+                index = i + 1;
+            }
+            return items;
+        },
+        else => error.UnexpectedToken,
+    };
+}
+
+fn dupToolRequestFromJsonValue(allocator: std.mem.Allocator, value: std.json.Value) !ToolRequest {
+    const object = try requireJsonObject(value);
+    return .{
+        .tool = try dupJsonObjectStringFieldOrDefault(allocator, object, "tool", ""),
+        .description = try dupJsonObjectStringFieldOrDefault(allocator, object, "description", ""),
+        .path = try dupJsonObjectStringFieldOrDefault(allocator, object, "path", ""),
+        .pattern = try dupJsonObjectStringFieldOrDefault(allocator, object, "pattern", ""),
+        .command = try dupJsonObjectStringFieldOrDefault(allocator, object, "command", ""),
+        .content = try dupJsonObjectStringFieldOrDefault(allocator, object, "content", ""),
+    };
+}
+
+fn jsonObjectFloatFieldOrDefault(
+    object: std.json.ObjectMap,
+    field_name: []const u8,
+    default_value: f32,
+) !f32 {
+    const value = object.get(field_name) orelse return default_value;
+    return switch (value) {
+        .null => default_value,
+        .integer => |integer| @as(f32, @floatFromInt(integer)),
+        .float => |float| @as(f32, @floatCast(float)),
+        .number_string, .string => |text| try std.fmt.parseFloat(f32, text),
+        else => error.UnexpectedToken,
+    };
 }
 
 fn prettyPrintJson(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
@@ -6949,6 +7199,48 @@ fn testQueueEmit(context: ?*anyopaque, event: RuntimeUiEvent) void {
 fn testDenyApproval(_: ?*anyopaque, _: []const u8, _: []const u8) bool {
     return false;
 }
+
+fn freeOwnedStringSlice(allocator: std.mem.Allocator, items: []const []const u8) void {
+    for (items) |item| allocator.free(item);
+    allocator.free(items);
+}
+
+fn freeOwnedDecanusDecision(allocator: std.mem.Allocator, decision: DecanusDecision) void {
+    allocator.free(decision.action);
+    allocator.free(decision.reasoning);
+    allocator.free(decision.current_goal);
+    allocator.free(decision.agent_call);
+    allocator.free(decision.lane);
+    allocator.free(decision.actor);
+    allocator.free(decision.objective);
+    allocator.free(decision.completion_signal);
+    freeOwnedStringSlice(allocator, decision.dependencies);
+    allocator.free(decision.final_response);
+    allocator.free(decision.question);
+    allocator.free(decision.blocked_reason);
+    for (decision.tool_requests) |request| freeOwnedToolRequest(allocator, request);
+    allocator.free(decision.tool_requests);
+}
+
+fn freeOwnedSpecialistResult(allocator: std.mem.Allocator, result: SpecialistResult) void {
+    allocator.free(result.action);
+    allocator.free(result.reasoning);
+    allocator.free(result.status);
+    allocator.free(result.summary);
+    freeOwnedStringSlice(allocator, result.changes);
+    freeOwnedStringSlice(allocator, result.findings);
+    freeOwnedStringSlice(allocator, result.blockers);
+    allocator.free(result.next_recommended_agent);
+    allocator.free(result.description);
+    allocator.free(result.result_summary);
+    freeOwnedStringSlice(allocator, result.artifacts);
+    allocator.free(result.follow_up_needed);
+    allocator.free(result.question);
+    allocator.free(result.blocked_reason);
+    for (result.tool_requests) |request| freeOwnedToolRequest(allocator, request);
+    allocator.free(result.tool_requests);
+}
+
 test "toolRequestDisplay prefers command and path fields" {
     const testing = std.testing;
     const command_text = try toolRequestDisplay(testing.allocator, .{ .tool = "run_command", .command = "zig build" });
@@ -6978,6 +7270,82 @@ test "prettyPrintJson indents normalized model output" {
     defer testing.allocator.free(text);
     try testing.expect(std.mem.indexOf(u8, text, "\n  \"status\"") != null);
     try testing.expect(std.mem.indexOf(u8, text, "\n  \"nested\"") != null);
+}
+
+test "parseModelJson accepts null specialist fields" {
+    const testing = std.testing;
+    const parsed = try parseModelJson(SpecialistResult, testing.allocator,
+        \\{
+        \\  "action": "complete",
+        \\  "reasoning": "done",
+        \\  "status": "complete",
+        \\  "summary": "ok",
+        \\  "changes": null,
+        \\  "findings": [],
+        \\  "blockers": null,
+        \\  "next_recommended_agent": null,
+        \\  "confidence": 1.0,
+        \\  "description": "desc",
+        \\  "result_summary": "sum",
+        \\  "artifacts": null,
+        \\  "follow_up_needed": null,
+        \\  "question": null,
+        \\  "blocked_reason": null,
+        \\  "tool_requests": [
+        \\    {
+        \\      "tool": "read_file",
+        \\      "description": null,
+        \\      "path": "src/main.zig",
+        \\      "pattern": null,
+        \\      "command": null,
+        \\      "content": null
+        \\    }
+        \\  ]
+        \\}
+    );
+    defer freeOwnedSpecialistResult(testing.allocator, parsed);
+
+    try testing.expectEqualStrings("complete", parsed.action);
+    try testing.expectEqual(@as(usize, 0), parsed.changes.len);
+    try testing.expectEqual(@as(usize, 0), parsed.blockers.len);
+    try testing.expectEqualStrings("", parsed.next_recommended_agent);
+    try testing.expectEqualStrings("", parsed.question);
+    try testing.expectEqualStrings("", parsed.blocked_reason);
+    try testing.expectEqual(@as(usize, 1), parsed.tool_requests.len);
+    try testing.expectEqualStrings("read_file", parsed.tool_requests[0].tool);
+    try testing.expectEqualStrings("", parsed.tool_requests[0].description);
+    try testing.expectEqualStrings("", parsed.tool_requests[0].pattern);
+}
+
+test "parseModelJson accepts null decanus fields" {
+    const testing = std.testing;
+    const parsed = try parseModelJson(DecanusDecision, testing.allocator,
+        \\{
+        \\  "action": "finish",
+        \\  "reasoning": "complete",
+        \\  "current_goal": "hello",
+        \\  "agent_call": null,
+        \\  "lane": null,
+        \\  "actor": null,
+        \\  "objective": null,
+        \\  "completion_signal": null,
+        \\  "dependencies": null,
+        \\  "final_response": "done",
+        \\  "question": null,
+        \\  "blocked_reason": null,
+        \\  "tool_requests": null
+        \\}
+    );
+    defer freeOwnedDecanusDecision(testing.allocator, parsed);
+
+    try testing.expectEqualStrings("finish", parsed.action);
+    try testing.expectEqualStrings("hello", parsed.current_goal);
+    try testing.expectEqualStrings("", parsed.agent_call);
+    try testing.expectEqualStrings("", parsed.lane);
+    try testing.expectEqualStrings("", parsed.actor);
+    try testing.expectEqual(@as(usize, 0), parsed.dependencies.len);
+    try testing.expectEqualStrings("done", parsed.final_response);
+    try testing.expectEqual(@as(usize, 0), parsed.tool_requests.len);
 }
 
 test "buildOllamaChatBody preserves structured output settings across stream modes" {
@@ -7206,6 +7574,20 @@ test "processOllamaPendingLines completes buffered stream output" {
     try testing.expectEqual(@as(usize, 2), events.len);
     try testing.expectEqualStrings("hel", events[0].text);
     try testing.expectEqualStrings("lo", events[1].text);
+}
+
+test "CliSpinner keeps thread state on the heap" {
+    const testing = std.testing;
+    var spinner = try CliSpinner.initWithEnabled(testing.allocator, true);
+    defer spinner.deinit();
+
+    try testing.expect(spinner.enabled);
+    try testing.expect(spinner.state != null);
+    try testing.expect(spinner.thread != null);
+
+    const hooks = spinner.hooks();
+    try testing.expect(hooks.context != null);
+    try testing.expectEqual(@intFromPtr(spinner.state.?), @intFromPtr(@as(*CliSpinnerState, @ptrCast(@alignCast(hooks.context.?)))));
 }
 
 test "initializeRuntimeSession upgrades the legacy loop budget and seeds context defaults" {
@@ -7525,6 +7907,8 @@ test "buildDecanusUserPrompt includes project context and memory layers" {
     try testing.expect(std.mem.indexOf(u8, prompt, "Architecture decisions live here.") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Global memory file: .contubernium/global.md") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Reusable strategies live here.") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "faber -> lane=backend") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Valid lane values: backend, frontend, systems, qa, research, brand, media, docs, bulk_ops") != null);
 }
 
 test "buildPromptWithContextBudget blocks when a required memory layer is missing" {
