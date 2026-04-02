@@ -130,3 +130,4 @@ Each amendment document must include:
 - The effective date of the amendment
 
 Amendments shall be cumulative and must not overwrite or modify the original Constitution text.
+
