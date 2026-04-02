@@ -16,6 +16,7 @@ Create a single clear specialist invocation that stays inside the agent hierarch
 - One specialist only
 - One objective only
 - No multi-domain scope
+- Helper agents must be targeted explicitly by agent name; lane fallback is reserved for core specialists
 
 ## Process
 1. Choose the correct specialist.

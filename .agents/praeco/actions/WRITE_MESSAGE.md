@@ -5,6 +5,7 @@ Write scoped outward-facing messaging tied to verified product behavior.
 
 ## When to Use
 - The task is release notes, launch copy, or user-facing messaging
+- `decanus` has explicitly targeted `praeco` for helper messaging work
 
 ## Inputs
 - Audience

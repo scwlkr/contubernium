@@ -2,7 +2,7 @@
 
 ## Role Summary
 
-Write bounded user-facing messaging tied to verified behavior.
+Write bounded user-facing messaging tied to verified behavior when `decanus` explicitly requests helper copy work.
 
 ## Capability Domains
 
