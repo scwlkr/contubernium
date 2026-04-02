@@ -28,7 +28,7 @@ Output:
 
 ## Phase 1: Reconcile Governance Documents
 
-Update the governance and operator docs so they no longer contradict the Constitution or the implemented global-home asset model.
+Update the governance and operator docs so they no longer contradict the Constitution or the implemented global-home asset model. Or remove if they are no longer applicable. 
 
 Target files:
 

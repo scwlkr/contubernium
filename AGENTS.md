@@ -26,10 +26,14 @@ At no point should control leave `decanus`.
 - Decides when to call specialists
 - Synthesizes all outputs into final results
 
-## Specialists (Tools)
+## Specialists and Helpers (Tools)
+- The constitutional core target is 8 total agents including `decanus`
+- All non-`decanus` agents remain specialist tools
+- If the installed asset set contains more than 7 non-`decanus` agents during alignment, the extra agents are helper agents
+- Helper agents never orchestrate, never own the mission, and always return control to `decanus`
+
+Current installed specialist assets in this repository:
 - `faber`, `artifex`, `architectus`, `tesserarius`, `explorator`, `signifer`, `praeco`, `calo`, `mulus`
-- Execute **narrow, scoped tasks only**
-- Always return control to `decanus`
 
 ---
 
@@ -73,14 +77,16 @@ No silent side effects.
 
 Contubernium uses **layered memory**:
 
-- Mission: `.contubernium/state.json`
-- Project: `.contubernium/project.md`
-- Global: `.contubernium/global.md`
+- Mission: `.contubernium/state.json` plus per-run traces in `.contubernium/logs/`
+- Project: `.contubernium/ARCHITECTURE.md`, `.contubernium/PLAN.md`, `.contubernium/PROJECT_CONTEXT.md`, and `.contubernium/project.md`
+- Global: the current runtime-loaded constitutional global layer at `.contubernium/global.md`
 
 Rules:
 - `decanus` owns mission state
 - Specialists do NOT write canonical memory unless instructed
 - No speculative or unverified memory writes
+
+Installed home assets under `~/.contubernium/` provide global agent, shared, adapter, and template files. They are not the canonical project-memory layout created by `contubernium init`.
 
 ---
 
@@ -99,15 +105,11 @@ Agents MUST NOT:
 
 ---
 
-# 7. Repository Structure (authoritative)
+# 7. Repository And Runtime Layout (authoritative)
 
 ```
 
-.contubernium/
-state.json
-config.json
-prompts/
-logs/
+Source repository:
 
 .agents/
 AGENT_LOOP.md <agent>/
@@ -115,15 +117,40 @@ SOUL.md
 SKILL.md
 CONTRACT.md
 
+shared/
+adapters/
+templates/
+
 docs/
 doctrine.md
 agent-contracts.md
 
 src/
 
+Installed global home:
+
+~/.contubernium/
+agents/
+shared/
+adapters/
+templates/
+global.md
+
+Initialized project:
+
+.contubernium/
+state.json
+config.json
+ARCHITECTURE.md
+PLAN.md
+PROJECT_CONTEXT.md
+project.md
+global.md
+logs/
+
 ```
 
-Do not introduce conflicting structures.
+Do not introduce conflicting structures. Project-local `.agents/` and `.contubernium/prompts/` are legacy assumptions, not the canonical initialized-project layout.
 
 ---
 
@@ -153,6 +180,7 @@ When making changes:
    - `AGENTS.md`
    - `docs/doctrine.md`
    - `docs/agent-contracts.md`
+   - `USER_MANUAL.md` when shipped behavior changes
 
 2. Before editing:
    - identify conflicts with current repo

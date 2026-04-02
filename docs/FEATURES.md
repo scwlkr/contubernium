@@ -1,6 +1,7 @@
 > Historical planning note:
 > This document predates the global-agent architecture in `docs/AGENT_ARCHITECTURE.md`.
-> Where it describes project-local prompt assets or copied local agent definitions, the current implementation uses global agents plus project-local context files instead.
+> It is a planning artifact, not the operator-facing source of shipped behavior; use [USER_MANUAL.md](/Users/shanewalker/Desktop/dev/Contubernium/USER_MANUAL.md) for that.
+> Where it describes project-local prompt assets or copied local agent definitions, the current implementation uses global-home agent/shared assets plus project-local memory files instead.
 
 🏛️ CONTUBERNIUM — FEATURES (v2, build-ready)
 
@@ -77,7 +78,14 @@ Repeat until complete
 Owner: Design System
 Priority: P1
 
-Structure
+Installed asset shape
+
+~/.contubernium/agents/{agent_name}/
+  SOUL.md
+  CONTRACT.md
+  SKILL.md
+
+Source control shape
 
 .agents/{agent_name}/
   SOUL.md
@@ -122,11 +130,15 @@ Structure
 
 .contubernium/
   state.json
+  ARCHITECTURE.md
+  PLAN.md
+  PROJECT_CONTEXT.md
   project.md
   global.md
   config.json
-  prompts/
   logs/
+
+Global runtime assets live under `~/.contubernium/` and are not copied into each project.
 
 Components
 
@@ -184,18 +196,15 @@ Creates:
 
 .contubernium/
   state.json
+  ARCHITECTURE.md
+  PLAN.md
+  PROJECT_CONTEXT.md
   project.md
   global.md
   config.json
-  prompts/
   logs/
 
-.agents/
-  AGENT_LOOP.md
-  {agent_name}/
-    SOUL.md
-    CONTRACT.md
-    SKILL.md
+`contubernium init` does not create project-local `.agents/` or `.contubernium/prompts/`.
 
 
 ⸻

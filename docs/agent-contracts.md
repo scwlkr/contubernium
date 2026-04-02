@@ -1,10 +1,17 @@
 # Contubernium Agent Contracts
 
-This document defines the **exact behavior, boundaries, and invocation rules** for all agents.
+This document defines the exact behavior, boundaries, and invocation rules for all agents.
 
-All agents are **tools under Decanus**.
+All non-`decanus` agents are tools under `decanus`.
 
 No agent may violate its contract.
+
+Alignment note:
+
+- The constitutional core target is 8 total agents including `decanus`.
+- The current repository still carries additional specialist definitions during alignment work.
+- Any installed non-`decanus` agent beyond the final 7 core specialists is a helper agent.
+- Helper agents follow the same invocation discipline and never gain orchestration authority.
 
 ---
 
@@ -24,6 +31,13 @@ All agents MUST NOT:
 - take ownership of the mission
 - chain-call other agents (v1)
 - write canonical memory unless explicitly instructed
+
+Runtime asset loading rules:
+
+- agent assets are loaded from the installed global home under `~/.contubernium/agents/`
+- when the global home is unavailable, the runtime may fall back to the source repository asset tree
+- project-local `.agents/` directories are not part of the canonical initialized-project layout
+- project-local `.contubernium/prompts/` directories are not part of the current runtime model
 
 ---
 
@@ -52,7 +66,7 @@ Every agent invocation must follow this structure:
     "relevant": []
   }
 }
-````
+```
 
 ## Output
 
@@ -371,17 +385,26 @@ Agents must:
 
 ### Mission Memory
 
+* `.contubernium/state.json`
+* `.contubernium/logs/` for per-run execution traces
 * owned by `decanus`
 * updated every loop iteration
 
 ### Project Memory
 
+* `.contubernium/ARCHITECTURE.md`
+* `.contubernium/PLAN.md`
+* `.contubernium/PROJECT_CONTEXT.md`
+* `.contubernium/project.md`
 * updated only with confirmed truths
-* written via `decanus` or `calo`
+* written via `decanus` or an explicitly assigned documentation flow
 
 ### Global Memory
 
+* the current runtime-loaded global layer at `.contubernium/global.md`
 * reserved for reusable patterns
+
+Installed home assets under `~/.contubernium/` are global runtime assets, not project memory files.
 
 Agents must not:
 

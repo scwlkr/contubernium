@@ -1,273 +1,212 @@
-Here is your **`docs/doctrine.md`** — this is the *human-readable truth* of Contubernium.
-
-It complements `AGENTS.md` (strict rules) with **clarity, intent, and philosophy** without becoming fluff.
-
----
-
-```md
 # Contubernium Doctrine
 
 ## 1. What Contubernium Is
 
-Contubernium is a **commander-led AI execution system** designed to take a project from idea to structured, working reality.
+Contubernium is a commander-led AI execution system for taking a project from idea to structured, working reality.
 
 It is not a chatbot.
-
 It is not a general-purpose assistant.
-
-It is a **project conquest system** that:
-- understands a project
-- designs its structure
-- executes technical work
-- maintains coherence over time
-
-The system operates locally-first, leveraging AI models as tools within a controlled execution loop.
-
----
+It is a project execution system built around controlled delegation.
 
 ## 2. Core Philosophy
 
 Contubernium is built on one principle:
 
-> **Clear command, disciplined execution.**
+> Clear command, disciplined execution.
 
-This is enforced through:
+That principle is enforced through:
 
-- a single commander (`decanus`)
-- specialized agents with strict roles
-- a controlled loop of execution
-- explicit state tracking
+- one commander: `decanus`
+- specialist tools with strict roles
+- an explicit execution loop
+- visible state and logs
 - minimal ambiguity in responsibility
 
 The system rejects:
-- agent chaos
-- vague collaboration
-- uncontrolled autonomy
-- “just try things” behavior
 
----
+- vague multi-agent autonomy
+- hidden behavior
+- uncontrolled side effects
+- role overlap that weakens accountability
 
-## 3. The Commander Model
+## 3. Commander Model
 
 All work flows through `decanus`.
 
 `decanus`:
+
 - interprets the mission
 - breaks it into tasks
-- selects the correct specialist
+- selects the correct specialist when needed
 - evaluates results
 - determines completion
 
-No other agent:
-- owns the mission
-- decides final outcomes
-- operates independently of command
+No other agent owns the mission or final outcome.
 
-This ensures:
-- consistency
-- accountability
-- predictable execution
+## 4. Specialist And Helper Model
 
----
+All non-`decanus` agents are tools, not peers.
 
-## 4. Specialist Model
+They:
 
-All other agents are **tools, not peers**.
+- operate in narrow scope
+- perform a single assigned objective
+- return structured results to `decanus`
 
-Each agent:
-- has a narrow domain
-- performs scoped work
-- returns results to `decanus`
+The constitutional core target is 8 total agents including `decanus`.
+If the installed asset set temporarily contains more than 7 non-`decanus` agents during alignment work, the extras are helper agents rather than additional core peers.
 
-Agents do not:
-- chain tasks freely
-- redefine scope
-- override system direction
+Helper agents still:
 
-This creates:
-- modular execution
-- easier debugging
-- reliable composition
+- do not orchestrate
+- do not own the mission
+- do not override commander-first control
 
----
+## 5. Execution Loop
 
-## 5. The Execution Loop
+Contubernium runs on the same loop everywhere:
 
-Contubernium operates through a continuous loop:
-
-Think → Tool → Result → Think → Finish
+Think -> Tool -> Result -> Think -> Finish
 
 In practice:
 
-1. The user provides a mission
+1. the user provides a mission
 2. `decanus` interprets and plans
-3. A specialist is invoked if needed
-4. The specialist returns results
+3. a specialist is invoked if needed
+4. the specialist returns results
 5. `decanus` evaluates and continues or completes
 
-This loop continues until:
+The loop ends only when:
+
 - the mission is complete
 - the system is blocked
-- user input or approval is required
+- approval or user input is required
 
----
+## 6. Memory Model
 
-## 6. Project Lifecycle Ownership
+Contubernium uses three constitutional memory tiers mapped onto the current local project files.
 
-Contubernium is designed to handle the full lifecycle of a project:
+Mission memory:
 
-### 1. Ingest
-- read local files or external sources
-- understand structure, purpose, and constraints
+- `.contubernium/state.json`
+- `.contubernium/logs/` as the durable per-run execution trace
 
-### 2. Design
-- define architecture, stack, and system layout
-- establish branding and structure if needed
-- estimate cost and operational complexity
+Project memory:
 
-### 3. Execute
-- write and modify code
-- create systems and integrations
-- perform structured changes to the project
+- `.contubernium/ARCHITECTURE.md`
+- `.contubernium/PLAN.md`
+- `.contubernium/PROJECT_CONTEXT.md`
+- `.contubernium/project.md`
 
-### 4. Maintain
-- update documentation
-- track project state
-- refine systems over time
+Global memory:
 
-The system does not stop at ideas.  
-It is responsible for **follow-through**.
+- the current runtime-loaded global layer at `.contubernium/global.md`
 
----
+Important distinction:
 
-## 7. Memory Model
+- `~/.contubernium/` is the installed global asset home
+- it provides agents, shared patterns, adapters, templates, and preserved home-level state
+- it is not the project-local scaffold created by `contubernium init`
 
-Contubernium uses **layered memory**:
+Only validated information becomes canonical memory.
+Speculative or temporary data must not be persisted.
 
-### Mission Memory
-- active task state
-- loop progress
-- current context
+## 7. Installed Assets And Project Layout
 
-### Project Memory
-- architecture
-- system decisions
-- structure and conventions
+Contubernium separates installed assets from project state.
 
-### Global Memory
-- reusable knowledge
-- patterns and defaults
+Installed home layout lives under `~/.contubernium/` and contains:
 
-Memory rules:
-- only validated information becomes canonical
-- speculative or temporary data must not be persisted
-- `decanus` controls what becomes permanent
+- `agents/`
+- `shared/`
+- `adapters/`
+- `templates/`
 
----
+Initialized project layout lives under the working directory and contains:
+
+- `.contubernium/state.json`
+- `.contubernium/config.json`
+- `.contubernium/ARCHITECTURE.md`
+- `.contubernium/PLAN.md`
+- `.contubernium/PROJECT_CONTEXT.md`
+- `.contubernium/project.md`
+- `.contubernium/global.md`
+- `.contubernium/logs/`
+
+Project-local `.agents/` and `.contubernium/prompts/` are legacy assumptions, not the canonical runtime layout.
 
 ## 8. Execution Boundaries
 
-Contubernium is allowed to:
+Contubernium may:
+
 - read files
 - write code
 - run commands
 - use APIs
 
-However, it must:
+Contubernium must:
+
 - request approval before risky actions
 - avoid destructive or irreversible changes without confirmation
-- remain transparent in what it is doing
+- remain explicit about intended side effects
 
-Safety is enforced through:
-- explicit approval gates
-- visible intent before execution
+Safety is enforced through visible approvals and traceable logs.
 
----
-
-## 9. Local-First Principle
+## 9. Local-First Runtime
 
 Contubernium is designed to operate:
+
 - locally by default
-- without dependency on external cloud systems
+- with Zig as the authoritative runtime
+- with Ollama as the primary local backend
 
-Cloud models may be used:
-- when explicitly enabled
-- as fallback or augmentation
+OpenAI-compatible backends are allowed, but core behavior must not depend on cloud availability.
 
-The system must remain:
-- portable
-- self-contained
-- reproducible
+## 10. Interface Scope
 
----
+The primary interface is the OpenTUI terminal interface.
 
-## 10. Interface Philosophy
+Other interfaces are adapters and must not redefine core behavior.
 
-The primary interface is the **OpenTUI terminal interface**.
-
-This is intentional:
-- it keeps the system close to the developer
-- it avoids unnecessary abstraction
-- it prioritizes control over convenience
-
-Other interfaces (e.g., Telegram) are:
-- secondary
-- adapters, not replacements
-
----
+`USER_MANUAL.md` is the operator-facing feature manual for shipped behavior.
 
 ## 11. System Discipline
 
 Contubernium prioritizes:
 
-1. clarity over cleverness  
-2. structure over flexibility  
-3. control over autonomy  
-4. execution over discussion  
+1. clarity over cleverness
+2. structure over flexibility
+3. control over autonomy
+4. execution over discussion
 
-The system avoids:
-- feature sprawl
-- overlapping responsibilities
-- hidden behavior
+Every part of the system should remain:
 
-Every part of the system should be:
 - explainable
 - predictable
 - intentional
 
----
-
 ## 12. Non-Goals
 
-Contubernium is not intended to be:
+Contubernium is not:
 
 - a general AI assistant
-- a conversational tool for casual use
-- a replacement for human judgment
-- an unconstrained autonomous agent system
+- a casual conversation tool
+- a UI-first product
+- an unconstrained agent swarm
 
-It is a **focused system for building and executing projects**.
+## 13. Definition Of Success
 
----
+Contubernium succeeds when:
 
-## 13. Definition of Success
-
-Contubernium is successful when:
-
-- a project can be taken from idea → structured system → working implementation
+- a project moves from idea to structure to working implementation
 - decisions remain consistent over time
-- the system does not degrade into chaos as complexity grows
-- users can rely on it to execute, not just suggest
-
----
+- complexity does not degrade into chaos
+- users can rely on execution, not just suggestions
 
 ## 14. Final Principle
 
 > The strength of Contubernium is not intelligence.
->  
+>
 > It is discipline.
 
-Every design decision should reinforce:
-- clear roles
-- controlled execution
-- reliable outcomes
+Every design decision should reinforce clear roles, controlled execution, and reliable outcomes.

@@ -27,13 +27,19 @@ At no point does control leave `decanus`.
 
 ---
 
-# ⚔️ The Roster
+# ⚔️ Agent Model
 
 ## Commander
 
 - **decanus** — mission owner, planner, orchestrator, and final authority
 
-## Specialists (Tools)
+## Constitutional Alignment Note
+
+- the constitutional core target is 8 total agents including `decanus`
+- the source tree currently carries additional specialist assets during alignment work
+- any installed non-`decanus` asset beyond the final core set is a helper agent, not a peer commander
+
+## Installed Specialist Assets
 
 - **faber** — backend, APIs, data systems
 - **artifex** — frontend, UI, interaction
@@ -116,26 +122,42 @@ This makes the system:
 
 ---
 
-# 🧠 Memory Model
+# 🧠 Memory And Assets
 
-Contubernium uses layered memory:
+Contubernium separates installed runtime assets from project-local memory.
 
+Installed global home:
+
+```text
+~/.contubernium/
+  agents/
+  shared/
+  adapters/
+  templates/
+  global.md
 ```
+
+Initialized project:
+
+```text
 .contubernium/
-state.json      # mission state (live loop)
-ARCHITECTURE.md # system structure and decisions
-PLAN.md         # current execution order and progress
-PROJECT_CONTEXT.md # local goals, constraints, and conventions
-project.md      # project-level knowledge
-global.md       # reusable patterns
-config.json     # runtime configuration
-logs/           # structured JSON run logs
+  state.json
+  config.json
+  ARCHITECTURE.md
+  PLAN.md
+  PROJECT_CONTEXT.md
+  project.md
+  global.md
+  logs/
 ```
 
-Rules:
-- `decanus` owns mission state
-- only validated information becomes permanent
-- no speculative memory writes
+Constitutional memory tiers map onto the current project files like this:
+
+- mission memory: `.contubernium/state.json` plus `.contubernium/logs/`
+- project memory: `.contubernium/ARCHITECTURE.md`, `.contubernium/PLAN.md`, `.contubernium/PROJECT_CONTEXT.md`, `.contubernium/project.md`
+- global memory: the current runtime-loaded layer at `.contubernium/global.md`
+
+Project-local `.agents/` and `.contubernium/prompts/` are not part of the canonical `contubernium init` scaffold.
 
 ---
 
@@ -179,7 +201,7 @@ No silent execution of risky operations.
 
 ---
 
-# 📁 Repository Structure
+# 📁 Source Repository
 
 ```
 .agents/
@@ -212,6 +234,7 @@ docs/
 doctrine.md
 agent-contracts.md
 invocation-protocol.md
+installation.md
 
 src/
 ```
@@ -229,6 +252,8 @@ cd contubernium
 ```
 
 `install.sh` installs the CLI onto your `PATH`, syncs the global Contubernium home into `~/.contubernium/`, and installs the bundled OpenTUI frontend in `~/.contubernium/opentui/`.
+
+Current shipped behavior and operator-facing feature notes live in [USER_MANUAL.md](/Users/shanewalker/Desktop/dev/Contubernium/USER_MANUAL.md).
 
 ## Run
 
@@ -265,13 +290,15 @@ contubernium init
   logs/
 ```
 
+It does not create a project-local `.agents/` tree or `.contubernium/prompts/`.
+
 If you need a Bash-only fallback from a source checkout, run:
 
 ```bash
 ./init.sh /path/to/project
 ```
 
-See [docs/installation.md](/Users/shanewalker/Desktop/dev/Contubernium/docs/installation.md) for the full install and initialization flow.
+See [docs/installation.md](/Users/shanewalker/Desktop/dev/Contubernium/docs/installation.md) for the full install and initialization flow and [USER_MANUAL.md](/Users/shanewalker/Desktop/dev/Contubernium/USER_MANUAL.md) for shipped operator-facing behavior.
 
 ---
 

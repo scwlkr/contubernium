@@ -2,7 +2,8 @@
 
 > Historical planning note:
 > This guide includes older references to project-local prompt assets.
-> The implemented runtime now loads global agent assets and keeps project-local files limited to context and memory.
+> The implemented runtime now loads global-home agent/shared assets and keeps project-local files limited to memory and runtime state.
+> Use [USER_MANUAL.md](/Users/shanewalker/Desktop/dev/Contubernium/USER_MANUAL.md) for the operator-facing record of shipped behavior.
 
 ## Goal
 
@@ -37,11 +38,14 @@ This prepares:
 
 - `.contubernium/config.json`
 - `.contubernium/state.json`
+- `.contubernium/ARCHITECTURE.md`
+- `.contubernium/PLAN.md`
+- `.contubernium/PROJECT_CONTEXT.md`
 - `.contubernium/project.md`
 - `.contubernium/global.md`
-- `.contubernium/prompts/`
 - `.contubernium/logs/`
-- `.agents/`
+
+It does not create a project-local `.agents/` tree or `.contubernium/prompts/`.
 
 If you need a Bash-only fallback from a source checkout, run:
 
@@ -84,6 +88,14 @@ contubernium doctor
 ```
 
 This should pass before real missions are attempted.
+
+`doctor` verifies:
+
+- global agent and shared assets
+- required project memory files
+- backend reachability
+- configured model availability
+- structured output behavior
 
 ### 7. Start a mission
 
@@ -143,7 +155,7 @@ Keyboard controls:
 - `PageUp` / `PageDown` scroll faster
 - `Left` / `Right` move inside the input field
 - `Ctrl+C` interrupts the active loop or exits when idle
-- `y` / `n` responds to approval prompts for guarded actions
+- approval prompts are handled inline in the OpenTUI flow
 
 ## Day-To-Day Commands
 

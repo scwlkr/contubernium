@@ -2,7 +2,8 @@
 
 > Historical planning note:
 > This spec predates the global-agent architecture.
-> The current runtime loads global agent assets and project-local context files rather than copying prompts or local agent definitions into each project.
+> The current runtime loads global-home agent/shared assets and project-local memory files rather than copying prompts or local agent definitions into each project.
+> Use [USER_MANUAL.md](/Users/shanewalker/Desktop/dev/Contubernium/USER_MANUAL.md) for the operator-facing record of shipped behavior.
 
 ## Purpose
 
@@ -29,16 +30,20 @@ Supported commands:
 `init`
 - Creates `.contubernium/config.json` if missing.
 - Creates `.contubernium/state.json` if missing.
+- Creates `.contubernium/ARCHITECTURE.md` if missing.
+- Creates `.contubernium/PLAN.md` if missing.
+- Creates `.contubernium/PROJECT_CONTEXT.md` if missing.
 - Creates `.contubernium/project.md` if missing.
 - Creates `.contubernium/global.md` if missing.
-- Creates `.contubernium/prompts/` from embedded assets if missing.
 - Creates `.contubernium/logs/` if missing.
-- Creates `.agents/` from embedded agent assets if missing.
+- Does not create a project-local `.agents/` tree.
+- Does not create `.contubernium/prompts/`.
 
 `doctor`
 - Auto-scaffolds `.contubernium/` if it is missing.
 - Loads config and state.
-- Verifies prompt assets.
+- Verifies global agent and shared assets.
+- Verifies required project memory files.
 - Verifies backend reachability.
 - Verifies configured model availability.
 - Runs a structured-output smoke test.
@@ -102,19 +107,31 @@ Supported commands:
 - `Ctrl+D` denies the active approval prompt when an approval prompt is active.
 - `Esc` exits OpenTUI.
 
-## File Layout
+## Runtime Layout
+
+Installed global asset home:
+
+- `~/.contubernium/agents/`
+- `~/.contubernium/shared/`
+- `~/.contubernium/adapters/`
+- `~/.contubernium/templates/`
+
+Source fallback when running from a checkout without installed home assets:
+
+- `.agents/`
+- `shared/`
+- `adapters/`
+
+Project-local files:
 
 - `.contubernium/state.json`
+- `.contubernium/config.json`
+- `.contubernium/ARCHITECTURE.md`
+- `.contubernium/PLAN.md`
+- `.contubernium/PROJECT_CONTEXT.md`
 - `.contubernium/project.md`
 - `.contubernium/global.md`
-- `.contubernium/config.json`
-- `.contubernium/prompts/`
 - `.contubernium/logs/`
-- `.agents/AGENT_LOOP.md`
-- `.agents/<agent>/SOUL.md`
-- `.agents/<agent>/CONTRACT.md`
-- `.agents/<agent>/SKILL.md`
-- `docs/`
 
 ## Runtime Config Shape
 
@@ -139,10 +156,12 @@ Supported commands:
   },
   "paths": {
     "state_file": ".contubernium/state.json",
-    "prompts_dir": ".contubernium/prompts",
     "logs_dir": ".contubernium/logs",
     "project_memory_file": ".contubernium/project.md",
-    "global_memory_file": ".contubernium/global.md"
+    "global_memory_file": ".contubernium/global.md",
+    "architecture_file": ".contubernium/ARCHITECTURE.md",
+    "plan_file": ".contubernium/PLAN.md",
+    "project_context_file": ".contubernium/PROJECT_CONTEXT.md"
   },
   "policy": {
     "approval_mode": "guarded",
@@ -224,22 +243,32 @@ Add `runtime_session` to `.contubernium/state.json`:
 
 ## Prompt Loading Rules
 
-Required files:
+Asset root resolution order:
 
-- `.contubernium/prompts/shared/base.md`
-- `.contubernium/prompts/shared/tool-policy.md`
-- `.contubernium/prompts/shared/decanus-schema.json`
-- `.contubernium/prompts/shared/specialist-schema.json`
-- `.contubernium/prompts/decanus.md`
-- one prompt file per specialist agent
+1. installed global home under `~/.contubernium/`
+2. source checkout fallback when the installed home is unavailable
+
+Required assets:
+
+- `shared/patterns/RUNTIME_BASE.md`
+- `shared/patterns/TOOL_POLICY.md`
+- `shared/templates/DECANUS_DECISION_SCHEMA.json`
+- `shared/templates/SPECIALIST_RESULT_SCHEMA.json`
+- `agents/<actor>/SOUL.md`
+- `agents/<actor>/CONTRACT.md`
+- `agents/<actor>/SKILL.md`
+- selected action docs under `agents/<actor>/actions/`
 
 Prompt assembly order:
 
 1. shared base instructions
 2. shared tool policy
-3. actor-specific role prompt
-4. JSON schema reference
-5. live mission/state slice
+3. actor `SOUL.md`
+4. actor `CONTRACT.md`
+5. actor `SKILL.md`
+6. selected action docs
+7. JSON schema reference
+8. live mission/state and memory slice
 
 ## Adapter Contract
 
