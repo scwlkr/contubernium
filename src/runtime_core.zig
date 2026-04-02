@@ -6,11 +6,14 @@ pub const runtime_dir_name = ".contubernium";
 pub const default_state_path = ".contubernium/state.json";
 pub const default_config_path = ".contubernium/config.json";
 pub const default_logs_dir = ".contubernium/logs";
+pub const default_sessions_dir = ".contubernium/sessions";
+pub const default_session_index_path = ".contubernium/sessions/index.json";
 pub const default_project_memory_path = ".contubernium/project.md";
 pub const default_global_memory_path = ".contubernium/global.md";
 pub const default_architecture_path = ".contubernium/ARCHITECTURE.md";
 pub const default_plan_path = ".contubernium/PLAN.md";
 pub const default_project_context_path = ".contubernium/PROJECT_CONTEXT.md";
+pub const global_session_index_filename = "session-index.json";
 pub const max_list_files_entries = 400;
 pub const legacy_default_max_iterations = 12;
 pub const default_max_iterations = 24;
@@ -130,6 +133,8 @@ pub const RuntimeModelPolicyLog = struct {
 pub const PathsConfig = struct {
     state_file: []const u8 = default_state_path,
     logs_dir: []const u8 = default_logs_dir,
+    sessions_dir: []const u8 = default_sessions_dir,
+    session_index_file: []const u8 = default_session_index_path,
     project_memory_file: []const u8 = default_project_memory_path,
     global_memory_file: []const u8 = default_global_memory_path,
     architecture_file: []const u8 = default_architecture_path,
@@ -239,6 +244,11 @@ pub const RuntimeSession = struct {
     last_model_role: []const u8 = "",
     last_model_reason: []const u8 = "",
     approval_mode: []const u8 = "guarded",
+    session_id: []const u8 = "",
+    session_started_at: []const u8 = "",
+    session_updated_at: []const u8 = "",
+    approval_bypass_enabled: bool = false,
+    resume_count: usize = 0,
     active_approval: ApprovalRequest = .{},
     current_turn_id: []const u8 = "",
     last_health_check: []const u8 = "",
@@ -577,7 +587,7 @@ pub const StateManager = struct {
         self.state.runtime_session.primary_model = model_policy.primary.model;
         self.state.runtime_session.primary_endpoint = model_policy.primary.base_url;
         self.state.runtime_session.policy_strategy = model_policy.strategy;
-        self.state.runtime_session.approval_mode = config.policy.approval_mode;
+        self.state.runtime_session.approval_mode = resolvedApprovalMode(config.policy.approval_mode, self.state.runtime_session.approval_bypass_enabled);
         self.state.runtime_session.context_budget.context_window_tokens = config.context.estimated_context_window_tokens;
         self.state.runtime_session.context_budget.response_reserve_tokens = config.context.response_reserve_tokens;
         if (self.state.runtime_session.context_budget.estimated_prompt_tokens == 0) {
@@ -603,7 +613,7 @@ pub const StateManager = struct {
         self.state.runtime_session.policy_strategy = model_policy.strategy;
         self.state.runtime_session.last_model_role = "";
         self.state.runtime_session.last_model_reason = "";
-        self.state.runtime_session.approval_mode = config.policy.approval_mode;
+        self.state.runtime_session.approval_mode = resolvedApprovalMode(config.policy.approval_mode, self.state.runtime_session.approval_bypass_enabled);
         self.state.runtime_session.last_actor = self.state.current_actor;
         self.state.runtime_session.current_turn_id = try makeTurnId(
             allocator,
@@ -914,7 +924,7 @@ pub const StateManager = struct {
         self.state.runtime_session.primary_model = model_policy.primary.model;
         self.state.runtime_session.primary_endpoint = model_policy.primary.base_url;
         self.state.runtime_session.policy_strategy = model_policy.strategy;
-        self.state.runtime_session.approval_mode = config.policy.approval_mode;
+        self.state.runtime_session.approval_mode = resolvedApprovalMode(config.policy.approval_mode, self.state.runtime_session.approval_bypass_enabled);
         self.clearFailure();
     }
 
@@ -959,6 +969,66 @@ pub const RuntimeRunLog = struct {
     approval_mode: []const u8 = "",
     mission_prompt: []const u8 = "",
     events: []const RuntimeLogEvent = &.{},
+};
+
+pub const SessionRecord = struct {
+    format_version: usize = 1,
+    session_id: []const u8 = "",
+    project_id: []const u8 = "",
+    project_label: []const u8 = "",
+    created_at: []const u8 = "",
+    updated_at: []const u8 = "",
+    command: []const u8 = "",
+    mission_prompt: []const u8 = "",
+    provider: []const u8 = "",
+    model: []const u8 = "",
+    approval_mode: []const u8 = "guarded",
+    approval_bypass_enabled: bool = false,
+    resume_count: usize = 0,
+    status: []const u8 = "idle",
+    last_log_path: []const u8 = "",
+    run_log_paths: []const []const u8 = &.{},
+    last_error: []const u8 = "",
+    state_snapshot: AppState = .{},
+};
+
+pub const SessionIndexEntry = struct {
+    session_id: []const u8 = "",
+    project_id: []const u8 = "",
+    project_label: []const u8 = "",
+    created_at: []const u8 = "",
+    updated_at: []const u8 = "",
+    command: []const u8 = "",
+    status: []const u8 = "idle",
+    provider: []const u8 = "",
+    model: []const u8 = "",
+    approval_mode: []const u8 = "guarded",
+    approval_bypass_enabled: bool = false,
+    resume_count: usize = 0,
+    mission_prompt_excerpt: []const u8 = "",
+    last_error: []const u8 = "",
+};
+
+pub const SessionIndex = struct {
+    format_version: usize = 1,
+    current_session_id: []const u8 = "",
+    sessions: []const SessionIndexEntry = &.{},
+};
+
+pub const GlobalSessionIndexEntry = struct {
+    session_id: []const u8 = "",
+    project_id: []const u8 = "",
+    project_label: []const u8 = "",
+    created_at: []const u8 = "",
+    updated_at: []const u8 = "",
+    status: []const u8 = "idle",
+    provider: []const u8 = "",
+    model: []const u8 = "",
+};
+
+pub const GlobalSessionIndex = struct {
+    format_version: usize = 1,
+    sessions: []const GlobalSessionIndexEntry = &.{},
 };
 
 pub const RuntimeLogEvent = struct {
@@ -1421,6 +1491,11 @@ pub fn resolvedContextBudget(config: ContextConfig, budget: ContextBudgetState) 
     return resolved;
 }
 
+pub fn resolvedApprovalMode(base_mode: []const u8, approval_bypass_enabled: bool) []const u8 {
+    if (approval_bypass_enabled) return "session-bypass";
+    return base_mode;
+}
+
 pub fn providerUsesOpenAICompatibleTransport(provider: ProviderConfig) bool {
     return eql(provider.type, "openai-compatible") or eql(provider.type, "openrouter");
 }
@@ -1470,7 +1545,10 @@ pub fn buildStateSnapshot(config: AppConfig, state: AppState, project_name: []co
     const budget = resolvedContextBudget(config.context, state.runtime_session.context_budget);
     return .{
         .project_name = project_name,
-        .approval_mode = config.policy.approval_mode,
+        .approval_mode = if (state.runtime_session.approval_mode.len > 0)
+            state.runtime_session.approval_mode
+        else
+            resolvedApprovalMode(config.policy.approval_mode, state.runtime_session.approval_bypass_enabled),
         .global_status = state.global_status,
         .runtime_status = state.runtime_session.status,
         .loop_status = state.agent_loop.status,

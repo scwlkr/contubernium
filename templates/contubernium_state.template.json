@@ -32,6 +32,11 @@
     "model": "",
     "endpoint": "",
     "approval_mode": "guarded",
+    "session_id": "",
+    "session_started_at": "",
+    "session_updated_at": "",
+    "approval_bypass_enabled": false,
+    "resume_count": 0,
     "active_approval": {
       "status": "idle",
       "kind": "read",

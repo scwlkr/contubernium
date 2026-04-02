@@ -8,11 +8,14 @@ const runtime_dir_name = core.runtime_dir_name;
 const default_state_path = core.default_state_path;
 const default_config_path = core.default_config_path;
 const default_logs_dir = core.default_logs_dir;
+const default_sessions_dir = core.default_sessions_dir;
+const default_session_index_path = core.default_session_index_path;
 const default_project_memory_path = core.default_project_memory_path;
 const default_global_memory_path = core.default_global_memory_path;
 const default_architecture_path = core.default_architecture_path;
 const default_plan_path = core.default_plan_path;
 const default_project_context_path = core.default_project_context_path;
+const global_session_index_filename = core.global_session_index_filename;
 const max_list_files_entries = core.max_list_files_entries;
 const legacy_default_max_iterations = core.legacy_default_max_iterations;
 const default_max_iterations = core.default_max_iterations;
@@ -82,6 +85,11 @@ const StateManager = core.StateManager;
 const ToolExecutionOutcome = core.ToolExecutionOutcome;
 const ToolRequestExecution = core.ToolRequestExecution;
 const RuntimeRunLog = core.RuntimeRunLog;
+const SessionRecord = core.SessionRecord;
+const SessionIndexEntry = core.SessionIndexEntry;
+const SessionIndex = core.SessionIndex;
+const GlobalSessionIndexEntry = core.GlobalSessionIndexEntry;
+const GlobalSessionIndex = core.GlobalSessionIndex;
 const RuntimeLogEvent = core.RuntimeLogEvent;
 const RuntimeLogEventSpec = core.RuntimeLogEventSpec;
 const ChatTone = core.ChatTone;
@@ -118,6 +126,7 @@ const OpenAIToolCall = core.OpenAIToolCall;
 const OpenAIToolFunction = core.OpenAIToolFunction;
 const usablePromptTokenWindow = core.usablePromptTokenWindow;
 const ensureLoopBudget = core.ensureLoopBudget;
+const resolvedApprovalMode = core.resolvedApprovalMode;
 const resolvedContextBudget = core.resolvedContextBudget;
 const resolveModelPolicy = core.resolveModelPolicy;
 const syncConfigProviderMirrors = core.syncConfigProviderMirrors;
@@ -234,9 +243,16 @@ pub const EmbeddedAsset = struct {
     content: []const u8,
 };
 
+pub const ProjectIdentity = struct {
+    project_root: []const u8,
+    project_id: []const u8,
+    project_label: []const u8,
+};
+
 pub const embedded_assets = [_]EmbeddedAsset{
     .{ .relative_path = "state.json", .content = embedded.state_json },
     .{ .relative_path = "config.json", .content = embedded.config_json },
+    .{ .relative_path = "sessions/index.json", .content = embedded.session_index_json },
     .{ .relative_path = "project.md", .content = embedded.project_memory_md },
     .{ .relative_path = "global.md", .content = embedded.global_memory_md },
     .{ .relative_path = "ARCHITECTURE.md", .content = embedded.architecture_md },
@@ -332,6 +348,318 @@ pub fn saveRuntimeRunLog(allocator: std.mem.Allocator, path: []const u8, log: Ru
     var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
     defer file.close();
     try file.writeAll(rendered);
+}
+
+pub fn loadSessionIndex(allocator: std.mem.Allocator, path: []const u8) !SessionIndex {
+    const data = std.fs.cwd().readFileAlloc(allocator, path, max_file_bytes) catch |err| switch (err) {
+        error.FileNotFound => return .{},
+        else => return err,
+    };
+    return try parseJson(SessionIndex, allocator, data);
+}
+
+pub fn saveSessionIndex(allocator: std.mem.Allocator, path: []const u8, index: SessionIndex) !void {
+    const rendered = try std.fmt.allocPrint(
+        allocator,
+        "{f}",
+        .{std.json.fmt(index, .{ .whitespace = .indent_2 })},
+    );
+    defer allocator.free(rendered);
+    if (std.fs.path.dirname(path)) |dir_name| {
+        try std.fs.cwd().makePath(dir_name);
+    }
+    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(rendered);
+}
+
+pub fn loadSessionRecord(allocator: std.mem.Allocator, path: []const u8) !SessionRecord {
+    const data = try std.fs.cwd().readFileAlloc(allocator, path, max_file_bytes);
+    return try parseJson(SessionRecord, allocator, data);
+}
+
+pub fn saveSessionRecord(allocator: std.mem.Allocator, path: []const u8, record: SessionRecord) !void {
+    const rendered = try std.fmt.allocPrint(
+        allocator,
+        "{f}",
+        .{std.json.fmt(record, .{ .whitespace = .indent_2 })},
+    );
+    defer allocator.free(rendered);
+    if (std.fs.path.dirname(path)) |dir_name| {
+        try std.fs.cwd().makePath(dir_name);
+    }
+    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(rendered);
+}
+
+pub fn loadGlobalSessionIndex(allocator: std.mem.Allocator, path: []const u8) !GlobalSessionIndex {
+    const data = std.fs.cwd().readFileAlloc(allocator, path, max_file_bytes) catch |err| switch (err) {
+        error.FileNotFound => return .{},
+        else => return err,
+    };
+    return try parseJson(GlobalSessionIndex, allocator, data);
+}
+
+pub fn saveGlobalSessionIndex(allocator: std.mem.Allocator, path: []const u8, index: GlobalSessionIndex) !void {
+    const rendered = try std.fmt.allocPrint(
+        allocator,
+        "{f}",
+        .{std.json.fmt(index, .{ .whitespace = .indent_2 })},
+    );
+    defer allocator.free(rendered);
+    if (std.fs.path.dirname(path)) |dir_name| {
+        try std.fs.cwd().makePath(dir_name);
+    }
+    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(rendered);
+}
+
+pub fn makeSessionId(allocator: std.mem.Allocator) ![]const u8 {
+    return try std.fmt.allocPrint(allocator, "session-{d}", .{std.time.milliTimestamp()});
+}
+
+pub fn sessionIdIsSafe(session_id: []const u8) bool {
+    const trimmed = trimAscii(session_id);
+    if (trimmed.len == 0) return false;
+    if (std.mem.indexOfScalar(u8, trimmed, '/')) |_| return false;
+    if (std.mem.indexOfScalar(u8, trimmed, '\\')) |_| return false;
+    return std.mem.indexOf(u8, trimmed, "..") == null;
+}
+
+pub fn sessionRecordPath(allocator: std.mem.Allocator, sessions_dir: []const u8, session_id: []const u8) ![]const u8 {
+    if (!sessionIdIsSafe(session_id)) return error.InvalidSessionId;
+    return try std.fmt.allocPrint(allocator, "{s}/{s}.json", .{ sessions_dir, trimAscii(session_id) });
+}
+
+pub fn resolveGlobalSessionIndexPath(allocator: std.mem.Allocator) ![]const u8 {
+    const home = try resolveContuberniumHome(allocator);
+    defer allocator.free(home);
+    return try std.fs.path.join(allocator, &.{ home, global_session_index_filename });
+}
+
+pub fn resolveProjectIdentity(allocator: std.mem.Allocator) !ProjectIdentity {
+    const project_root = try std.fs.cwd().realpathAlloc(allocator, ".");
+    errdefer allocator.free(project_root);
+    return .{
+        .project_root = project_root,
+        .project_id = try std.fmt.allocPrint(allocator, "project-{x}", .{std.hash.Wyhash.hash(0, project_root)}),
+        .project_label = try allocator.dupe(u8, std.fs.path.basename(project_root)),
+    };
+}
+
+fn sessionPromptExcerpt(allocator: std.mem.Allocator, prompt: []const u8) ![]const u8 {
+    return try truncateOwnedText(allocator, try allocator.dupe(u8, prompt), 120);
+}
+
+fn mergedSessionLogPaths(
+    allocator: std.mem.Allocator,
+    existing_paths: []const []const u8,
+    active_log_path: []const u8,
+) ![]const []const u8 {
+    var items: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (items.items) |item| allocator.free(item);
+        items.deinit(allocator);
+    }
+
+    if (active_log_path.len > 0) {
+        try items.append(allocator, try allocator.dupe(u8, active_log_path));
+    }
+    for (existing_paths) |path| {
+        if (containsString(items.items, path)) continue;
+        try items.append(allocator, try allocator.dupe(u8, path));
+    }
+    return try items.toOwnedSlice(allocator);
+}
+
+fn upsertSessionIndexEntry(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    current_session_id: []const u8,
+    entry: SessionIndexEntry,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const existing = try loadSessionIndex(scratch, path);
+    var sessions: std.ArrayList(SessionIndexEntry) = .empty;
+    errdefer sessions.deinit(allocator);
+
+    try sessions.append(allocator, entry);
+    for (existing.sessions) |session| {
+        if (eql(session.session_id, entry.session_id)) continue;
+        try sessions.append(allocator, .{
+            .session_id = try allocator.dupe(u8, session.session_id),
+            .project_id = try allocator.dupe(u8, session.project_id),
+            .project_label = try allocator.dupe(u8, session.project_label),
+            .created_at = try allocator.dupe(u8, session.created_at),
+            .updated_at = try allocator.dupe(u8, session.updated_at),
+            .command = try allocator.dupe(u8, session.command),
+            .status = try allocator.dupe(u8, session.status),
+            .provider = try allocator.dupe(u8, session.provider),
+            .model = try allocator.dupe(u8, session.model),
+            .approval_mode = try allocator.dupe(u8, session.approval_mode),
+            .approval_bypass_enabled = session.approval_bypass_enabled,
+            .resume_count = session.resume_count,
+            .mission_prompt_excerpt = try allocator.dupe(u8, session.mission_prompt_excerpt),
+            .last_error = try allocator.dupe(u8, session.last_error),
+        });
+    }
+
+    try saveSessionIndex(allocator, path, .{
+        .current_session_id = current_session_id,
+        .sessions = try sessions.toOwnedSlice(allocator),
+    });
+}
+
+fn upsertGlobalSessionIndexEntry(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    entry: GlobalSessionIndexEntry,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const existing = try loadGlobalSessionIndex(scratch, path);
+    var sessions: std.ArrayList(GlobalSessionIndexEntry) = .empty;
+    errdefer sessions.deinit(allocator);
+
+    try sessions.append(allocator, entry);
+    for (existing.sessions) |session| {
+        if (eql(session.session_id, entry.session_id)) continue;
+        try sessions.append(allocator, .{
+            .session_id = try allocator.dupe(u8, session.session_id),
+            .project_id = try allocator.dupe(u8, session.project_id),
+            .project_label = try allocator.dupe(u8, session.project_label),
+            .created_at = try allocator.dupe(u8, session.created_at),
+            .updated_at = try allocator.dupe(u8, session.updated_at),
+            .status = try allocator.dupe(u8, session.status),
+            .provider = try allocator.dupe(u8, session.provider),
+            .model = try allocator.dupe(u8, session.model),
+        });
+    }
+
+    try saveGlobalSessionIndex(allocator, path, .{
+        .sessions = try sessions.toOwnedSlice(allocator),
+    });
+}
+
+pub fn persistSessionMemory(
+    allocator: std.mem.Allocator,
+    config: AppConfig,
+    state: *AppState,
+    command: []const u8,
+) !void {
+    if (state.mission.initial_prompt.len == 0 and state.runtime_session.session_id.len == 0) return;
+
+    const now = try unixTimestampString(allocator);
+    if (state.runtime_session.session_id.len == 0) {
+        state.runtime_session.session_id = try makeSessionId(allocator);
+    }
+    if (state.runtime_session.session_started_at.len == 0) {
+        state.runtime_session.session_started_at = now;
+    }
+    state.runtime_session.session_updated_at = now;
+    state.runtime_session.approval_mode = resolvedApprovalMode(config.policy.approval_mode, state.runtime_session.approval_bypass_enabled);
+
+    const project_identity = try resolveProjectIdentity(allocator);
+    defer allocator.free(project_identity.project_root);
+    defer allocator.free(project_identity.project_id);
+    defer allocator.free(project_identity.project_label);
+
+    const record_path = try sessionRecordPath(allocator, config.paths.sessions_dir, state.runtime_session.session_id);
+    defer allocator.free(record_path);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const existing_record = loadSessionRecord(scratch, record_path) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => return err,
+    };
+
+    const run_log_paths = try mergedSessionLogPaths(
+        allocator,
+        if (existing_record) |record| record.run_log_paths else &.{},
+        if (state.runtime_session.active_log_path.len > 0)
+            state.runtime_session.active_log_path
+        else if (existing_record) |record|
+            record.last_log_path
+        else
+            "",
+    );
+
+    const command_text = if (command.len > 0)
+        command
+    else if (existing_record) |record|
+        record.command
+    else
+        "mission";
+
+    const provider_name = if (state.runtime_session.provider.len > 0) state.runtime_session.provider else config.provider.type;
+    const model_name = if (state.runtime_session.model.len > 0) state.runtime_session.model else config.provider.model;
+    const last_log_path = if (state.runtime_session.active_log_path.len > 0)
+        state.runtime_session.active_log_path
+    else if (existing_record) |record|
+        record.last_log_path
+    else
+        "";
+
+    const record: SessionRecord = .{
+        .session_id = state.runtime_session.session_id,
+        .project_id = project_identity.project_id,
+        .project_label = project_identity.project_label,
+        .created_at = if (existing_record) |value| value.created_at else state.runtime_session.session_started_at,
+        .updated_at = now,
+        .command = command_text,
+        .mission_prompt = state.mission.initial_prompt,
+        .provider = provider_name,
+        .model = model_name,
+        .approval_mode = state.runtime_session.approval_mode,
+        .approval_bypass_enabled = state.runtime_session.approval_bypass_enabled,
+        .resume_count = state.runtime_session.resume_count,
+        .status = @tagName(state.runtime_session.status),
+        .last_log_path = last_log_path,
+        .run_log_paths = run_log_paths,
+        .last_error = state.runtime_session.last_error,
+        .state_snapshot = state.*,
+    };
+    try saveSessionRecord(allocator, record_path, record);
+
+    try upsertSessionIndexEntry(allocator, config.paths.session_index_file, state.runtime_session.session_id, .{
+        .session_id = record.session_id,
+        .project_id = record.project_id,
+        .project_label = record.project_label,
+        .created_at = record.created_at,
+        .updated_at = record.updated_at,
+        .command = record.command,
+        .status = record.status,
+        .provider = record.provider,
+        .model = record.model,
+        .approval_mode = record.approval_mode,
+        .approval_bypass_enabled = record.approval_bypass_enabled,
+        .resume_count = record.resume_count,
+        .mission_prompt_excerpt = try sessionPromptExcerpt(allocator, record.mission_prompt),
+        .last_error = record.last_error,
+    });
+
+    const global_index_path = try resolveGlobalSessionIndexPath(allocator);
+    defer allocator.free(global_index_path);
+    try upsertGlobalSessionIndexEntry(allocator, global_index_path, .{
+        .session_id = record.session_id,
+        .project_id = record.project_id,
+        .project_label = record.project_label,
+        .created_at = record.created_at,
+        .updated_at = record.updated_at,
+        .status = record.status,
+        .provider = record.provider,
+        .model = record.model,
+    });
 }
 
 pub fn runDoctorCheck(allocator: std.mem.Allocator) ![]const u8 {
@@ -472,6 +800,7 @@ pub fn ensureGlobalAssetFiles(allocator: std.mem.Allocator, layout: GlobalAssetL
 
 pub fn ensureMemoryFiles(paths: PathsConfig) !void {
     const required = [_][]const u8{
+        paths.session_index_file,
         paths.architecture_file,
         paths.plan_file,
         paths.project_context_file,
@@ -816,6 +1145,7 @@ pub fn copyFileIfMissing(allocator: std.mem.Allocator, source_path: []const u8, 
 
 pub fn scaffoldProject(allocator: std.mem.Allocator) !void {
     try std.fs.cwd().makePath(default_logs_dir);
+    try std.fs.cwd().makePath(default_sessions_dir);
     for (embedded_assets) |asset| {
         const destination = try runtimePath(allocator, asset.relative_path);
         defer allocator.free(destination);
@@ -971,7 +1301,10 @@ pub fn initializeRuntimeRunLog(
         .provider = model_policy.primary.type,
         .model = model_policy.primary.model,
         .model_policy = runtimeModelPolicyLog(config),
-        .approval_mode = config.policy.approval_mode,
+        .approval_mode = if (state.runtime_session.approval_mode.len > 0)
+            state.runtime_session.approval_mode
+        else
+            resolvedApprovalMode(config.policy.approval_mode, state.runtime_session.approval_bypass_enabled),
         .mission_prompt = state.mission.initial_prompt,
         .events = &.{},
     };

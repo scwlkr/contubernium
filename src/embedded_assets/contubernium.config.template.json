@@ -45,6 +45,8 @@
   "paths": {
     "state_file": ".contubernium/state.json",
     "logs_dir": ".contubernium/logs",
+    "sessions_dir": ".contubernium/sessions",
+    "session_index_file": ".contubernium/sessions/index.json",
     "project_memory_file": ".contubernium/project.md",
     "global_memory_file": ".contubernium/global.md",
     "architecture_file": ".contubernium/ARCHITECTURE.md",
