@@ -321,6 +321,22 @@ Cloud-enabled mode:
 
 Run logs under `.contubernium/logs/` record the primary route, policy decisions, escalation reasons, and fallback usage for each mission.
 
+## Development Process
+
+Feature work follows the constitutional build order:
+
+1. add or update the test for the intended outcome first
+2. implement the behavior
+3. update [USER_MANUAL.md](/Users/shanewalker/Desktop/dev/Contubernium/USER_MANUAL.md) for the shipped behavior and record the verifying test in the `Feature And Test Ledger` table's `Current verification` column
+
+For runtime and CLI work, start verification with:
+
+```bash
+zig build test
+```
+
+See [CONTRIBUTING.md](/Users/shanewalker/Desktop/dev/Contubernium/CONTRIBUTING.md) for the contributor checklist and review gate. Until CI enforces this automatically, feature changes are not complete without both test coverage and the matching manual update.
+
 ---
 
 # 🧭 Usage

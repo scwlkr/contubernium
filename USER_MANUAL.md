@@ -4,13 +4,14 @@
 
 This manual is the operator-facing record of shipped behavior.
 
-Under the Constitution, every feature change should update this file with:
+Under the Constitution, every shipped feature change must update this file with:
 
 - the user-visible behavior
 - required setup or commands
 - the test coverage that verifies the behavior
 
 This file is a baseline scaffold. It should grow as constitutional alignment work lands.
+The `Feature And Test Ledger` section is the canonical place to record the verifying test reference for each shipped feature.
 
 ## Installation
 
@@ -109,7 +110,6 @@ Current approval behavior:
 - blocked command patterns fail immediately
 - failures surface canonical `code` / `cause` fields plus contextual metadata
 - `contubernium sessions approvals on|off` can enable or disable session-scoped approval bypass without changing project config defaults
- - failures surface canonical `code` / `cause` fields plus contextual metadata
 
 Current constitutional gap:
 
@@ -146,7 +146,9 @@ Current behavior:
 
 ## Feature And Test Ledger
 
-This section should be updated whenever behavior changes.
+Every shipped behavior change must add or update a row in this table.
+The `Current verification` column is the canonical place to record the test file and test name that verify the behavior.
+If behavior changes and no row changes here, the feature is not documented completely.
 
 | Feature | User-facing behavior | Current verification |
 | --- | --- | --- |
@@ -170,6 +172,7 @@ When a feature changes:
 
 1. add or update the test first
 2. implement the behavior
-3. update this manual with the new behavior and the test reference
+3. update the affected operator-facing section in this manual when commands, setup, or behavior changed
+4. add or update the matching `Feature And Test Ledger` row with the current test reference
 
 If a change cannot be described here, the feature is not documented well enough yet.
