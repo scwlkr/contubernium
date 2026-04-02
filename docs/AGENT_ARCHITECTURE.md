@@ -31,6 +31,14 @@ Each agent is composed of four layers:
 3. **SKILL** → capability map and execution logic  
 4. **ACTIONS** → granular execution units  
 
+### 2.1 Constitutional Topology
+
+- The authoritative core roster is 8 total agents including `decanus`.
+- The current 7 core specialists are `faber`, `artifex`, `architectus`, `tesserarius`, `explorator`, `signifer`, and `calo`.
+- The current helper agents are `praeco` and `mulus`.
+- Core agents and helper agents live side by side under the same `~/.contubernium/agents/` tree.
+- Helper agents remain callable tools, but they do not own default lane-routing authority.
+
 ---
 
 ## 3. Global vs Project Boundary
@@ -280,6 +288,8 @@ artifex::BUTTON
 architectus::SETUP_CI
 calo::WRITE_DOC
 ```
+
+Lane fallback is reserved for core specialists. Helper agents must be targeted explicitly as `agent` or `agent::ACTION`.
 
 ---
 

@@ -4,7 +4,7 @@
   "current_goal": "current mission focus",
   "agent_call": "optional: prefer bare agent names like faber; exact calls must match a real Contubernium action file such as faber::IMPLEMENT_BACKEND",
   "actor": "optional fallback actor name",
-  "lane": "optional fallback lane name: backend | frontend | systems | qa | research | brand | media | docs | bulk_ops",
+  "lane": "optional fallback core lane name: backend | frontend | systems | qa | research | brand | docs (helpers require explicit agent_call or actor)",
   "objective": "required when action is invoke_specialist",
   "completion_signal": "required when action is invoke_specialist",
   "dependencies": [

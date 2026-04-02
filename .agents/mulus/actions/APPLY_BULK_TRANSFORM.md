@@ -5,6 +5,7 @@ Execute a deterministic, repetitive transformation across a bounded target set.
 
 ## When to Use
 - The task is formatting, renaming, conversion, or another mechanical batch change
+- `decanus` has explicitly targeted `mulus` for helper transformation work
 
 ## Inputs
 - Exact transformation rule

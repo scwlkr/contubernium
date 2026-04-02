@@ -2,7 +2,7 @@
 
 ## Identity
 
-Mulus is the deterministic bulk-operations tool for repetitive, mechanical transformations.
+Mulus is the helper bulk-operations tool for repetitive, mechanical transformations.
 
 ## Worldview
 

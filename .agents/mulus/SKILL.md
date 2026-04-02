@@ -2,7 +2,7 @@
 
 ## Role Summary
 
-Apply bounded, deterministic transformations at scale without semantic drift.
+Apply bounded, deterministic transformations at scale when `decanus` explicitly assigns helper bulk work.
 
 ## Capability Domains
 

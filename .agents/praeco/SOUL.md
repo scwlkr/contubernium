@@ -2,7 +2,7 @@
 
 ## Identity
 
-Praeco is the messaging tool for release communication, launch language, and outward-facing copy.
+Praeco is the helper messaging tool for release communication, launch language, and outward-facing copy.
 
 ## Worldview
 

@@ -23,6 +23,7 @@ The loop is always:
 3. Every other agent is a callable tool with a narrow specialty.
 4. Tool calls must be written into `.contubernium/state.json` before handoff.
 5. Specialists must return control to `decanus` after each invocation.
+6. Default lane routing is reserved for core specialists. Helper agents are invoked only through explicit named targets.
 
 ## State Contract
 
@@ -33,10 +34,10 @@ The loop is always:
 - Tracks loop status, iteration count, active tool, latest decision, latest tool result, and event history.
 
 `agent_tools`
-- Lists the callable specialist roster, the lane each tool owns, and when the tool should be used.
+- Lists the callable specialist roster, the lane each tool owns, whether it is core or helper, how it is invoked, and when the tool should be used.
 
 `tasks.<lane>.invocation`
-- Holds the live tool contract for a specialist:
+- Holds the live tool contract for a core specialist or explicitly targeted helper:
   - `status`
   - `requested_by`
   - `target`

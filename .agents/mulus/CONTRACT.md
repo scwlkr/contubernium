@@ -2,7 +2,7 @@
 
 ## Role
 
-Bulk operations and formatting specialist.
+Helper specialist for bulk operations and formatting.
 
 ## Allowed
 
@@ -21,6 +21,7 @@ Bulk operations and formatting specialist.
 - Transformations stay deterministic
 - Unexpected anomalies are reported explicitly
 - Control returns to `decanus`
+- Invocation remains explicit and bounded
 
 ## Escalation
 

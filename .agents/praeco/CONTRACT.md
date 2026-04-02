@@ -2,7 +2,7 @@
 
 ## Role
 
-Messaging and release communication authority.
+Helper specialist for messaging and release communication.
 
 ## Allowed
 
@@ -21,6 +21,7 @@ Messaging and release communication authority.
 - Claims remain tied to verified behavior
 - Audience assumptions are explicit
 - Control returns to `decanus`
+- Invocation remains explicit and bounded
 
 ## Escalation
 

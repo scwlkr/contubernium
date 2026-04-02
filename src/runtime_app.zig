@@ -166,7 +166,8 @@ const appendHistory = core.appendHistory;
 const taskForLane = core.taskForLane;
 const taskForLaneConst = core.taskForLaneConst;
 const laneForActor = core.laneForActor;
-const actorForLane = core.actorForLane;
+const coreRoster = core.coreRoster;
+const helperRoster = core.helperRoster;
 const setLoopStep = core.setLoopStep;
 const beginApprovalRequest = core.beginApprovalRequest;
 const resolveApprovalRequest = core.resolveApprovalRequest;
@@ -530,8 +531,20 @@ test "taskSummaryText shows explicit lane status once work is assigned" {
     const summary = try taskSummaryText(testing.allocator, tasks);
     defer testing.allocator.free(summary);
 
-    try testing.expect(std.mem.indexOf(u8, summary, "backend=in_progress") != null);
+    try testing.expect(std.mem.indexOf(u8, summary, "core: backend=in_progress") != null);
     try testing.expect(std.mem.indexOf(u8, summary, "frontend=pending") != null);
+    try testing.expect(std.mem.indexOf(u8, summary, "helpers: none assigned") != null);
+}
+
+test "agent topology keeps constitutional core and helper counts" {
+    const testing = std.testing;
+
+    try testing.expectEqual(core.constitutional_core_agent_count, coreRoster().len);
+    try testing.expect(helperRoster().len >= core.minimum_helper_agent_count);
+    try testing.expectEqual(Actor.decanus, coreRoster()[0]);
+    try testing.expectEqual(Actor.calo, coreRoster()[coreRoster().len - 1]);
+    try testing.expectEqual(Actor.praeco, helperRoster()[0]);
+    try testing.expectEqual(Actor.mulus, helperRoster()[1]);
 }
 
 test "buildOllamaChatBody preserves structured output settings across stream modes" {
@@ -985,6 +998,30 @@ test "resolveAgentCallTarget rejects invalid action casing" {
     try testing.expectError(error.InvalidActionName, resolveAgentCallTarget(allocator, layout, "artifex::wire_user_flow"));
 }
 
+test "resolveSpecialistInvocationFromDecision requires explicit helper targeting" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const layout = try resolveGlobalAssetLayout(allocator);
+    defer deinitGlobalAssetLayout(allocator, layout);
+
+    try testing.expectError(
+        error.HelperLaneRequiresExplicitAgent,
+        resolveSpecialistInvocationFromDecision(allocator, layout, .{
+            .action = "invoke_specialist",
+            .lane = "media",
+        }),
+    );
+
+    const resolved = try resolveSpecialistInvocationFromDecision(allocator, layout, .{
+        .action = "invoke_specialist",
+        .agent_call = "praeco",
+    });
+    try testing.expectEqual(Actor.praeco, resolved.actor);
+    try testing.expectEqual(Lane.media, resolved.lane);
+    try testing.expectEqualStrings("praeco", resolved.agent_call);
+    try testing.expectEqualStrings("WRITE_MESSAGE", resolved.action_name);
+}
+
 test "mission completion records the finish step and history" {
     const testing = std.testing;
     const allocator = std.heap.page_allocator;
@@ -1093,8 +1130,12 @@ test "buildDecanusUserPrompt includes project context and memory layers" {
     try testing.expect(std.mem.indexOf(u8, prompt, "Architecture decisions live here.") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Global memory file: .contubernium/global.md") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Reusable strategies live here.") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Core specialists (lane-default routing):") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "faber -> lane=backend") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "Valid lane values: backend, frontend, systems, qa, research, brand, media, docs, bulk_ops") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Helper specialists (explicit invocation only):") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "praeco -> lane=media") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Valid fallback lane values: backend, frontend, systems, qa, research, brand, docs") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Helper specialists are explicit-only.") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Mission handling rules") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "If the prompt is only a greeting, presence check, or other conversational request") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Assigned specialist tasks") != null);

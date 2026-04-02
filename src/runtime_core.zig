@@ -22,6 +22,8 @@ pub const default_max_global_memory_chars = 4000;
 
 pub const Actor = protocol.Actor;
 pub const Lane = protocol.Lane;
+pub const ActorTier = protocol.ActorTier;
+pub const LaneTier = protocol.LaneTier;
 pub const GlobalStatus = protocol.GlobalStatus;
 pub const LoopStatus = protocol.LoopStatus;
 pub const RuntimeStatus = protocol.RuntimeStatus;
@@ -37,6 +39,8 @@ pub const InvocationResult = protocol.InvocationResult;
 pub const ApprovalRequest = protocol.ApprovalRequest;
 pub const LoopStep = protocol.LoopStep;
 pub const StateSnapshot = protocol.StateSnapshot;
+pub const constitutional_core_agent_count = protocol.constitutional_core_agent_count;
+pub const minimum_helper_agent_count = protocol.minimum_helper_agent_count;
 
 pub const AppConfig = struct {
     runtime_version: usize = 1,
@@ -194,6 +198,8 @@ pub const IntermediateResult = struct {
 
 pub const AgentTool = struct {
     lane: []const u8 = "",
+    tier: []const u8 = "",
+    invocation_mode: []const u8 = "",
     purpose: []const u8 = "",
     use_when: []const []const u8 = &.{},
 };
@@ -1440,11 +1446,11 @@ pub fn summarizeDecanusDecisionForUi(allocator: std.mem.Allocator, decision: Dec
     if (eql(action, "invoke_specialist")) {
         const requested_actor = if (decision.actor.len > 0) parseActor(decision.actor) else null;
         const lane = if (decision.lane.len > 0)
-            std.meta.stringToEnum(Lane, decision.lane) orelse (if (requested_actor) |actor| laneForActor(actor) else .bulk_ops)
+            std.meta.stringToEnum(Lane, decision.lane) orelse (if (requested_actor) |actor| laneForActor(actor) else .docs)
         else if (requested_actor) |actor|
             laneForActor(actor)
         else
-            .bulk_ops;
+            .docs;
         const actor = requested_actor orelse actorForLane(lane);
         try writer.print("\nhandoff: {s} on {s}", .{ actorName(actor), laneName(lane) });
         if (decision.objective.len > 0) {
@@ -1614,6 +1620,58 @@ pub fn maybeActorName(actor: ?Actor) []const u8 {
 
 pub fn laneName(lane: Lane) []const u8 {
     return @tagName(lane);
+}
+
+pub fn actorTier(actor: Actor) ActorTier {
+    return protocol.actorTier(actor);
+}
+
+pub fn laneTier(lane: Lane) LaneTier {
+    return protocol.laneTier(lane);
+}
+
+pub fn isCoreActor(actor: Actor) bool {
+    return protocol.isCoreActor(actor);
+}
+
+pub fn isCoreSpecialist(actor: Actor) bool {
+    return protocol.isCoreSpecialist(actor);
+}
+
+pub fn isHelperActor(actor: Actor) bool {
+    return protocol.isHelperActor(actor);
+}
+
+pub fn isHelperLane(lane: Lane) bool {
+    return protocol.isHelperLane(lane);
+}
+
+pub fn coreRoster() []const Actor {
+    return protocol.coreRoster();
+}
+
+pub fn coreSpecialists() []const Actor {
+    return protocol.coreSpecialists();
+}
+
+pub fn helperRoster() []const Actor {
+    return protocol.helperRoster();
+}
+
+pub fn installableRoster() []const Actor {
+    return protocol.installableRoster();
+}
+
+pub fn coreSpecialistLanes() []const Lane {
+    return protocol.coreSpecialistLanes();
+}
+
+pub fn helperLanes() []const Lane {
+    return protocol.helperLanes();
+}
+
+pub fn fallbackActorForLane(lane: Lane) ?Actor {
+    return protocol.fallbackActorForLane(lane);
 }
 
 pub fn parseActor(text: []const u8) ?Actor {
@@ -2084,23 +2142,44 @@ pub fn taskLaneHasAssignedWork(task: TaskLane) bool {
         task.invocation.result.summary.len > 0;
 }
 
-pub fn tasksHaveAssignedWork(tasks: Tasks) bool {
+pub fn coreTasksHaveAssignedWork(tasks: Tasks) bool {
     return taskLaneHasAssignedWork(tasks.backend) or
         taskLaneHasAssignedWork(tasks.frontend) or
         taskLaneHasAssignedWork(tasks.systems) or
         taskLaneHasAssignedWork(tasks.qa) or
         taskLaneHasAssignedWork(tasks.research) or
         taskLaneHasAssignedWork(tasks.brand) or
-        taskLaneHasAssignedWork(tasks.media) or
-        taskLaneHasAssignedWork(tasks.docs) or
+        taskLaneHasAssignedWork(tasks.docs);
+}
+
+pub fn helperTasksHaveAssignedWork(tasks: Tasks) bool {
+    return taskLaneHasAssignedWork(tasks.media) or
         taskLaneHasAssignedWork(tasks.bulk_ops);
+}
+
+pub fn tasksHaveAssignedWork(tasks: Tasks) bool {
+    return coreTasksHaveAssignedWork(tasks) or helperTasksHaveAssignedWork(tasks);
 }
 
 pub fn taskSummaryText(allocator: std.mem.Allocator, tasks: Tasks) ![]const u8 {
     if (!tasksHaveAssignedWork(tasks)) return "none assigned";
+
+    const helper_summary = if (helperTasksHaveAssignedWork(tasks))
+        try std.fmt.allocPrint(
+            allocator,
+            "helpers: media={s}, bulk_ops={s}",
+            .{
+                @tagName(tasks.media.status),
+                @tagName(tasks.bulk_ops.status),
+            },
+        )
+    else
+        try allocator.dupe(u8, "helpers: none assigned");
+    defer allocator.free(helper_summary);
+
     return try std.fmt.allocPrint(
         allocator,
-        "backend={s}, frontend={s}, systems={s}, qa={s}, research={s}, brand={s}, media={s}, docs={s}, bulk_ops={s}",
+        "core: backend={s}, frontend={s}, systems={s}, qa={s}, research={s}, brand={s}, docs={s}\n{s}",
         .{
             @tagName(tasks.backend.status),
             @tagName(tasks.frontend.status),
@@ -2108,9 +2187,8 @@ pub fn taskSummaryText(allocator: std.mem.Allocator, tasks: Tasks) ![]const u8 {
             @tagName(tasks.qa.status),
             @tagName(tasks.research.status),
             @tagName(tasks.brand.status),
-            @tagName(tasks.media.status),
             @tagName(tasks.docs.status),
-            @tagName(tasks.bulk_ops.status),
+            helper_summary,
         },
     );
 }

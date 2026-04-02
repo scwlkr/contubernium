@@ -79,6 +79,8 @@
   "agent_tools": {
     "faber": {
       "lane": "backend",
+      "tier": "core_specialist",
+      "invocation_mode": "lane_default",
       "purpose": "Forge backend services, APIs, and data models.",
       "use_when": [
         "Need database work, server logic, or API implementation."
@@ -86,6 +88,8 @@
     },
     "artifex": {
       "lane": "frontend",
+      "tier": "core_specialist",
+      "invocation_mode": "lane_default",
       "purpose": "Build the interface and connect user flows to working behavior.",
       "use_when": [
         "Need UI implementation, interaction design, or frontend wiring."
@@ -93,6 +97,8 @@
     },
     "architectus": {
       "lane": "systems",
+      "tier": "core_specialist",
+      "invocation_mode": "lane_default",
       "purpose": "Manage infrastructure, scripts, CI, and deployment mechanics.",
       "use_when": [
         "Need environment setup, deployment work, automation, or CI changes."
@@ -100,6 +106,8 @@
     },
     "tesserarius": {
       "lane": "qa",
+      "tier": "core_specialist",
+      "invocation_mode": "lane_default",
       "purpose": "Inspect completed work for regressions, security flaws, and missing coverage.",
       "use_when": [
         "Need review, testing, or validation before closing the loop."
@@ -107,6 +115,8 @@
     },
     "explorator": {
       "lane": "research",
+      "tier": "core_specialist",
+      "invocation_mode": "lane_default",
       "purpose": "Gather external documentation and implementation intelligence.",
       "use_when": [
         "Need research, documentation lookup, or technical reconnaissance."
@@ -114,6 +124,8 @@
     },
     "signifer": {
       "lane": "brand",
+      "tier": "core_specialist",
+      "invocation_mode": "lane_default",
       "purpose": "Define visual identity and enforce design direction.",
       "use_when": [
         "Need branding, visual standards, or design-system direction."
@@ -121,6 +133,8 @@
     },
     "praeco": {
       "lane": "media",
+      "tier": "helper",
+      "invocation_mode": "explicit_agent_call",
       "purpose": "Write outward-facing launch, release, and messaging materials.",
       "use_when": [
         "Need release notes, launch copy, or communication strategy."
@@ -128,6 +142,8 @@
     },
     "calo": {
       "lane": "docs",
+      "tier": "core_specialist",
+      "invocation_mode": "lane_default",
       "purpose": "Keep documentation and explanatory comments aligned with reality.",
       "use_when": [
         "Need README, docs, or comment updates after implementation changes."
@@ -135,6 +151,8 @@
     },
     "mulus": {
       "lane": "bulk_ops",
+      "tier": "helper",
+      "invocation_mode": "explicit_agent_call",
       "purpose": "Handle deterministic, repetitive, high-volume transformations.",
       "use_when": [
         "Need formatting passes, bulk edits, conversions, or scripted rewrites."

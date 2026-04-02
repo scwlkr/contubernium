@@ -160,7 +160,12 @@ const appendHistory = core.appendHistory;
 const taskForLane = core.taskForLane;
 const taskForLaneConst = core.taskForLaneConst;
 const laneForActor = core.laneForActor;
-const actorForLane = core.actorForLane;
+const fallbackActorForLane = core.fallbackActorForLane;
+const coreRoster = core.coreRoster;
+const helperRoster = core.helperRoster;
+const installableRoster = core.installableRoster;
+const constitutional_core_agent_count = core.constitutional_core_agent_count;
+const minimum_helper_agent_count = core.minimum_helper_agent_count;
 const setLoopStep = core.setLoopStep;
 const beginApprovalRequest = core.beginApprovalRequest;
 const resolveApprovalRequest = core.resolveApprovalRequest;
@@ -398,18 +403,25 @@ pub fn ensureGlobalAssetFiles(allocator: std.mem.Allocator, layout: GlobalAssetL
         };
     }
 
-    const actors = [_]Actor{
-        .decanus,
-        .faber,
-        .artifex,
-        .architectus,
-        .tesserarius,
-        .explorator,
-        .signifer,
-        .praeco,
-        .calo,
-        .mulus,
-    };
+    const core_agents = coreRoster();
+    if (core_agents.len != constitutional_core_agent_count) {
+        stderrPrint(
+            "invalid core roster: expected {d} core agents including decanus, found {d}\n",
+            .{ constitutional_core_agent_count, core_agents.len },
+        ) catch {};
+        return error.InvalidAgentRoster;
+    }
+
+    const helpers = helperRoster();
+    if (helpers.len < minimum_helper_agent_count) {
+        stderrPrint(
+            "invalid helper roster: expected at least {d} helper agents, found {d}\n",
+            .{ minimum_helper_agent_count, helpers.len },
+        ) catch {};
+        return error.InvalidAgentRoster;
+    }
+
+    const actors = installableRoster();
     const core_assets = [_][]const u8{
         "SOUL.md",
         "CONTRACT.md",
@@ -657,7 +669,7 @@ pub fn resolveSpecialistInvocationFromDecision(
     const actor = if (requested_actor) |value|
         value
     else if (requested_lane) |lane|
-        actorForLane(lane)
+        fallbackActorForLane(lane) orelse return error.HelperLaneRequiresExplicitAgent
     else
         return error.MissingSpecialistTarget;
 
@@ -697,6 +709,11 @@ pub fn specialistInvocationResolutionMessage(
         error.InvalidLane => try std.fmt.allocPrint(
             allocator,
             "invalid specialist lane `{s}`; the lane must match a known Contubernium agent lane.",
+            .{decision.lane},
+        ),
+        error.HelperLaneRequiresExplicitAgent => try std.fmt.allocPrint(
+            allocator,
+            "helper lane `{s}` requires an explicit helper target in `agent` or `agent::ACTION` form.",
             .{decision.lane},
         ),
         error.InvalidActionName => try std.fmt.allocPrint(

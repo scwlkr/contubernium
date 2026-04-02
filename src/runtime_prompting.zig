@@ -159,7 +159,8 @@ const appendHistory = core.appendHistory;
 const taskForLane = core.taskForLane;
 const taskForLaneConst = core.taskForLaneConst;
 const laneForActor = core.laneForActor;
-const actorForLane = core.actorForLane;
+const coreSpecialists = core.coreSpecialists;
+const helperRoster = core.helperRoster;
 const setLoopStep = core.setLoopStep;
 const beginApprovalRequest = core.beginApprovalRequest;
 const resolveApprovalRequest = core.resolveApprovalRequest;
@@ -284,24 +285,29 @@ pub fn summarizeRuntimeMemorySnapshot(allocator: std.mem.Allocator, memory: Runt
 pub fn specialistRoutingGuideText(allocator: std.mem.Allocator) ![]const u8 {
     var buffer: std.ArrayList(u8) = .empty;
     const writer = buffer.writer(allocator);
-    const specialists = [_]Actor{
-        .faber,
-        .artifex,
-        .architectus,
-        .tesserarius,
-        .explorator,
-        .signifer,
-        .praeco,
-        .calo,
-        .mulus,
-    };
-
-    for (specialists) |actor| {
+    try writer.writeAll("Core specialists (lane-default routing):\n");
+    for (coreSpecialists()) |actor| {
         try writer.print(
-            "- {s} -> lane={s} -> prefer `agent_call: \"{s}\"` -> exact default action `{s}::{s}`\n",
+            "- {s} -> lane={s} -> prefer `lane: \"{s}\"` or `agent_call: \"{s}\"` -> exact default action `{s}::{s}`\n",
             .{
                 actorName(actor),
                 laneName(laneForActor(actor)),
+                laneName(laneForActor(actor)),
+                actorName(actor),
+                actorName(actor),
+                defaultActionNameForActor(actor),
+            },
+        );
+    }
+
+    try writer.writeAll("Helper specialists (explicit invocation only):\n");
+    for (helperRoster()) |actor| {
+        try writer.print(
+            "- {s} -> lane={s} -> invoke only with explicit `agent_call: \"{s}\"` or `actor: \"{s}\"` -> exact default action `{s}::{s}`\n",
+            .{
+                actorName(actor),
+                laneName(laneForActor(actor)),
+                actorName(actor),
                 actorName(actor),
                 actorName(actor),
                 defaultActionNameForActor(actor),
@@ -411,7 +417,8 @@ pub fn buildDecanusUserPrompt(
         \\Specialist routing
         \\-----------------
         \\{s}
-        \\Valid lane values: backend, frontend, systems, qa, research, brand, media, docs, bulk_ops
+        \\Valid fallback lane values: backend, frontend, systems, qa, research, brand, docs
+        \\Helper specialists are explicit-only. Use `agent_call` or `actor` for helpers; helper work records its own lane after the target is resolved.
         \\When `action` is `invoke_specialist`, prefer a bare agent name in `agent_call`. Use an exact `agent::ACTION` only when it matches a real Contubernium action file.
         \\
         \\Mission handling rules
@@ -462,7 +469,7 @@ pub fn buildSpecialistUserPrompt(
     memory: RuntimeMemorySnapshot,
     lane: []const u8,
 ) ![]const u8 {
-    const lane_value = std.meta.stringToEnum(Lane, lane) orelse .bulk_ops;
+    const lane_value = std.meta.stringToEnum(Lane, lane) orelse .docs;
     const task = taskForLaneConst(state, lane_value);
     const history = try recentHistoryText(allocator, state.agent_loop.history, config.context.max_history_events);
     const context_files = try joinStrings(allocator, task.invocation.context.files, ", ");

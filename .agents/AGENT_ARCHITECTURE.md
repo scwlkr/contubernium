@@ -15,6 +15,13 @@ Every agent is composed from four layers:
 3. `SKILL.md`
 4. `actions/*.md`
 
+## 2.1 Constitutional Topology
+
+- Core roster: `decanus` plus `faber`, `artifex`, `architectus`, `tesserarius`, `explorator`, `signifer`, and `calo`
+- Helper roster: `praeco` and `mulus`
+- Core and helper agents share the same installed `agents/` tree
+- Helper agents are explicit adjunct tools, not default lane owners
+
 ## 3. Global vs Project Boundary
 
 - Global agents live in the Contubernium home.
@@ -55,6 +62,8 @@ Supported call forms:
 
 - `agent`
 - `agent::ACTION`
+
+Default lane routing only applies to core specialists. Helper agents must be named explicitly.
 
 ## 9. Runtime Composition Order
 

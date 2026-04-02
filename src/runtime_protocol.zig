@@ -26,6 +26,75 @@ pub const Lane = enum {
     bulk_ops,
 };
 
+pub const ActorTier = enum {
+    commander,
+    core_specialist,
+    helper,
+};
+
+pub const LaneTier = enum {
+    command,
+    core_specialist,
+    helper,
+};
+
+pub const constitutional_core_agent_count: usize = 8;
+pub const minimum_helper_agent_count: usize = 2;
+
+const core_actor_roster = [_]Actor{
+    .decanus,
+    .faber,
+    .artifex,
+    .architectus,
+    .tesserarius,
+    .explorator,
+    .signifer,
+    .calo,
+};
+
+const core_specialist_roster = [_]Actor{
+    .faber,
+    .artifex,
+    .architectus,
+    .tesserarius,
+    .explorator,
+    .signifer,
+    .calo,
+};
+
+const helper_actor_roster = [_]Actor{
+    .praeco,
+    .mulus,
+};
+
+const installable_actor_roster = [_]Actor{
+    .decanus,
+    .faber,
+    .artifex,
+    .architectus,
+    .tesserarius,
+    .explorator,
+    .signifer,
+    .calo,
+    .praeco,
+    .mulus,
+};
+
+const core_specialist_lanes = [_]Lane{
+    .backend,
+    .frontend,
+    .systems,
+    .qa,
+    .research,
+    .brand,
+    .docs,
+};
+
+const helper_lanes = [_]Lane{
+    .media,
+    .bulk_ops,
+};
+
 pub const GlobalStatus = enum {
     idle,
     planning,
@@ -202,6 +271,75 @@ pub const StateSnapshot = struct {
     condensation_count: usize = 0,
     condensed_history_events: usize = 0,
 };
+
+pub fn actorTier(actor: Actor) ActorTier {
+    return switch (actor) {
+        .decanus => .commander,
+        .praeco, .mulus => .helper,
+        else => .core_specialist,
+    };
+}
+
+pub fn laneTier(lane: Lane) LaneTier {
+    return switch (lane) {
+        .command => .command,
+        .media, .bulk_ops => .helper,
+        else => .core_specialist,
+    };
+}
+
+pub fn isCoreActor(actor: Actor) bool {
+    return actorTier(actor) != .helper;
+}
+
+pub fn isCoreSpecialist(actor: Actor) bool {
+    return actorTier(actor) == .core_specialist;
+}
+
+pub fn isHelperActor(actor: Actor) bool {
+    return actorTier(actor) == .helper;
+}
+
+pub fn isHelperLane(lane: Lane) bool {
+    return laneTier(lane) == .helper;
+}
+
+pub fn coreRoster() []const Actor {
+    return &core_actor_roster;
+}
+
+pub fn coreSpecialists() []const Actor {
+    return &core_specialist_roster;
+}
+
+pub fn helperRoster() []const Actor {
+    return &helper_actor_roster;
+}
+
+pub fn installableRoster() []const Actor {
+    return &installable_actor_roster;
+}
+
+pub fn coreSpecialistLanes() []const Lane {
+    return &core_specialist_lanes;
+}
+
+pub fn helperLanes() []const Lane {
+    return &helper_lanes;
+}
+
+pub fn fallbackActorForLane(lane: Lane) ?Actor {
+    return switch (lane) {
+        .backend => .faber,
+        .frontend => .artifex,
+        .systems => .architectus,
+        .qa => .tesserarius,
+        .research => .explorator,
+        .brand => .signifer,
+        .docs => .calo,
+        .command, .media, .bulk_ops => null,
+    };
+}
 
 pub fn laneForActor(actor: Actor) Lane {
     return switch (actor) {
