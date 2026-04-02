@@ -1,20 +1,46 @@
 {
   "runtime_version": 1,
-  "provider": {
+  "model_policy": {
     "enabled": true,
-    "type": "ollama-native",
-    "base_url": "http://127.0.0.1:11434",
-    "model": "qwen2.5-coder:7b",
-    "timeout_ms": 120000,
-    "max_retries": 2,
-    "structured_output": "json"
-  },
-  "fallback_provider": {
-    "enabled": false,
-    "type": "openai-compatible",
-    "base_url": "http://127.0.0.1:8000",
-    "model": "",
-    "timeout_ms": 120000
+    "strategy": "smallest-capable",
+    "primary": {
+      "enabled": true,
+      "type": "ollama-native",
+      "base_url": "http://127.0.0.1:11434",
+      "model": "qwen2.5-coder:7b",
+      "timeout_ms": 120000,
+      "max_retries": 2,
+      "structured_output": "json"
+    },
+    "escalation": {
+      "enabled": false,
+      "provider": {
+        "enabled": true,
+        "type": "ollama-native",
+        "base_url": "http://127.0.0.1:11434",
+        "model": "qwen2.5-coder:14b",
+        "timeout_ms": 120000,
+        "max_retries": 1,
+        "structured_output": "json"
+      },
+      "on_repair_failure": true,
+      "repair_attempt_threshold": 1,
+      "on_context_pressure": true,
+      "prompt_token_threshold": 12000,
+      "context_percent_threshold": 70
+    },
+    "fallback": {
+      "enabled": false,
+      "type": "openrouter",
+      "base_url": "https://openrouter.ai/api",
+      "model": "openai/gpt-5.2-mini",
+      "timeout_ms": 120000,
+      "max_retries": 1,
+      "structured_output": "json",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "site_url": "",
+      "app_name": "Contubernium"
+    }
   },
   "paths": {
     "state_file": ".contubernium/state.json",

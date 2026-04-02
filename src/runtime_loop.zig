@@ -41,6 +41,7 @@ const ApprovalRequest = core.ApprovalRequest;
 const LoopStep = core.LoopStep;
 const StateSnapshot = core.StateSnapshot;
 const AppConfig = core.AppConfig;
+const ActiveModelRoute = core.ActiveModelRoute;
 const ProviderConfig = core.ProviderConfig;
 const PathsConfig = core.PathsConfig;
 const PolicyConfig = core.PolicyConfig;
@@ -121,6 +122,7 @@ const OpenAIToolFunction = core.OpenAIToolFunction;
 const usablePromptTokenWindow = core.usablePromptTokenWindow;
 const ensureLoopBudget = core.ensureLoopBudget;
 const resolvedContextBudget = core.resolvedContextBudget;
+const resolveModelPolicy = core.resolveModelPolicy;
 const buildStateSnapshot = core.buildStateSnapshot;
 const snapshotFromState = core.snapshotFromState;
 const compactTextForUi = core.compactTextForUi;
@@ -1014,6 +1016,122 @@ pub fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, st
     return .blocked;
 }
 
+fn resolvedRouteMaxRetries(provider: ProviderConfig, fallback: usize) usize {
+    return if (provider.max_retries > 0) provider.max_retries else fallback;
+}
+
+fn escalationRouteForReason(config: AppConfig, reason: []const u8) ?ActiveModelRoute {
+    const model_policy = resolveModelPolicy(config);
+    if (!model_policy.escalation.enabled) return null;
+    if (!model_policy.escalation.provider.enabled) return null;
+    if (trimAscii(model_policy.escalation.provider.model).len == 0) return null;
+    return .{
+        .role = "escalation",
+        .reason = reason,
+        .provider = model_policy.escalation.provider,
+    };
+}
+
+fn fallbackRouteForReason(config: AppConfig, reason: []const u8) ?ActiveModelRoute {
+    const model_policy = resolveModelPolicy(config);
+    if (!model_policy.fallback.enabled) return null;
+    if (trimAscii(model_policy.fallback.model).len == 0) return null;
+    return .{
+        .role = "fallback",
+        .reason = reason,
+        .provider = model_policy.fallback,
+    };
+}
+
+fn initialEscalationReason(config: AppConfig, budget: ContextBudgetState) []const u8 {
+    const model_policy = resolveModelPolicy(config);
+    if (!model_policy.escalation.enabled) return "";
+    if (!model_policy.escalation.on_context_pressure) return "";
+    if (!model_policy.escalation.provider.enabled) return "";
+    if (trimAscii(model_policy.escalation.provider.model).len == 0) return "";
+
+    if (model_policy.escalation.prompt_token_threshold > 0 and budget.estimated_prompt_tokens >= model_policy.escalation.prompt_token_threshold) {
+        return "prompt_budget_threshold";
+    }
+    if (model_policy.escalation.context_percent_threshold > 0 and budget.used_percent >= model_policy.escalation.context_percent_threshold) {
+        return "context_pressure_threshold";
+    }
+    return "";
+}
+
+fn initialModelRoute(config: AppConfig, state: *AppState) ActiveModelRoute {
+    const model_policy = resolveModelPolicy(config);
+    const escalation_reason = initialEscalationReason(config, state.runtime_session.context_budget);
+    if (escalation_reason.len > 0) {
+        return .{
+            .role = "escalation",
+            .reason = escalation_reason,
+            .provider = model_policy.escalation.provider,
+        };
+    }
+
+    return .{
+        .role = "primary",
+        .reason = if (eql(model_policy.strategy, "smallest-capable")) "smallest_capable_default" else "configured_primary",
+        .provider = model_policy.primary,
+    };
+}
+
+fn shouldEscalateAfterRepair(config: AppConfig, next_attempt: usize) bool {
+    const model_policy = resolveModelPolicy(config);
+    return model_policy.escalation.enabled and
+        model_policy.escalation.on_repair_failure and
+        next_attempt >= model_policy.escalation.repair_attempt_threshold and
+        model_policy.escalation.provider.enabled and
+        trimAscii(model_policy.escalation.provider.model).len > 0;
+}
+
+fn fallbackReasonForError(err: anyerror) []const u8 {
+    return switch (err) {
+        error.BackendUnavailable => "provider_transport_failed",
+        error.ModelNotFound => "configured_model_missing",
+        error.ProviderRejectedRequest => "provider_rejected_request",
+        error.EmptyProviderResponse => "provider_returned_no_choices",
+        error.EmptyModelOutput => "empty_model_output",
+        error.MissingProviderApiKey => "provider_auth_missing",
+        else => "model_route_failed",
+    };
+}
+
+fn routeDecisionStatus(route: ActiveModelRoute) []const u8 {
+    if (eql(route.role, "escalation")) return "escalated";
+    if (eql(route.role, "fallback")) return "fallback";
+    return "selected";
+}
+
+fn logModelRouteDecision(
+    allocator: std.mem.Allocator,
+    config: AppConfig,
+    state: *AppState,
+    actor: Actor,
+    lane: Lane,
+    route: ActiveModelRoute,
+) !void {
+    const summary = try std.fmt.allocPrint(
+        allocator,
+        "{s} route selected: {s}/{s} ({s})",
+        .{ route.role, route.provider.type, route.provider.model, route.reason },
+    );
+    defer allocator.free(summary);
+
+    try logRuntimeEvent(allocator, config, state, .{
+        .actor = actor,
+        .lane = lane,
+        .action = "model_policy",
+        .status = routeDecisionStatus(route),
+        .provider = route.provider.type,
+        .model = route.provider.model,
+        .policy_role = route.role,
+        .policy_reason = route.reason,
+        .summary = summary,
+    });
+}
+
 pub fn structuredChatWithRepair(
     allocator: std.mem.Allocator,
     config: AppConfig,
@@ -1027,18 +1145,68 @@ pub fn structuredChatWithRepair(
 ) !struct { value: T, raw_text: []const u8 } {
     var attempt: usize = 0;
     var repair_user_prompt = user_prompt;
+    var owned_repair_prompt: ?[]u8 = null;
+    defer {
+        if (owned_repair_prompt) |prompt| allocator.free(prompt);
+    }
     const resolved_actor = parseActor(actor) orelse .decanus;
     const resolved_lane = laneForActor(resolved_actor);
+    var active_route = initialModelRoute(config, state);
+    var logged_route = false;
+    var used_escalation = eql(active_route.role, "escalation");
+    var used_fallback = eql(active_route.role, "fallback");
 
     while (true) {
         if (hooks.isInterrupted()) return error.Interrupted;
+        if (!logged_route) {
+            stateManager(state).setActiveModelRoute(active_route);
+            try logModelRouteDecision(allocator, config, state, resolved_actor, resolved_lane, active_route);
+            if (!eql(active_route.role, "primary")) {
+                const label = try std.fmt.allocPrint(
+                    allocator,
+                    "{s} route: {s}/{s} ({s})",
+                    .{ active_route.role, active_route.provider.type, active_route.provider.model, active_route.reason },
+                );
+                defer allocator.free(label);
+                emitLog(hooks, .warning, actor, "Model Route", label, .plain);
+            }
+            logged_route = true;
+        }
         emitStreamStart(hooks, actor);
-        const response = try providerStructuredChat(allocator, config.provider, system_prompt, repair_user_prompt, actor, hooks);
+        const response = providerStructuredChat(allocator, active_route.provider, system_prompt, repair_user_prompt, actor, hooks) catch |err| {
+            try logRuntimeEvent(allocator, config, state, .{
+                .actor = resolved_actor,
+                .lane = resolved_lane,
+                .action = "model_route_failed",
+                .status = "error",
+                .provider = active_route.provider.type,
+                .model = active_route.provider.model,
+                .policy_role = active_route.role,
+                .policy_reason = active_route.reason,
+                .summary = "active model route failed before a response was parsed",
+                .error_text = @errorName(err),
+            });
+            if (!used_fallback) {
+                if (fallbackRouteForReason(config, fallbackReasonForError(err))) |fallback_route| {
+                    active_route = fallback_route;
+                    used_fallback = true;
+                    logged_route = false;
+                    attempt = 0;
+                    stateManager(state).setRepairAttempts(0);
+                    continue;
+                }
+            }
+            return err;
+        };
         try logRuntimeEvent(allocator, config, state, .{
             .actor = resolved_actor,
             .lane = resolved_lane,
             .action = "provider_transport",
             .status = "success",
+            .provider = active_route.provider.type,
+            .model = active_route.provider.model,
+            .policy_role = active_route.role,
+            .policy_reason = active_route.reason,
             .summary = "provider transport captured",
             .output = response.transport_text,
         });
@@ -1059,26 +1227,82 @@ pub fn structuredChatWithRepair(
                 .lane = resolved_lane,
                 .action = "invalid_model_output",
                 .status = "error",
+                .provider = active_route.provider.type,
+                .model = active_route.provider.model,
+                .policy_role = active_route.role,
+                .policy_reason = active_route.reason,
                 .summary = "model returned invalid JSON",
                 .output = response.raw_text,
                 .error_text = failure.message,
                 .failure = failure,
             });
             emitStreamFinalize(hooks, actor, response.raw_text, .json);
-            if (attempt >= max_retries) return err;
-            attempt += 1;
+            const next_attempt = attempt + 1;
+            if (!used_escalation and shouldEscalateAfterRepair(config, next_attempt)) {
+                if (owned_repair_prompt) |prompt| {
+                    allocator.free(prompt);
+                    owned_repair_prompt = null;
+                }
+                owned_repair_prompt = try std.fmt.allocPrint(
+                    allocator,
+                    "{s}\n\nYour previous response was invalid JSON. Return valid JSON only. Do not use markdown fences. Preserve the intended structure.",
+                    .{user_prompt},
+                );
+                repair_user_prompt = owned_repair_prompt.?;
+                if (escalationRouteForReason(config, "repair_retry_threshold")) |escalation_route| {
+                    active_route = escalation_route;
+                    used_escalation = true;
+                    logged_route = false;
+                    attempt = 0;
+                    stateManager(state).setRepairAttempts(0);
+                    continue;
+                }
+            }
+            if (attempt >= resolvedRouteMaxRetries(active_route.provider, max_retries)) {
+                if (!used_fallback) {
+                    if (owned_repair_prompt) |prompt| {
+                        allocator.free(prompt);
+                        owned_repair_prompt = null;
+                    }
+                    owned_repair_prompt = try std.fmt.allocPrint(
+                        allocator,
+                        "{s}\n\nYour previous response was invalid JSON. Return valid JSON only. Do not use markdown fences. Preserve the intended structure.",
+                        .{user_prompt},
+                    );
+                    repair_user_prompt = owned_repair_prompt.?;
+                    if (fallbackRouteForReason(config, "invalid_model_output")) |fallback_route| {
+                        active_route = fallback_route;
+                        used_fallback = true;
+                        logged_route = false;
+                        attempt = 0;
+                        stateManager(state).setRepairAttempts(0);
+                        continue;
+                    }
+                }
+                return err;
+            }
+            attempt = next_attempt;
             stateManager(state).setRepairAttempts(attempt);
             emitLog(hooks, .warning, actor, "Repair Retry", state.runtime_session.last_error, .plain);
-            repair_user_prompt = try std.fmt.allocPrint(
+            if (owned_repair_prompt) |prompt| {
+                allocator.free(prompt);
+                owned_repair_prompt = null;
+            }
+            owned_repair_prompt = try std.fmt.allocPrint(
                 allocator,
                 "{s}\n\nYour previous response was invalid JSON. Return valid JSON only. Do not use markdown fences. Preserve the intended structure.",
                 .{user_prompt},
             );
+            repair_user_prompt = owned_repair_prompt.?;
             try logRuntimeEvent(allocator, config, state, .{
                 .actor = resolved_actor,
                 .lane = resolved_lane,
                 .action = "repair_retry",
                 .status = "retrying",
+                .provider = active_route.provider.type,
+                .model = active_route.provider.model,
+                .policy_role = active_route.role,
+                .policy_reason = active_route.reason,
                 .summary = state.runtime_session.last_error,
                 .input = repair_user_prompt,
                 .error_text = state.runtime_session.last_error,

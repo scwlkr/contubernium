@@ -128,6 +128,9 @@ const usablePromptTokenWindow = core.usablePromptTokenWindow;
 const ensureLoopBudget = core.ensureLoopBudget;
 const resolvedApprovalMode = core.resolvedApprovalMode;
 const resolvedContextBudget = core.resolvedContextBudget;
+const resolveModelPolicy = core.resolveModelPolicy;
+const syncConfigProviderMirrors = core.syncConfigProviderMirrors;
+const runtimeModelPolicyLog = core.runtimeModelPolicyLog;
 const buildStateSnapshot = core.buildStateSnapshot;
 const snapshotFromState = core.snapshotFromState;
 const compactTextForUi = core.compactTextForUi;
@@ -258,7 +261,9 @@ pub const embedded_assets = [_]EmbeddedAsset{
 };
 pub fn loadConfig(allocator: std.mem.Allocator, path: []const u8) !AppConfig {
     const data = try std.fs.cwd().readFileAlloc(allocator, path, max_file_bytes);
-    return try parseJson(AppConfig, allocator, data);
+    var config = try parseJson(AppConfig, allocator, data);
+    syncConfigProviderMirrors(&config);
+    return config;
 }
 
 pub fn loadProjectConfig(allocator: std.mem.Allocator) !AppConfig {
@@ -301,10 +306,12 @@ pub fn saveState(allocator: std.mem.Allocator, path: []const u8, state: AppState
 }
 
 pub fn saveConfig(allocator: std.mem.Allocator, path: []const u8, config: AppConfig) !void {
+    var normalized = config;
+    syncConfigProviderMirrors(&normalized);
     const rendered = try std.fmt.allocPrint(
         allocator,
         "{f}",
-        .{std.json.fmt(config, .{ .whitespace = .indent_2 })},
+        .{std.json.fmt(normalized, .{ .whitespace = .indent_2 })},
     );
     defer allocator.free(rendered);
     var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
@@ -643,6 +650,7 @@ pub fn persistSessionMemory(
 
 pub fn runDoctorCheck(allocator: std.mem.Allocator) ![]const u8 {
     const config = try loadProjectConfig(allocator);
+    const model_policy = resolveModelPolicy(config);
     var state = try loadState(allocator, config.paths.state_file);
     const asset_layout = try resolveGlobalAssetLayout(allocator);
     defer deinitGlobalAssetLayout(allocator, asset_layout);
@@ -650,12 +658,12 @@ pub fn runDoctorCheck(allocator: std.mem.Allocator) ![]const u8 {
     try ensureGlobalAssetFiles(allocator, asset_layout);
     try ensureMemoryFiles(config.paths);
 
-    const models = try providerListModels(allocator, config.provider);
-    if (!containsString(models, config.provider.model)) return error.ModelNotFound;
+    const models = try providerListModels(allocator, model_policy.primary);
+    if (!containsString(models, model_policy.primary.model)) return error.ModelNotFound;
 
     const smoke_response = try providerStructuredChat(
         allocator,
-        config.provider,
+        model_policy.primary,
         "Return valid JSON only.",
         "Return exactly this JSON object and nothing else: {\"status\":\"ok\"}",
         "doctor",
@@ -671,7 +679,7 @@ pub fn runDoctorCheck(allocator: std.mem.Allocator) ![]const u8 {
     return try std.fmt.allocPrint(
         allocator,
         "global agent assets: ok\nproject context files: ok\nbackend reachable: ok ({s})\nconfigured model: ok ({s})\nstructured output smoke test: ok",
-        .{ config.provider.type, config.provider.model },
+        .{ model_policy.primary.type, model_policy.primary.model },
     );
 }
 
@@ -1268,6 +1276,7 @@ pub fn initializeRuntimeRunLog(
     const run_id = try makeRunId(allocator);
     stateManager(state).setActiveLogPath(try logPathForRun(allocator, config.paths.logs_dir, run_id));
 
+    const model_policy = resolveModelPolicy(config);
     const timestamp = try unixTimestampString(allocator);
     const log = RuntimeRunLog{
         .run_id = run_id,
@@ -1275,8 +1284,9 @@ pub fn initializeRuntimeRunLog(
         .created_at = timestamp,
         .updated_at = timestamp,
         .project_name = state.project_name,
-        .provider = config.provider.type,
-        .model = config.provider.model,
+        .provider = model_policy.primary.type,
+        .model = model_policy.primary.model,
+        .model_policy = runtimeModelPolicyLog(config),
         .approval_mode = if (state.runtime_session.approval_mode.len > 0)
             state.runtime_session.approval_mode
         else
@@ -1312,6 +1322,10 @@ pub fn logRuntimeEvent(
     if (state.runtime_session.active_log_path.len == 0) return;
 
     const project_name = if (!eql(state.project_name, "UNASSIGNED")) state.project_name else "";
+    const resolved_provider = if (spec.provider.len > 0) spec.provider else state.runtime_session.provider;
+    const resolved_model = if (spec.model.len > 0) spec.model else state.runtime_session.model;
+    const resolved_policy_role = if (spec.policy_role.len > 0) spec.policy_role else state.runtime_session.last_model_role;
+    const resolved_policy_reason = if (spec.policy_reason.len > 0) spec.policy_reason else state.runtime_session.last_model_reason;
     const snapshot = if (spec.include_snapshot)
         buildStateSnapshot(config, state.*, project_name)
     else
@@ -1326,6 +1340,10 @@ pub fn logRuntimeEvent(
         .action = spec.action,
         .status = spec.status,
         .tool = spec.tool,
+        .provider = resolved_provider,
+        .model = resolved_model,
+        .policy_role = resolved_policy_role,
+        .policy_reason = resolved_policy_reason,
         .summary = spec.summary,
         .input = spec.input,
         .output = spec.output,

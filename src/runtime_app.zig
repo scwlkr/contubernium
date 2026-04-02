@@ -1318,11 +1318,153 @@ test "runtime run log stores structured events" {
     try testing.expectEqualStrings("phase 1 logging", loaded.events[0].summary);
 }
 
+test "loadConfig mirrors model_policy routes into legacy provider fields" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const config_json =
+        \\{
+        \\  "runtime_version": 1,
+        \\  "model_policy": {
+        \\    "enabled": true,
+        \\    "strategy": "smallest-capable",
+        \\    "primary": {
+        \\      "enabled": true,
+        \\      "type": "ollama-native",
+        \\      "base_url": "http://127.0.0.1:11434",
+        \\      "model": "qwen2.5-coder:7b",
+        \\      "timeout_ms": 120000,
+        \\      "max_retries": 2,
+        \\      "structured_output": "json"
+        \\    },
+        \\    "fallback": {
+        \\      "enabled": true,
+        \\      "type": "openrouter",
+        \\      "base_url": "https://openrouter.ai/api",
+        \\      "model": "openai/gpt-5.2-mini",
+        \\      "timeout_ms": 120000,
+        \\      "max_retries": 1,
+        \\      "structured_output": "json",
+        \\      "api_key_env": "OPENROUTER_API_KEY",
+        \\      "app_name": "Contubernium"
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    var file = try tmp.dir.createFile("config.json", .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(config_json);
+
+    const root = try tmp.dir.realpathAlloc(scratch, ".");
+    const path = try std.fs.path.join(scratch, &.{ root, "config.json" });
+
+    const loaded = try loadConfig(scratch, path);
+    try testing.expectEqualStrings("ollama-native", loaded.provider.type);
+    try testing.expectEqualStrings("qwen2.5-coder:7b", loaded.provider.model);
+    try testing.expectEqualStrings("openrouter", loaded.fallback_provider.type);
+    try testing.expectEqualStrings("openai/gpt-5.2-mini", loaded.fallback_provider.model);
+}
+
+test "initializeRuntimeRunLog stores model policy metadata" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    defer original_cwd.close();
+    try tmp.dir.setAsCwd();
+    defer original_cwd.setAsCwd() catch {};
+
+    var state = AppState{};
+    state.project_name = "Contubernium";
+    state.mission.initial_prompt = "implement phase 3";
+
+    const config = AppConfig{
+        .model_policy = .{
+            .enabled = true,
+            .strategy = "smallest-capable",
+            .primary = .{
+                .type = "ollama-native",
+                .base_url = "http://127.0.0.1:11434",
+                .model = "qwen2.5-coder:7b",
+            },
+            .escalation = .{
+                .enabled = true,
+                .provider = .{
+                    .enabled = true,
+                    .type = "ollama-native",
+                    .base_url = "http://127.0.0.1:11434",
+                    .model = "qwen2.5-coder:14b",
+                    .max_retries = 1,
+                },
+            },
+            .fallback = .{
+                .enabled = true,
+                .type = "openrouter",
+                .base_url = "https://openrouter.ai/api",
+                .model = "openai/gpt-5.2-mini",
+                .max_retries = 1,
+                .api_key_env = "OPENROUTER_API_KEY",
+                .app_name = "Contubernium",
+            },
+        },
+        .paths = .{
+            .logs_dir = "logs",
+        },
+    };
+
+    try initializeRuntimeRunLog(scratch, config, &state, "mission");
+
+    const loaded = try loadRuntimeRunLog(scratch, state.runtime_session.active_log_path);
+    try testing.expectEqualStrings("ollama-native", loaded.provider);
+    try testing.expectEqualStrings("qwen2.5-coder:7b", loaded.model);
+    try testing.expectEqualStrings("smallest-capable", loaded.model_policy.strategy);
+    try testing.expectEqualStrings("qwen2.5-coder:14b", loaded.model_policy.escalation_model);
+    try testing.expectEqualStrings("openrouter", loaded.model_policy.fallback_provider);
+    try testing.expectEqualStrings("openai/gpt-5.2-mini", loaded.model_policy.fallback_model);
+}
+
+test "snapshotFromState prefers the active routed provider over the primary config" {
+    const testing = std.testing;
+    const config = AppConfig{
+        .model_policy = .{
+            .enabled = true,
+            .primary = .{
+                .type = "ollama-native",
+                .model = "qwen2.5-coder:7b",
+            },
+            .fallback = .{
+                .enabled = true,
+                .type = "openrouter",
+                .base_url = "https://openrouter.ai/api",
+                .model = "openai/gpt-5.2-mini",
+                .api_key_env = "OPENROUTER_API_KEY",
+                .app_name = "Contubernium",
+            },
+        },
+    };
+
+    var state = AppState{};
+    state.runtime_session.provider = "openrouter";
+    state.runtime_session.model = "openai/gpt-5.2-mini";
+
+    const snapshot = snapshotFromState(config, state, "Contubernium");
+    try testing.expectEqualStrings("openrouter", snapshot.provider_type);
+    try testing.expectEqualStrings("openai/gpt-5.2-mini", snapshot.model);
+}
+
 test "persistSessionMemory writes durable local and global session indexes" {
     const testing = std.testing;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -1458,6 +1600,7 @@ test "snapshotFromState uses config and loop state" {
     try testing.expectEqual(@as(usize, 300), snapshot.estimated_prompt_tokens);
     try testing.expectEqual(@as(usize, 28372), snapshot.remaining_context_tokens);
 }
+
 test "toneForOutcome treats interrupted runs as danger" {
     const testing = std.testing;
     var state = AppState{};
