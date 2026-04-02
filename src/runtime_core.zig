@@ -44,8 +44,12 @@ pub const minimum_helper_agent_count = protocol.minimum_helper_agent_count;
 
 pub const AppConfig = struct {
     runtime_version: usize = 1,
+    model_policy: ModelPolicyConfig = .{},
     provider: ProviderConfig = .{},
-    fallback_provider: ProviderConfig = .{},
+    fallback_provider: ProviderConfig = .{
+        .enabled = false,
+        .model = "",
+    },
     paths: PathsConfig = .{},
     policy: PolicyConfig = .{},
     context: ContextConfig = .{},
@@ -59,6 +63,68 @@ pub const ProviderConfig = struct {
     timeout_ms: usize = 120000,
     max_retries: usize = 2,
     structured_output: []const u8 = "json",
+    api_key: []const u8 = "",
+    api_key_env: []const u8 = "",
+    site_url: []const u8 = "",
+    app_name: []const u8 = "",
+};
+
+pub const ModelEscalationConfig = struct {
+    enabled: bool = false,
+    provider: ProviderConfig = .{
+        .enabled = false,
+        .model = "",
+    },
+    on_repair_failure: bool = true,
+    repair_attempt_threshold: usize = 1,
+    on_context_pressure: bool = true,
+    prompt_token_threshold: usize = 12000,
+    context_percent_threshold: usize = 70,
+};
+
+pub const ModelPolicyConfig = struct {
+    enabled: bool = false,
+    strategy: []const u8 = "smallest-capable",
+    primary: ProviderConfig = .{},
+    escalation: ModelEscalationConfig = .{},
+    fallback: ProviderConfig = .{
+        .enabled = false,
+        .type = "openrouter",
+        .base_url = "https://openrouter.ai/api",
+        .model = "",
+        .api_key_env = "OPENROUTER_API_KEY",
+        .app_name = "Contubernium",
+    },
+};
+
+pub const ResolvedModelPolicy = struct {
+    strategy: []const u8 = "single-provider",
+    primary: ProviderConfig = .{},
+    escalation: ModelEscalationConfig = .{},
+    fallback: ProviderConfig = .{
+        .enabled = false,
+        .type = "openrouter",
+        .base_url = "https://openrouter.ai/api",
+        .model = "",
+        .api_key_env = "OPENROUTER_API_KEY",
+        .app_name = "Contubernium",
+    },
+};
+
+pub const ActiveModelRoute = struct {
+    role: []const u8 = "",
+    reason: []const u8 = "",
+    provider: ProviderConfig = .{},
+};
+
+pub const RuntimeModelPolicyLog = struct {
+    strategy: []const u8 = "",
+    primary_provider: []const u8 = "",
+    primary_model: []const u8 = "",
+    escalation_provider: []const u8 = "",
+    escalation_model: []const u8 = "",
+    fallback_provider: []const u8 = "",
+    fallback_model: []const u8 = "",
 };
 
 pub const PathsConfig = struct {
@@ -166,6 +232,12 @@ pub const RuntimeSession = struct {
     provider: []const u8 = "",
     model: []const u8 = "",
     endpoint: []const u8 = "",
+    primary_provider: []const u8 = "",
+    primary_model: []const u8 = "",
+    primary_endpoint: []const u8 = "",
+    policy_strategy: []const u8 = "",
+    last_model_role: []const u8 = "",
+    last_model_reason: []const u8 = "",
     approval_mode: []const u8 = "guarded",
     active_approval: ApprovalRequest = .{},
     current_turn_id: []const u8 = "",
@@ -463,9 +535,14 @@ pub const StateManager = struct {
 
     fn initializeRuntimeSession(self: StateManager, config: AppConfig) void {
         ensureLoopBudget(self.state);
-        self.state.runtime_session.provider = config.provider.type;
-        self.state.runtime_session.model = config.provider.model;
-        self.state.runtime_session.endpoint = config.provider.base_url;
+        const model_policy = resolveModelPolicy(config);
+        self.state.runtime_session.provider = model_policy.primary.type;
+        self.state.runtime_session.model = model_policy.primary.model;
+        self.state.runtime_session.endpoint = model_policy.primary.base_url;
+        self.state.runtime_session.primary_provider = model_policy.primary.type;
+        self.state.runtime_session.primary_model = model_policy.primary.model;
+        self.state.runtime_session.primary_endpoint = model_policy.primary.base_url;
+        self.state.runtime_session.policy_strategy = model_policy.strategy;
         self.state.runtime_session.approval_mode = config.policy.approval_mode;
         self.state.runtime_session.context_budget.context_window_tokens = config.context.estimated_context_window_tokens;
         self.state.runtime_session.context_budget.response_reserve_tokens = config.context.response_reserve_tokens;
@@ -482,9 +559,16 @@ pub const StateManager = struct {
         self.state.agent_loop.iteration += 1;
         self.state.runtime_session.status = .running;
         self.clearFailure();
-        self.state.runtime_session.provider = config.provider.type;
-        self.state.runtime_session.model = config.provider.model;
-        self.state.runtime_session.endpoint = config.provider.base_url;
+        const model_policy = resolveModelPolicy(config);
+        self.state.runtime_session.provider = model_policy.primary.type;
+        self.state.runtime_session.model = model_policy.primary.model;
+        self.state.runtime_session.endpoint = model_policy.primary.base_url;
+        self.state.runtime_session.primary_provider = model_policy.primary.type;
+        self.state.runtime_session.primary_model = model_policy.primary.model;
+        self.state.runtime_session.primary_endpoint = model_policy.primary.base_url;
+        self.state.runtime_session.policy_strategy = model_policy.strategy;
+        self.state.runtime_session.last_model_role = "";
+        self.state.runtime_session.last_model_reason = "";
         self.state.runtime_session.approval_mode = config.policy.approval_mode;
         self.state.runtime_session.last_actor = self.state.current_actor;
         self.state.runtime_session.current_turn_id = try makeTurnId(
@@ -786,10 +870,15 @@ pub const StateManager = struct {
     }
 
     pub fn noteHealthCheck(self: StateManager, now: []const u8, config: AppConfig) void {
+        const model_policy = resolveModelPolicy(config);
         self.state.runtime_session.last_health_check = now;
-        self.state.runtime_session.provider = config.provider.type;
-        self.state.runtime_session.model = config.provider.model;
-        self.state.runtime_session.endpoint = config.provider.base_url;
+        self.state.runtime_session.provider = model_policy.primary.type;
+        self.state.runtime_session.model = model_policy.primary.model;
+        self.state.runtime_session.endpoint = model_policy.primary.base_url;
+        self.state.runtime_session.primary_provider = model_policy.primary.type;
+        self.state.runtime_session.primary_model = model_policy.primary.model;
+        self.state.runtime_session.primary_endpoint = model_policy.primary.base_url;
+        self.state.runtime_session.policy_strategy = model_policy.strategy;
         self.state.runtime_session.approval_mode = config.policy.approval_mode;
         self.clearFailure();
     }
@@ -800,6 +889,14 @@ pub const StateManager = struct {
 
     pub fn setRepairAttempts(self: StateManager, attempts: usize) void {
         self.state.runtime_session.repair_attempts = attempts;
+    }
+
+    pub fn setActiveModelRoute(self: StateManager, route: ActiveModelRoute) void {
+        self.state.runtime_session.provider = route.provider.type;
+        self.state.runtime_session.model = route.provider.model;
+        self.state.runtime_session.endpoint = route.provider.base_url;
+        self.state.runtime_session.last_model_role = route.role;
+        self.state.runtime_session.last_model_reason = route.reason;
     }
 };
 
@@ -823,6 +920,7 @@ pub const RuntimeRunLog = struct {
     project_name: []const u8 = "",
     provider: []const u8 = "",
     model: []const u8 = "",
+    model_policy: RuntimeModelPolicyLog = .{},
     approval_mode: []const u8 = "",
     mission_prompt: []const u8 = "",
     events: []const RuntimeLogEvent = &.{},
@@ -837,6 +935,10 @@ pub const RuntimeLogEvent = struct {
     action: []const u8 = "",
     status: []const u8 = "",
     tool: []const u8 = "",
+    provider: []const u8 = "",
+    model: []const u8 = "",
+    policy_role: []const u8 = "",
+    policy_reason: []const u8 = "",
     summary: []const u8 = "",
     input: []const u8 = "",
     output: []const u8 = "",
@@ -851,6 +953,10 @@ pub const RuntimeLogEventSpec = struct {
     action: []const u8,
     status: []const u8 = "info",
     tool: []const u8 = "",
+    provider: []const u8 = "",
+    model: []const u8 = "",
+    policy_role: []const u8 = "",
+    policy_reason: []const u8 = "",
     summary: []const u8 = "",
     input: []const u8 = "",
     output: []const u8 = "",
@@ -1280,6 +1386,51 @@ pub fn resolvedContextBudget(config: ContextConfig, budget: ContextBudgetState) 
     return resolved;
 }
 
+pub fn providerUsesOpenAICompatibleTransport(provider: ProviderConfig) bool {
+    return eql(provider.type, "openai-compatible") or eql(provider.type, "openrouter");
+}
+
+pub fn resolveModelPolicy(config: AppConfig) ResolvedModelPolicy {
+    if (config.model_policy.enabled) {
+        return .{
+            .strategy = config.model_policy.strategy,
+            .primary = config.model_policy.primary,
+            .escalation = config.model_policy.escalation,
+            .fallback = config.model_policy.fallback,
+        };
+    }
+
+    return .{
+        .strategy = "legacy-single-provider",
+        .primary = config.provider,
+        .escalation = .{},
+        .fallback = config.fallback_provider,
+    };
+}
+
+pub fn syncConfigProviderMirrors(config: *AppConfig) void {
+    if (config.model_policy.enabled) {
+        config.provider = config.model_policy.primary;
+        config.fallback_provider = config.model_policy.fallback;
+    } else {
+        config.model_policy.primary = config.provider;
+        config.model_policy.fallback = config.fallback_provider;
+    }
+}
+
+pub fn runtimeModelPolicyLog(config: AppConfig) RuntimeModelPolicyLog {
+    const model_policy = resolveModelPolicy(config);
+    return .{
+        .strategy = model_policy.strategy,
+        .primary_provider = model_policy.primary.type,
+        .primary_model = model_policy.primary.model,
+        .escalation_provider = model_policy.escalation.provider.type,
+        .escalation_model = model_policy.escalation.provider.model,
+        .fallback_provider = model_policy.fallback.type,
+        .fallback_model = model_policy.fallback.model,
+    };
+}
+
 pub fn buildStateSnapshot(config: AppConfig, state: AppState, project_name: []const u8) StateSnapshot {
     const budget = resolvedContextBudget(config.context, state.runtime_session.context_budget);
     return .{
@@ -1313,10 +1464,11 @@ pub fn buildStateSnapshot(config: AppConfig, state: AppState, project_name: []co
 
 pub fn snapshotFromState(config: AppConfig, state: AppState, project_name: []const u8) TuiSnapshot {
     const snapshot = buildStateSnapshot(config, state, project_name);
+    const model_policy = resolveModelPolicy(config);
     return .{
         .project_name = snapshot.project_name,
-        .provider_type = config.provider.type,
-        .model = if (state.runtime_session.model.len > 0) state.runtime_session.model else config.provider.model,
+        .provider_type = if (state.runtime_session.provider.len > 0) state.runtime_session.provider else model_policy.primary.type,
+        .model = if (state.runtime_session.model.len > 0) state.runtime_session.model else model_policy.primary.model,
         .logs_dir = config.paths.logs_dir,
         .approval_mode = snapshot.approval_mode,
         .global_status = @tagName(snapshot.global_status),
@@ -1768,11 +1920,12 @@ pub fn emitStreamFinalize(hooks: RuntimeHooks, actor: []const u8, text: []const 
 
 pub fn emitStateSnapshot(hooks: RuntimeHooks, config: AppConfig, state: AppState) void {
     const snapshot = buildStateSnapshot(config, state, if (!eql(state.project_name, "UNASSIGNED")) state.project_name else "");
+    const model_policy = resolveModelPolicy(config);
     hooks.emit(.{
         .kind = .state_snapshot,
         .project_name = snapshot.project_name,
-        .provider_type = config.provider.type,
-        .model = if (state.runtime_session.model.len > 0) state.runtime_session.model else config.provider.model,
+        .provider_type = if (state.runtime_session.provider.len > 0) state.runtime_session.provider else model_policy.primary.type,
+        .model = if (state.runtime_session.model.len > 0) state.runtime_session.model else model_policy.primary.model,
         .logs_dir = config.paths.logs_dir,
         .approval_mode = snapshot.approval_mode,
         .global_status = @tagName(snapshot.global_status),
@@ -1818,6 +1971,9 @@ pub fn friendlyRuntimeError(allocator: std.mem.Allocator, err: anyerror) ![]cons
     if (err == error.ProviderRejectedRequest) {
         return try allocator.dupe(u8, "the provider rejected the request. Check the current model, endpoint, and backend logs.");
     }
+    if (err == error.MissingProviderApiKey) {
+        return try allocator.dupe(u8, "the configured provider needs an API key. Set the configured env var or add the key to the provider config.");
+    }
     if (err == error.ModelListUnavailable) {
         return try allocator.dupe(u8, "no cached model roster is loaded. Run /models first or set /model <name> manually.");
     }
@@ -1839,6 +1995,7 @@ pub fn runtimeErrorCode(err: anyerror) []const u8 {
         error.ModelNotFound => "MODEL_NOT_FOUND",
         error.EmptyModelOutput => "EMPTY_MODEL_OUTPUT",
         error.ProviderRejectedRequest => "PROVIDER_REJECTED_REQUEST",
+        error.MissingProviderApiKey => "MISSING_PROVIDER_API_KEY",
         error.ModelListUnavailable => "MODEL_LIST_UNAVAILABLE",
         error.ModelSelectionOutOfRange => "MODEL_SELECTION_OUT_OF_RANGE",
         error.Interrupted => "LOOP_INTERRUPTED",

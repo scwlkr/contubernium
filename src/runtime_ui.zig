@@ -159,7 +159,7 @@ pub const CliSpinner = struct {
         return initWithEnabled(allocator, terminalUiEnabled(std.posix.STDERR_FILENO));
     }
 
-    fn initWithEnabled(allocator: std.mem.Allocator, enabled: bool) !CliSpinner {
+    pub fn initWithEnabled(allocator: std.mem.Allocator, enabled: bool) !CliSpinner {
         if (!enabled) return .{};
 
         const state = try allocator.create(CliSpinnerState);
@@ -175,7 +175,7 @@ pub const CliSpinner = struct {
         return spinner;
     }
 
-    fn hooks(self: *CliSpinner) RuntimeHooks {
+    pub fn hooks(self: *CliSpinner) RuntimeHooks {
         if (!self.enabled or self.state == null) return .{};
         return .{
             .context = self.state.?,
@@ -183,7 +183,7 @@ pub const CliSpinner = struct {
         };
     }
 
-    fn deinit(self: *CliSpinner) void {
+    pub fn deinit(self: *CliSpinner) void {
         if (!self.enabled or self.state == null) return;
         const state = self.state.?;
         state.mutex.lock();
@@ -873,11 +873,17 @@ fn formatModelRoster(allocator: std.mem.Allocator, models: []const []const u8, c
 fn saveSelectedModelByName(allocator: std.mem.Allocator, model_name: []const u8) ![]const u8 {
     const config_path = try resolveConfigPath(allocator);
     var config = try loadConfig(allocator, config_path);
+    if (config.model_policy.enabled) {
+        config.model_policy.primary.model = model_name;
+    }
     config.provider.model = model_name;
     try saveConfig(allocator, config_path, config);
 
     var state = try loadState(allocator, config.paths.state_file);
     state.runtime_session.model = model_name;
+    if (state.runtime_session.primary_model.len > 0) {
+        state.runtime_session.primary_model = model_name;
+    }
     try saveState(allocator, config.paths.state_file, state);
 
     return try std.fmt.allocPrint(allocator, "active model set to {s}", .{model_name});

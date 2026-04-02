@@ -300,6 +300,27 @@ If you need a Bash-only fallback from a source checkout, run:
 
 See [docs/installation.md](/Users/shanewalker/Desktop/dev/Contubernium/docs/installation.md) for the full install and initialization flow and [USER_MANUAL.md](/Users/shanewalker/Desktop/dev/Contubernium/USER_MANUAL.md) for shipped operator-facing behavior.
 
+## Configure Model Policy
+
+Contubernium now routes models through `.contubernium/config.json` using a `model_policy` object instead of a single fixed provider/model pair.
+
+- `primary` is the default smallest-capable route, typically a local Ollama model
+- `escalation` is an optional stronger route used when prompt pressure or repair retries justify it
+- `fallback` is an optional backup route used automatically when the active provider/model fails
+
+Local-only mode:
+
+- keep `model_policy.primary.type = "ollama-native"`
+- leave `model_policy.fallback.enabled = false`
+
+Cloud-enabled mode:
+
+- set `model_policy.fallback.type = "openrouter"` for first-class OpenRouter support
+- export `OPENROUTER_API_KEY`
+- optionally set `site_url` and `app_name` to send OpenRouter attribution headers
+
+Run logs under `.contubernium/logs/` record the primary route, policy decisions, escalation reasons, and fallback usage for each mission.
+
 ---
 
 # 🧭 Usage

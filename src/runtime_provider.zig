@@ -196,10 +196,156 @@ const freeOwnedDecanusDecision = core.freeOwnedDecanusDecision;
 const freeOwnedSpecialistResult = core.freeOwnedSpecialistResult;
 const stdoutPrint = core.stdoutPrint;
 const stderrPrint = core.stderrPrint;
+const providerUsesOpenAICompatibleTransport = core.providerUsesOpenAICompatibleTransport;
+
+const ProviderRequestHeaders = struct {
+    authorization: ?[]u8 = null,
+    referer: ?[]u8 = null,
+    title: ?[]u8 = null,
+
+    fn deinit(self: ProviderRequestHeaders, allocator: std.mem.Allocator) void {
+        if (self.authorization) |value| allocator.free(value);
+        if (self.referer) |value| allocator.free(value);
+        if (self.title) |value| allocator.free(value);
+    }
+};
+
+fn resolveProviderApiKey(allocator: std.mem.Allocator, provider: ProviderConfig) ![]u8 {
+    const explicit_key = trimAscii(provider.api_key);
+    if (explicit_key.len > 0) return try allocator.dupe(u8, explicit_key);
+
+    const env_name = trimAscii(provider.api_key_env);
+    if (env_name.len > 0) {
+        return std.process.getEnvVarOwned(allocator, env_name) catch |err| switch (err) {
+            error.EnvironmentVariableNotFound => error.MissingProviderApiKey,
+            else => return err,
+        };
+    }
+
+    if (eql(provider.type, "openrouter")) return error.MissingProviderApiKey;
+    return try allocator.dupe(u8, "");
+}
+
+fn buildProviderRequestHeaders(allocator: std.mem.Allocator, provider: ProviderConfig) !ProviderRequestHeaders {
+    var headers = ProviderRequestHeaders{};
+
+    if (providerUsesOpenAICompatibleTransport(provider)) {
+        const api_key = try resolveProviderApiKey(allocator, provider);
+        if (api_key.len > 0) {
+            headers.authorization = try std.fmt.allocPrint(allocator, "Authorization: Bearer {s}", .{api_key});
+        }
+        allocator.free(api_key);
+    }
+
+    if (eql(provider.type, "openrouter")) {
+        const site_url = trimAscii(provider.site_url);
+        const app_name = trimAscii(provider.app_name);
+        if (site_url.len > 0) {
+            headers.referer = try std.fmt.allocPrint(allocator, "HTTP-Referer: {s}", .{site_url});
+        }
+        if (app_name.len > 0) {
+            headers.title = try std.fmt.allocPrint(allocator, "X-OpenRouter-Title: {s}", .{app_name});
+        }
+    }
+
+    return headers;
+}
+
+fn appendProviderRequestHeaders(
+    allocator: std.mem.Allocator,
+    argv: *std.ArrayList([]const u8),
+    headers: ProviderRequestHeaders,
+) !void {
+    try argv.appendSlice(allocator, &.{ "-H", "Content-Type: application/json" });
+    if (headers.authorization) |value| try argv.appendSlice(allocator, &.{ "-H", value });
+    if (headers.referer) |value| try argv.appendSlice(allocator, &.{ "-H", value });
+    if (headers.title) |value| try argv.appendSlice(allocator, &.{ "-H", value });
+}
+
+fn providerListModelsOpenAICompatible(allocator: std.mem.Allocator, provider: ProviderConfig) ![][]const u8 {
+    const url = try std.fmt.allocPrint(allocator, "{s}/v1/models", .{provider.base_url});
+    defer allocator.free(url);
+
+    const headers = try buildProviderRequestHeaders(allocator, provider);
+    defer headers.deinit(allocator);
+
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(allocator);
+    try argv.appendSlice(allocator, &.{ "curl", "-fsS", "--max-time", try timeoutSeconds(allocator, provider.timeout_ms) });
+    try appendProviderRequestHeaders(allocator, &argv, headers);
+    try argv.append(allocator, url);
+
+    const result = try runCommandCapture(allocator, argv.items);
+    if (result.exit_code != 0) return error.BackendUnavailable;
+    const parsed = try parseJson(OpenAIModelsResponse, allocator, result.stdout);
+    if (parsed.@"error".message.len > 0) return error.BackendUnavailable;
+    var models: std.ArrayList([]const u8) = .empty;
+    for (parsed.data) |model| {
+        try models.append(allocator, model.id);
+    }
+    return try models.toOwnedSlice(allocator);
+}
+
+fn providerStructuredChatOpenAICompatible(
+    allocator: std.mem.Allocator,
+    provider: ProviderConfig,
+    system_prompt: []const u8,
+    user_prompt: []const u8,
+    started: i64,
+) !ProviderResponse {
+    const messages = [_]MessagePayload{
+        .{ .role = "system", .content = system_prompt },
+        .{ .role = "user", .content = user_prompt },
+    };
+    const body = try stringifyJsonToString(
+        allocator,
+        OpenAIChatRequest{
+            .model = provider.model,
+            .messages = &messages,
+        },
+    );
+    defer allocator.free(body);
+
+    const url = try std.fmt.allocPrint(allocator, "{s}/v1/chat/completions", .{provider.base_url});
+    defer allocator.free(url);
+
+    const headers = try buildProviderRequestHeaders(allocator, provider);
+    defer headers.deinit(allocator);
+
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(allocator);
+    try argv.appendSlice(allocator, &.{
+        "curl",
+        "-fsS",
+        "--max-time",
+        try timeoutSeconds(allocator, provider.timeout_ms),
+        "-X",
+        "POST",
+        "-d",
+        body,
+    });
+    try appendProviderRequestHeaders(allocator, &argv, headers);
+    try argv.append(allocator, url);
+
+    const result = try runCommandCapture(allocator, argv.items);
+    if (result.exit_code != 0) return error.BackendUnavailable;
+    const parsed = try parseJson(OpenAIChatResponse, allocator, result.stdout);
+    if (parsed.@"error".message.len > 0) return error.ProviderRejectedRequest;
+    if (parsed.choices.len == 0) return error.EmptyProviderResponse;
+    const raw_text = try openAIMessageRawText(allocator, parsed.choices[0].message);
+    return .{
+        .raw_text = raw_text,
+        .transport_text = result.stdout,
+        .provider_name = provider.type,
+        .model_name = provider.model,
+        .latency_ms = std.time.milliTimestamp() - started,
+    };
+}
 
 pub fn providerListModels(allocator: std.mem.Allocator, provider: ProviderConfig) ![][]const u8 {
     if (eql(provider.type, "ollama-native")) {
         const url = try std.fmt.allocPrint(allocator, "{s}/api/tags", .{provider.base_url});
+        defer allocator.free(url);
         const result = try runCommandCapture(allocator, &.{ "curl", "-fsS", "--max-time", try timeoutSeconds(allocator, provider.timeout_ms), url });
         if (result.exit_code != 0) return error.BackendUnavailable;
         const parsed = try parseJson(OllamaTagsResponse, allocator, result.stdout);
@@ -211,17 +357,8 @@ pub fn providerListModels(allocator: std.mem.Allocator, provider: ProviderConfig
         return try models.toOwnedSlice(allocator);
     }
 
-    if (eql(provider.type, "openai-compatible")) {
-        const url = try std.fmt.allocPrint(allocator, "{s}/v1/models", .{provider.base_url});
-        const result = try runCommandCapture(allocator, &.{ "curl", "-fsS", "--max-time", try timeoutSeconds(allocator, provider.timeout_ms), url });
-        if (result.exit_code != 0) return error.BackendUnavailable;
-        const parsed = try parseJson(OpenAIModelsResponse, allocator, result.stdout);
-        if (parsed.@"error".message.len > 0) return error.BackendUnavailable;
-        var models: std.ArrayList([]const u8) = .empty;
-        for (parsed.data) |model| {
-            try models.append(allocator, model.id);
-        }
-        return try models.toOwnedSlice(allocator);
+    if (providerUsesOpenAICompatibleTransport(provider)) {
+        return try providerListModelsOpenAICompatible(allocator, provider);
     }
 
     return error.UnsupportedProvider;
@@ -239,14 +376,17 @@ pub fn providerStructuredChat(
 
     if (eql(provider.type, "ollama-native")) {
         const url = try std.fmt.allocPrint(allocator, "{s}/api/chat", .{provider.base_url});
+        defer allocator.free(url);
         const stream = hooks.emit_fn != null;
         const body = try buildOllamaChatBody(allocator, provider, system_prompt, user_prompt, stream);
+        defer allocator.free(body);
 
         if (stream) {
             return providerStructuredChatOllamaStreaming(allocator, provider, schema_kind, body, url, started, hooks) catch |err| {
                 if (err != error.EmptyModelOutput) return err;
                 emitLog(hooks, .warning, schema_kind, "Streaming Retry", "streaming returned no content; retrying once without streaming", .plain);
                 const retry_body = try buildOllamaChatBody(allocator, provider, system_prompt, user_prompt, false);
+                defer allocator.free(retry_body);
                 return try providerStructuredChatOllamaNonStreaming(allocator, provider, retry_body, url, started);
             };
         }
@@ -254,47 +394,8 @@ pub fn providerStructuredChat(
         return try providerStructuredChatOllamaNonStreaming(allocator, provider, body, url, started);
     }
 
-    if (eql(provider.type, "openai-compatible")) {
-        const messages = [_]MessagePayload{
-            .{ .role = "system", .content = system_prompt },
-            .{ .role = "user", .content = user_prompt },
-        };
-        const body = try stringifyJsonToString(
-            allocator,
-            OpenAIChatRequest{
-                .model = provider.model,
-                .messages = &messages,
-            },
-        );
-        const url = try std.fmt.allocPrint(allocator, "{s}/v1/chat/completions", .{provider.base_url});
-        const result = try runCommandCapture(
-            allocator,
-            &.{
-                "curl",
-                "-fsS",
-                "--max-time",
-                try timeoutSeconds(allocator, provider.timeout_ms),
-                "-H",
-                "Content-Type: application/json",
-                "-X",
-                "POST",
-                "-d",
-                body,
-                url,
-            },
-        );
-        if (result.exit_code != 0) return error.BackendUnavailable;
-        const parsed = try parseJson(OpenAIChatResponse, allocator, result.stdout);
-        if (parsed.@"error".message.len > 0) return error.ProviderRejectedRequest;
-        if (parsed.choices.len == 0) return error.EmptyProviderResponse;
-        const raw_text = try openAIMessageRawText(allocator, parsed.choices[0].message);
-        return .{
-            .raw_text = raw_text,
-            .transport_text = result.stdout,
-            .provider_name = provider.type,
-            .model_name = provider.model,
-            .latency_ms = std.time.milliTimestamp() - started,
-        };
+    if (providerUsesOpenAICompatibleTransport(provider)) {
+        return try providerStructuredChatOpenAICompatible(allocator, provider, system_prompt, user_prompt, started);
     }
 
     return error.UnsupportedProvider;
