@@ -8,6 +8,10 @@ pub const Action = enum {
     mission_start,
     mission_continue,
     mission_step,
+    sessions_list,
+    sessions_show,
+    sessions_resume,
+    sessions_approvals,
     ui,
     ui_bridge,
 };
@@ -81,9 +85,28 @@ const mission_prompt_args = [_]ArgSpec{
     .{ .name = "<prompt>", .description = "Mission objective to hand to decanus." },
 };
 
+const session_list_args = [_]ArgSpec{
+    .{ .name = "[project-root]", .description = "Optional project root for explicit cross-project inspection." },
+};
+
+const session_show_args = [_]ArgSpec{
+    .{ .name = "<session-id>", .description = "Durable session id to inspect." },
+    .{ .name = "[project-root]", .description = "Optional project root to authorize cross-project inspection." },
+};
+
+const session_resume_args = [_]ArgSpec{
+    .{ .name = "<session-id>", .description = "Durable session id to restore and continue." },
+    .{ .name = "[project-root]", .description = "Optional project root to authorize cross-project recall." },
+};
+
+const session_approvals_args = [_]ArgSpec{
+    .{ .name = "<on|off>", .description = "Turn session approval bypass on or off for the active session." },
+};
+
 const root_usage = [_][]const u8{
     "contubernium <command>",
     "contubernium mission",
+    "contubernium sessions list",
     "contubernium ui",
     "contubernium mission start \"<prompt>\"",
 };
@@ -121,6 +144,29 @@ const models_usage = [_][]const u8{
     "contubernium models",
 };
 
+const sessions_usage = [_][]const u8{
+    "contubernium sessions <command>",
+};
+
+const sessions_list_usage = [_][]const u8{
+    "contubernium sessions list",
+    "contubernium sessions list /path/to/project",
+};
+
+const sessions_show_usage = [_][]const u8{
+    "contubernium sessions show <session-id>",
+    "contubernium sessions show <session-id> /path/to/project",
+};
+
+const sessions_resume_usage = [_][]const u8{
+    "contubernium sessions resume <session-id>",
+    "contubernium sessions resume <session-id> /path/to/project",
+};
+
+const sessions_approvals_usage = [_][]const u8{
+    "contubernium sessions approvals <on|off>",
+};
+
 const ui_examples = [_]Example{
     .{ .command = "contubernium ui", .description = "Open the terminal UI." },
     .{ .command = "contubernium", .description = "Open the terminal UI with the default shortcut." },
@@ -136,6 +182,31 @@ const doctor_examples = [_]Example{
 
 const models_examples = [_]Example{
     .{ .command = "contubernium models", .description = "List models reported by the active provider." },
+};
+
+const sessions_examples = [_]Example{
+    .{ .command = "contubernium sessions list", .description = "List durable sessions recorded for the current project." },
+    .{ .command = "contubernium sessions show session-1712000000000", .description = "Inspect one stored session record." },
+    .{ .command = "contubernium sessions resume session-1712000000000", .description = "Restore a prior session snapshot and continue it." },
+    .{ .command = "contubernium sessions approvals on", .description = "Enable session-scoped approval bypass for the active session." },
+};
+
+const sessions_list_examples = [_]Example{
+    .{ .command = "contubernium sessions list", .description = "Show locally recorded sessions for the current project." },
+    .{ .command = "contubernium sessions list /path/to/project", .description = "Inspect another project's sessions with an explicit root." },
+};
+
+const sessions_show_examples = [_]Example{
+    .{ .command = "contubernium sessions show session-1712000000000", .description = "Print the canonical session record for a stored session." },
+};
+
+const sessions_resume_examples = [_]Example{
+    .{ .command = "contubernium sessions resume session-1712000000000", .description = "Restore a stored session and continue it from the saved state." },
+};
+
+const sessions_approvals_examples = [_]Example{
+    .{ .command = "contubernium sessions approvals on", .description = "Bypass write and shell approvals for the active session only." },
+    .{ .command = "contubernium sessions approvals off", .description = "Return the active session to guarded approval mode." },
 };
 
 const mission_examples = [_]Example{
@@ -164,6 +235,7 @@ const root_examples = [_]Example{
     .{ .command = "contubernium mission", .description = "Choose a model, type a mission, and start it interactively." },
     .{ .command = "contubernium mission start \"Add a release checklist to the docs\"", .description = "Start a new mission from the command line." },
     .{ .command = "contubernium mission continue", .description = "Continue the current mission after a block or interruption." },
+    .{ .command = "contubernium sessions list", .description = "Inspect durable session history for the current project." },
     .{ .command = "contubernium models", .description = "Show models available through the active provider." },
 };
 
@@ -289,6 +361,67 @@ const models_command = Command{
     .action = .models_list,
 };
 
+const sessions_list_command = Command{
+    .name = "list",
+    .path_label = "sessions list",
+    .summary = "List durable sessions for a project.",
+    .description = "Inspect the local durable session index. Pass a project root explicitly to inspect a different project on purpose.",
+    .usage = sessions_list_usage[0..],
+    .args = session_list_args[0..],
+    .examples = sessions_list_examples[0..],
+    .action = .sessions_list,
+};
+
+const sessions_show_command = Command{
+    .name = "show",
+    .path_label = "sessions show",
+    .summary = "Inspect one durable session record.",
+    .description = "Print the canonical stored session record, including status, approval mode, and linked run logs.",
+    .usage = sessions_show_usage[0..],
+    .args = session_show_args[0..],
+    .examples = sessions_show_examples[0..],
+    .action = .sessions_show,
+};
+
+const sessions_resume_command = Command{
+    .name = "resume",
+    .path_label = "sessions resume",
+    .summary = "Restore and continue a stored session.",
+    .description = "Load a prior durable session snapshot into project state and continue the commander loop from that checkpoint.",
+    .usage = sessions_resume_usage[0..],
+    .args = session_resume_args[0..],
+    .examples = sessions_resume_examples[0..],
+    .action = .sessions_resume,
+};
+
+const sessions_approvals_command = Command{
+    .name = "approvals",
+    .path_label = "sessions approvals",
+    .summary = "Toggle approval bypass for the active session.",
+    .description = "Enable or disable session-scoped bypass for guarded write and shell approvals without changing project config defaults.",
+    .usage = sessions_approvals_usage[0..],
+    .args = session_approvals_args[0..],
+    .examples = sessions_approvals_examples[0..],
+    .action = .sessions_approvals,
+};
+
+const sessions_children = [_]*const Command{
+    &sessions_list_command,
+    &sessions_show_command,
+    &sessions_resume_command,
+    &sessions_approvals_command,
+};
+
+const sessions_command = Command{
+    .name = "sessions",
+    .path_label = "sessions",
+    .summary = "Inspect and resume durable session history.",
+    .description = "Use the project-local session store to list, inspect, resume, and control durable sessions explicitly.",
+    .usage = sessions_usage[0..],
+    .examples = sessions_examples[0..],
+    .children = sessions_children[0..],
+};
+
 const root_run_alias = Command{
     .name = "run",
     .path_label = "run",
@@ -335,6 +468,7 @@ const root_children = [_]*const Command{
     &ui_command,
     &init_command,
     &mission_command,
+    &sessions_command,
     &doctor_command,
     &models_command,
     &root_run_alias,
@@ -376,9 +510,18 @@ const runtime_group_entries = [_]*const Command{
     &models_command,
 };
 
+const session_group_entries = [_]*const Command{
+    &sessions_command,
+    &sessions_list_command,
+    &sessions_show_command,
+    &sessions_resume_command,
+    &sessions_approvals_command,
+};
+
 const root_groups = [_]RootGroup{
     .{ .title = "Start", .entries = start_group_entries[0..] },
     .{ .title = "Mission Control", .entries = mission_group_entries[0..] },
+    .{ .title = "Session History", .entries = session_group_entries[0..] },
     .{ .title = "Runtime", .entries = runtime_group_entries[0..] },
 };
 
@@ -565,6 +708,104 @@ fn validateInvocation(command: *const Command, args: []const []const u8) Decisio
                 } };
             }
 
+            return .{ .action = .{
+                .command = command,
+                .action = action,
+                .args = args,
+            } };
+        },
+        .sessions_show, .sessions_resume => {
+            if (args.len == 0) {
+                return .{ .failure = .{
+                    .kind = .missing_argument,
+                    .command = command,
+                    .argument = "<session-id>",
+                } };
+            }
+            if (isHelpToken(args[0])) return .{ .help = command };
+            if (isFlag(args[0])) {
+                return .{ .failure = .{
+                    .kind = .invalid_flag,
+                    .command = command,
+                    .token = args[0],
+                } };
+            }
+            if (args.len > 2) {
+                return .{ .failure = .{
+                    .kind = .unexpected_argument,
+                    .command = command,
+                    .token = args[2],
+                } };
+            }
+            return .{ .action = .{
+                .command = command,
+                .action = action,
+                .args = args,
+            } };
+        },
+        .sessions_list => {
+            if (args.len == 0) {
+                return .{ .action = .{
+                    .command = command,
+                    .action = action,
+                    .args = args,
+                } };
+            }
+            if (isHelpToken(args[0])) return .{ .help = command };
+            if (isFlag(args[0])) {
+                return .{ .failure = .{
+                    .kind = .invalid_flag,
+                    .command = command,
+                    .token = args[0],
+                } };
+            }
+            if (args.len > 1) {
+                return .{ .failure = .{
+                    .kind = .unexpected_argument,
+                    .command = command,
+                    .token = args[1],
+                } };
+            }
+            return .{ .action = .{
+                .command = command,
+                .action = action,
+                .args = args,
+            } };
+        },
+        .sessions_approvals => {
+            if (args.len == 0) {
+                return .{ .failure = .{
+                    .kind = .missing_argument,
+                    .command = command,
+                    .argument = "<on|off>",
+                } };
+            }
+            if (isHelpToken(args[0])) return .{ .help = command };
+            if (isFlag(args[0])) {
+                return .{ .failure = .{
+                    .kind = .invalid_flag,
+                    .command = command,
+                    .token = args[0],
+                } };
+            }
+            if (args.len > 1) {
+                return .{ .failure = .{
+                    .kind = .unexpected_argument,
+                    .command = command,
+                    .token = args[1],
+                } };
+            }
+            if (!std.mem.eql(u8, args[0], "on") and
+                !std.mem.eql(u8, args[0], "off") and
+                !std.mem.eql(u8, args[0], "true") and
+                !std.mem.eql(u8, args[0], "false"))
+            {
+                return .{ .failure = .{
+                    .kind = .unexpected_argument,
+                    .command = command,
+                    .token = args[0],
+                } };
+            }
             return .{ .action = .{
                 .command = command,
                 .action = action,
@@ -915,7 +1156,7 @@ test "parse routes mission aliases to canonical commands" {
 
 test "parse accepts models as the public command" {
     const testing = std.testing;
-    const decision = parse(&.{ "models" });
+    const decision = parse(&.{"models"});
     switch (decision) {
         .action => |invocation| {
             try testing.expectEqual(Action.models_list, invocation.action);
@@ -945,7 +1186,7 @@ test "parse returns mission help for inline help flags" {
 
 test "parse reports missing mission subcommands" {
     const testing = std.testing;
-    const decision = parse(&.{ "mission" });
+    const decision = parse(&.{"mission"});
     switch (decision) {
         .action => |invocation| try testing.expectEqual(Action.mission_compose, invocation.action),
         else => return error.UnexpectedValue,
@@ -961,13 +1202,52 @@ test "parse rejects stray flags for mission start" {
     }
 }
 
+test "parse routes sessions subcommands with optional project roots" {
+    const testing = std.testing;
+    const decision = parse(&.{ "sessions", "resume", "session-1", "/tmp/project" });
+    switch (decision) {
+        .action => |invocation| {
+            try testing.expectEqual(Action.sessions_resume, invocation.action);
+            try testing.expectEqualStrings("sessions resume", invocation.command.path_label);
+            try testing.expectEqual(@as(usize, 2), invocation.args.len);
+        },
+        else => return error.UnexpectedValue,
+    }
+}
+
+test "parse requires a session id for sessions show" {
+    const testing = std.testing;
+    const decision = parse(&.{ "sessions", "show" });
+    switch (decision) {
+        .failure => |failure| {
+            try testing.expectEqual(FailureKind.missing_argument, failure.kind);
+            try testing.expectEqualStrings("<session-id>", failure.argument);
+        },
+        else => return error.UnexpectedValue,
+    }
+}
+
+test "parse requires a mode for sessions approvals" {
+    const testing = std.testing;
+    const decision = parse(&.{ "sessions", "approvals" });
+    switch (decision) {
+        .failure => |failure| {
+            try testing.expectEqual(FailureKind.missing_argument, failure.kind);
+            try testing.expectEqualStrings("<on|off>", failure.argument);
+        },
+        else => return error.UnexpectedValue,
+    }
+}
+
 test "render root help lists the public command tree" {
     const testing = std.testing;
     const text = try renderHelp(testing.allocator, &root_command);
     defer testing.allocator.free(text);
 
     try testing.expect(std.mem.indexOf(u8, text, "Mission Control:") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "Session History:") != null);
     try testing.expect(std.mem.indexOf(u8, text, "mission start") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "sessions list") != null);
     try testing.expect(std.mem.indexOf(u8, text, "contubernium models") != null);
 }
 

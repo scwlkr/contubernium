@@ -798,7 +798,9 @@ pub fn executeValidatedToolRequest(
     request: ValidatedToolRequest,
     hooks: RuntimeHooks,
 ) !ToolRequestExecution {
-    if (!toolAllowsWithoutConfirmation(request.spec, config.policy) and
+    const session_allows_bypass = state.runtime_session.approval_bypass_enabled and request.spec.approval_gate != .none;
+    if (!session_allows_bypass and
+        !toolAllowsWithoutConfirmation(request.spec, config.policy) and
         !try confirmTool(allocator, config, state, hooks, actor, lane, request.spec.name, request.detail, request.target))
     {
         return .{

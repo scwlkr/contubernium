@@ -7,6 +7,9 @@ const loop_mod = @import("runtime_loop.zig");
 
 const ProviderConfig = core.ProviderConfig;
 const AppState = core.AppState;
+const SessionRecord = core.SessionRecord;
+const SessionIndex = core.SessionIndex;
+const SessionIndexEntry = core.SessionIndexEntry;
 const RuntimeUiEvent = core.RuntimeUiEvent;
 const RuntimeEventQueue = core.RuntimeEventQueue;
 const RuntimeControl = core.RuntimeControl;
@@ -29,6 +32,7 @@ const joinArgs = core.joinArgs;
 const joinStrings = core.joinStrings;
 const pathExists = core.pathExists;
 const pollInput = core.pollInput;
+const resolvedApprovalMode = core.resolvedApprovalMode;
 const resetStateForMission = core.resetStateForMission;
 const setOwnedSnapshot = core.setOwnedSnapshot;
 const snapshotFromState = core.snapshotFromState;
@@ -43,7 +47,10 @@ const parseJson = model_json.parseJson;
 
 const loadConfig = assets_mod.loadConfig;
 const loadProjectConfig = assets_mod.loadProjectConfig;
+const loadSessionIndex = assets_mod.loadSessionIndex;
+const loadSessionRecord = assets_mod.loadSessionRecord;
 const loadState = assets_mod.loadState;
+const persistSessionMemory = assets_mod.persistSessionMemory;
 const saveConfig = assets_mod.saveConfig;
 const saveState = assets_mod.saveState;
 const runDoctorCheck = assets_mod.runDoctorCheck;
@@ -51,6 +58,9 @@ const missionOutcomeSummary = assets_mod.missionOutcomeSummary;
 const scaffoldProject = assets_mod.scaffoldProject;
 const resolveContuberniumHome = assets_mod.resolveContuberniumHome;
 const resolveConfigPath = assets_mod.resolveConfigPath;
+const resolveProjectIdentity = assets_mod.resolveProjectIdentity;
+const sessionIdIsSafe = assets_mod.sessionIdIsSafe;
+const sessionRecordPath = assets_mod.sessionRecordPath;
 const initializeRuntimeRunLog = assets_mod.initializeRuntimeRunLog;
 const logRuntimeEvent = assets_mod.logRuntimeEvent;
 
@@ -313,23 +323,105 @@ pub fn cmdMissionStart(allocator: std.mem.Allocator, prompt_args: []const []cons
 pub fn cmdMissionStep(allocator: std.mem.Allocator) !void {
     const config = try loadProjectConfig(allocator);
     var state = try loadState(allocator, config.paths.state_file);
+    if (state.mission.initial_prompt.len == 0) return error.MissionNotInitialized;
     var spinner = try CliSpinner.init(allocator);
     defer spinner.deinit();
-    initializeRuntimeSession(allocator, &state, config);
+    try startRunFromState(allocator, config, &state, "mission_step", "single-step execution requested", "", true, spinner.hooks());
     _ = try executeStep(allocator, config, &state, spinner.hooks());
-    try saveState(allocator, config.paths.state_file, state);
+    try finishRunState(allocator, config, &state, "mission_step", spinner.hooks());
     try stdoutPrint("{s}\n", .{try renderCliMissionOutcome(allocator, state)});
 }
 
 pub fn cmdMissionContinue(allocator: std.mem.Allocator) !void {
     const config = try loadProjectConfig(allocator);
     var state = try loadState(allocator, config.paths.state_file);
+    if (state.mission.initial_prompt.len == 0) return error.MissionNotInitialized;
     var spinner = try CliSpinner.init(allocator);
     defer spinner.deinit();
-    initializeRuntimeSession(allocator, &state, config);
+    try startRunFromState(allocator, config, &state, "mission_continue", "active session resume requested", "", true, spinner.hooks());
     try runLoop(allocator, config, &state, spinner.hooks());
-    try saveState(allocator, config.paths.state_file, state);
+    try finishRunState(allocator, config, &state, "mission_continue", spinner.hooks());
     try stdoutPrint("{s}\n", .{try renderCliMissionOutcome(allocator, state)});
+}
+
+pub fn cmdSessionsList(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    const restore_cwd = try maybeChangeProjectRoot(allocator, if (args.len > 0) args[0] else null);
+    defer restoreProjectRoot(allocator, restore_cwd);
+
+    try scaffoldProject(allocator);
+    const config = try loadProjectConfig(allocator);
+    const index = try loadSessionIndex(allocator, config.paths.session_index_file);
+    try stdoutPrint("{s}\n", .{try renderSessionIndex(allocator, index)});
+}
+
+pub fn cmdSessionsShow(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    const session_id = trimAscii(args[0]);
+    if (!sessionIdIsSafe(session_id)) return error.InvalidSessionId;
+
+    const restore_cwd = try maybeChangeProjectRoot(allocator, if (args.len > 1) args[1] else null);
+    defer restoreProjectRoot(allocator, restore_cwd);
+
+    try scaffoldProject(allocator);
+    const config = try loadProjectConfig(allocator);
+    const record = try loadSessionRecordForProject(allocator, config, session_id);
+    try stdoutPrint("{s}\n", .{try renderSessionRecord(allocator, record)});
+}
+
+pub fn cmdSessionsResume(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    const session_id = trimAscii(args[0]);
+    if (!sessionIdIsSafe(session_id)) return error.InvalidSessionId;
+
+    const restore_cwd = try maybeChangeProjectRoot(allocator, if (args.len > 1) args[1] else null);
+    defer restoreProjectRoot(allocator, restore_cwd);
+
+    try scaffoldProject(allocator);
+    const config = try loadProjectConfig(allocator);
+    const record = try loadSessionRecordForProject(allocator, config, session_id);
+    var state = record.state_snapshot;
+
+    if (state.runtime_session.session_id.len == 0) state.runtime_session.session_id = record.session_id;
+    if (state.runtime_session.session_started_at.len == 0) state.runtime_session.session_started_at = record.created_at;
+    state.runtime_session.resume_count = if (state.runtime_session.resume_count >= record.resume_count)
+        state.runtime_session.resume_count
+    else
+        record.resume_count;
+
+    if (state.mission.initial_prompt.len == 0) return error.MissionNotInitialized;
+
+    if (state.global_status == .complete or state.runtime_session.status == .complete) {
+        try persistSessionMemory(allocator, config, &state, "sessions_resume");
+        try saveState(allocator, config.paths.state_file, state);
+        try stdoutPrint("{s}\n", .{try renderCliMissionOutcome(allocator, state)});
+        return;
+    }
+
+    var spinner = try CliSpinner.init(allocator);
+    defer spinner.deinit();
+    try startRunFromState(allocator, config, &state, "sessions_resume", "stored session resume requested", "", true, spinner.hooks());
+    try runLoop(allocator, config, &state, spinner.hooks());
+    try finishRunState(allocator, config, &state, "sessions_resume", spinner.hooks());
+    try stdoutPrint("{s}\n", .{try renderCliMissionOutcome(allocator, state)});
+}
+
+pub fn cmdSessionsApprovals(allocator: std.mem.Allocator, enabled: bool) !void {
+    const config = try loadProjectConfig(allocator);
+    var state = try loadState(allocator, config.paths.state_file);
+    if (state.mission.initial_prompt.len == 0 and state.runtime_session.session_id.len == 0) {
+        return error.MissionNotInitialized;
+    }
+
+    state.runtime_session.approval_bypass_enabled = enabled;
+    state.runtime_session.approval_mode = resolvedApprovalMode(config.policy.approval_mode, enabled);
+    initializeRuntimeSession(allocator, &state, config);
+    try persistSessionMemory(allocator, config, &state, "sessions_approvals");
+    try saveState(allocator, config.paths.state_file, state);
+    try stdoutPrint(
+        "session approvals {s} for {s}\n",
+        .{
+            if (enabled) "enabled" else "disabled",
+            if (state.runtime_session.session_id.len > 0) state.runtime_session.session_id else "pending-session",
+        },
+    );
 }
 
 pub fn cmdUi(allocator: std.mem.Allocator) !void {
@@ -841,23 +933,149 @@ fn runMissionInternal(allocator: std.mem.Allocator, mission_prompt: []const u8, 
     var state = try loadState(allocator, config.paths.state_file);
 
     resetStateForMission(&state, mission_prompt);
-    initializeRuntimeSession(allocator, &state, config);
-    try initializeRuntimeRunLog(allocator, config, &state, "mission");
-    try logRuntimeEvent(allocator, config, &state, .{
+    try startRunFromState(allocator, config, &state, "mission", "mission initialized", mission_prompt, false, hooks);
+
+    try runLoop(allocator, config, &state, hooks);
+    try finishRunState(allocator, config, &state, "mission", hooks);
+}
+
+fn startRunFromState(
+    allocator: std.mem.Allocator,
+    config: core.AppConfig,
+    state: *AppState,
+    command_label: []const u8,
+    summary: []const u8,
+    input_text: []const u8,
+    count_as_resume: bool,
+    hooks: RuntimeHooks,
+) !void {
+    if (count_as_resume and state.runtime_session.session_id.len > 0) {
+        state.runtime_session.resume_count += 1;
+    }
+    initializeRuntimeSession(allocator, state, config);
+    try initializeRuntimeRunLog(allocator, config, state, command_label);
+    try persistSessionMemory(allocator, config, state, command_label);
+    try logRuntimeEvent(allocator, config, state, .{
         .actor = .decanus,
         .lane = .command,
         .action = "run_started",
         .status = "running",
-        .summary = "mission initialized",
-        .input = mission_prompt,
+        .summary = summary,
+        .input = input_text,
         .include_snapshot = true,
     });
-    try saveState(allocator, config.paths.state_file, state);
-    emitStateSnapshot(hooks, config, state);
+    try saveState(allocator, config.paths.state_file, state.*);
+    emitStateSnapshot(hooks, config, state.*);
+}
 
-    try runLoop(allocator, config, &state, hooks);
-    try saveState(allocator, config.paths.state_file, state);
-    emitStateSnapshot(hooks, config, state);
+fn finishRunState(
+    allocator: std.mem.Allocator,
+    config: core.AppConfig,
+    state: *AppState,
+    command_label: []const u8,
+    hooks: RuntimeHooks,
+) !void {
+    try persistSessionMemory(allocator, config, state, command_label);
+    try saveState(allocator, config.paths.state_file, state.*);
+    emitStateSnapshot(hooks, config, state.*);
+}
+
+fn maybeChangeProjectRoot(allocator: std.mem.Allocator, project_root: ?[]const u8) !?[]const u8 {
+    const target = project_root orelse return null;
+    const trimmed = trimAscii(target);
+    if (trimmed.len == 0) return null;
+
+    const original_cwd = try std.process.getCwdAlloc(allocator);
+    errdefer allocator.free(original_cwd);
+    try std.posix.chdir(trimmed);
+    return original_cwd;
+}
+
+fn restoreProjectRoot(allocator: std.mem.Allocator, original_cwd: ?[]const u8) void {
+    if (original_cwd) |cwd| {
+        std.posix.chdir(cwd) catch {};
+        allocator.free(cwd);
+    }
+}
+
+fn loadSessionRecordForProject(allocator: std.mem.Allocator, config: core.AppConfig, session_id: []const u8) !SessionRecord {
+    const record_path = try sessionRecordPath(allocator, config.paths.sessions_dir, session_id);
+    defer allocator.free(record_path);
+    const record = try loadSessionRecord(allocator, record_path);
+
+    const identity = try resolveProjectIdentity(allocator);
+    defer allocator.free(identity.project_root);
+    defer allocator.free(identity.project_id);
+    defer allocator.free(identity.project_label);
+
+    if (record.project_id.len > 0 and !eql(record.project_id, identity.project_id)) {
+        return error.SessionProjectMismatch;
+    }
+    return record;
+}
+
+fn renderSessionIndex(allocator: std.mem.Allocator, index: SessionIndex) ![]const u8 {
+    if (index.sessions.len == 0) return try allocator.dupe(u8, "no sessions recorded");
+
+    var buffer: std.ArrayList(u8) = .empty;
+    errdefer buffer.deinit(allocator);
+    const writer = buffer.writer(allocator);
+
+    for (index.sessions, 0..) |session, index_value| {
+        const marker = if (eql(session.session_id, index.current_session_id)) "*" else " ";
+        try writer.print(
+            "{s} {s}  {s}  {s}  {s}\n",
+            .{
+                marker,
+                session.session_id,
+                if (session.status.len > 0) session.status else "unknown",
+                if (session.updated_at.len > 0) session.updated_at else "0",
+                if (session.model.len > 0) session.model else "unassigned-model",
+            },
+        );
+        if (session.mission_prompt_excerpt.len > 0) {
+            try writer.print("  {s}\n", .{session.mission_prompt_excerpt});
+        }
+        if (index_value + 1 < index.sessions.len) try writer.writeAll("\n");
+    }
+
+    return try buffer.toOwnedSlice(allocator);
+}
+
+fn renderSessionRecord(allocator: std.mem.Allocator, record: SessionRecord) ![]const u8 {
+    var buffer: std.ArrayList(u8) = .empty;
+    errdefer buffer.deinit(allocator);
+    const writer = buffer.writer(allocator);
+
+    try writer.print("session: {s}\n", .{record.session_id});
+    try writer.print("project: {s} ({s})\n", .{ record.project_label, record.project_id });
+    try writer.print("status: {s}\n", .{record.status});
+    try writer.print("command: {s}\n", .{record.command});
+    try writer.print("created: {s}\n", .{record.created_at});
+    try writer.print("updated: {s}\n", .{record.updated_at});
+    try writer.print("provider: {s}\n", .{record.provider});
+    try writer.print("model: {s}\n", .{record.model});
+    try writer.print("approval mode: {s}\n", .{record.approval_mode});
+    try writer.print("approval bypass: {s}\n", .{if (record.approval_bypass_enabled) "on" else "off"});
+    try writer.print("resume count: {d}\n", .{record.resume_count});
+    try writer.print("last log: {s}\n", .{if (record.last_log_path.len > 0) record.last_log_path else "none"});
+
+    if (record.mission_prompt.len > 0) {
+        try writer.print("\nmission prompt\n{s}\n", .{record.mission_prompt});
+    }
+    if (record.state_snapshot.mission.final_response.len > 0) {
+        try writer.print("\nfinal response\n{s}\n", .{record.state_snapshot.mission.final_response});
+    } else if (record.last_error.len > 0) {
+        try writer.print("\nlast error\n{s}\n", .{record.last_error});
+    }
+    if (record.run_log_paths.len > 0) {
+        try writer.writeAll("\nrun logs\n");
+        for (record.run_log_paths) |path| {
+            try writer.print("{s}\n", .{path});
+        }
+    }
+
+    return try buffer.toOwnedSlice(allocator);
 }
 
 fn formatModelRoster(allocator: std.mem.Allocator, models: []const []const u8, current_model: []const u8) ![]const u8 {
@@ -963,25 +1181,19 @@ fn workerMain(task: *WorkerTask) void {
                 emitLog(hooks, .danger, "", "Resume Failed", friendlyRuntimeError(task.allocator, err) catch @errorName(err), .plain);
                 return;
             };
-            initializeRuntimeSession(task.allocator, &state, config);
-            initializeRuntimeRunLog(task.allocator, config, &state, "resume") catch |err| {
+            if (state.mission.initial_prompt.len == 0) {
+                emitLog(hooks, .danger, "", "Resume Failed", "no active session is available to resume", .plain);
+                return;
+            }
+            startRunFromState(task.allocator, config, &state, "resume", "active session resume requested", "", true, hooks) catch |err| {
                 emitLog(hooks, .danger, "", "Resume Failed", friendlyRuntimeError(task.allocator, err) catch @errorName(err), .plain);
                 return;
             };
-            logRuntimeEvent(task.allocator, config, &state, .{
-                .actor = .decanus,
-                .lane = .command,
-                .action = "run_started",
-                .status = "running",
-                .summary = "resume requested",
-                .include_snapshot = true,
-            }) catch {};
             runLoop(task.allocator, config, &state, hooks) catch |err| {
                 emitLog(hooks, .danger, "", "Resume Failed", friendlyRuntimeError(task.allocator, err) catch @errorName(err), .plain);
                 return;
             };
-            saveState(task.allocator, config.paths.state_file, state) catch {};
-            emitStateSnapshot(hooks, config, state);
+            finishRunState(task.allocator, config, &state, "resume", hooks) catch {};
             const summary = missionOutcomeSummary(task.allocator, state) catch "resume completed";
             emitLog(hooks, toneForOutcome(state), "", "Loop Status", summary, .plain);
         },
@@ -1212,6 +1424,29 @@ fn bridgeFlushRuntimeEvents(bridge: *OpenTuiBridge) !void {
     }
 }
 
+fn bridgeSetSessionApprovals(bridge: *OpenTuiBridge, enabled: bool) !void {
+    const config = try loadProjectConfig(bridge.allocator);
+    var state = try loadState(bridge.allocator, config.paths.state_file);
+    if (state.mission.initial_prompt.len == 0 and state.runtime_session.session_id.len == 0) {
+        try bridgeEmitLog(.warning, "runtime", "No Session", "start or resume a session before changing approval bypass", .plain);
+        return;
+    }
+
+    state.runtime_session.approval_bypass_enabled = enabled;
+    state.runtime_session.approval_mode = resolvedApprovalMode(config.policy.approval_mode, enabled);
+    initializeRuntimeSession(bridge.allocator, &state, config);
+    try persistSessionMemory(bridge.allocator, config, &state, "sessions_approvals");
+    try saveState(bridge.allocator, config.paths.state_file, state);
+    try bridgeEmitLog(
+        .success,
+        "runtime",
+        "Approval Mode Updated",
+        if (enabled) "session approval bypass enabled" else "session approval bypass disabled",
+        .plain,
+    );
+    try bridgeRefreshSnapshot(bridge);
+}
+
 fn bridgeStartWorker(bridge: *OpenTuiBridge, command: WorkerCommandKind, mission_prompt: []const u8) !void {
     bridge.worker = try startWorker(bridge.allocator, &bridge.queue, &bridge.control, command, mission_prompt);
 }
@@ -1234,6 +1469,15 @@ fn bridgeHandleCommand(bridge: *OpenTuiBridge, line: []const u8) !bool {
             submitApprovalResponse(&bridge.control, approved);
         } else {
             try bridgeEmitLog(.warning, "opentui", "Approval Pending", "approval commands require an approved boolean", .plain);
+        }
+        return true;
+    }
+
+    if (eql(command.type, "approvals")) {
+        if (command.approved) |approved| {
+            try bridgeSetSessionApprovals(bridge, approved);
+        } else {
+            try bridgeEmitLog(.warning, "runtime", "Usage", "approvals commands require an approved boolean", .plain);
         }
         return true;
     }

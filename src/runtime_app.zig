@@ -87,6 +87,8 @@ const StateManager = core.StateManager;
 const ToolExecutionOutcome = core.ToolExecutionOutcome;
 const ToolRequestExecution = core.ToolRequestExecution;
 const RuntimeRunLog = core.RuntimeRunLog;
+const SessionRecord = core.SessionRecord;
+const SessionIndex = core.SessionIndex;
 const RuntimeLogEvent = core.RuntimeLogEvent;
 const RuntimeLogEventSpec = core.RuntimeLogEventSpec;
 const ChatTone = core.ChatTone;
@@ -217,8 +219,12 @@ const loadState = assets_mod.loadState;
 const normalizeLegacyStateJson = assets_mod.normalizeLegacyStateJson;
 const saveState = assets_mod.saveState;
 const saveConfig = assets_mod.saveConfig;
+const loadSessionIndex = assets_mod.loadSessionIndex;
+const loadSessionRecord = assets_mod.loadSessionRecord;
+const loadGlobalSessionIndex = assets_mod.loadGlobalSessionIndex;
 const loadRuntimeRunLog = assets_mod.loadRuntimeRunLog;
 const saveRuntimeRunLog = assets_mod.saveRuntimeRunLog;
+const persistSessionMemory = assets_mod.persistSessionMemory;
 const runDoctorCheck = assets_mod.runDoctorCheck;
 const missionOutcomeSummary = assets_mod.missionOutcomeSummary;
 const ensureGlobalAssetFiles = assets_mod.ensureGlobalAssetFiles;
@@ -248,7 +254,10 @@ const resolveGlobalAssetLayout = assets_mod.resolveGlobalAssetLayout;
 const writeFileIfMissing = assets_mod.writeFileIfMissing;
 const resolveConfigPath = assets_mod.resolveConfigPath;
 const makeRunId = assets_mod.makeRunId;
+const makeSessionId = assets_mod.makeSessionId;
 const logPathForRun = assets_mod.logPathForRun;
+const sessionRecordPath = assets_mod.sessionRecordPath;
+const resolveGlobalSessionIndexPath = assets_mod.resolveGlobalSessionIndexPath;
 const initializeRuntimeRunLog = assets_mod.initializeRuntimeRunLog;
 const appendRuntimeRunLogEvent = assets_mod.appendRuntimeRunLogEvent;
 const logRuntimeEvent = assets_mod.logRuntimeEvent;
@@ -349,6 +358,16 @@ fn runMain(allocator: std.mem.Allocator, args: []const []const u8) !void {
             .mission_start => try ui_mod.cmdMissionStart(allocator, invocation.args),
             .mission_continue => try ui_mod.cmdMissionContinue(allocator),
             .mission_step => try ui_mod.cmdMissionStep(allocator),
+            .sessions_list => try ui_mod.cmdSessionsList(allocator, invocation.args),
+            .sessions_show => try ui_mod.cmdSessionsShow(allocator, invocation.args),
+            .sessions_resume => try ui_mod.cmdSessionsResume(allocator, invocation.args),
+            .sessions_approvals => {
+                const enabled = invocation.args.len > 0 and (eql(trimAscii(invocation.args[0]), "on") or eql(trimAscii(invocation.args[0]), "true"));
+                if (!enabled and invocation.args.len > 0 and !eql(trimAscii(invocation.args[0]), "off") and !eql(trimAscii(invocation.args[0]), "false")) {
+                    return error.InvalidArguments;
+                }
+                try ui_mod.cmdSessionsApprovals(allocator, enabled);
+            },
             .ui => try ui_mod.cmdUi(allocator),
             .ui_bridge => try ui_mod.cmdUiBridge(allocator),
         },
@@ -1172,6 +1191,7 @@ test "scaffoldProject creates canonical runtime and context assets" {
     try testing.expect(pathExists(".contubernium/PROJECT_CONTEXT.md"));
     try testing.expect(pathExists(".contubernium/project.md"));
     try testing.expect(pathExists(".contubernium/global.md"));
+    try testing.expect(pathExists(".contubernium/sessions/index.json"));
     try testing.expect(!pathExists(".contubernium/prompts"));
     try testing.expect(!pathExists(".agents"));
 }
@@ -1255,6 +1275,83 @@ test "runtime run log stores structured events" {
     try testing.expectEqualStrings("turn_started", loaded.events[0].action);
     try testing.expectEqualStrings("running", loaded.events[0].status);
     try testing.expectEqualStrings("phase 1 logging", loaded.events[0].summary);
+}
+
+test "persistSessionMemory writes durable local and global session indexes" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    defer original_cwd.close();
+    try tmp.dir.setAsCwd();
+    defer original_cwd.setAsCwd() catch {};
+
+    try tmp.dir.makePath("home");
+    const home_path = try tmp.dir.realpathAlloc(scratch, "home");
+    const home_z = try scratch.dupeZ(u8, home_path);
+    const env_name = try scratch.dupeZ(u8, "CONTUBERNIUM_HOME");
+    try testing.expectEqual(@as(c_int, 0), std.c.setenv(env_name.ptr, home_z.ptr, 1));
+    defer _ = std.c.unsetenv(env_name.ptr);
+
+    try scaffoldProject(scratch);
+    const config = try loadProjectConfig(scratch);
+    var state = try loadState(scratch, config.paths.state_file);
+    resetStateForMission(&state, "resume phase 4");
+    initializeRuntimeSession(scratch, &state, config);
+    state.runtime_session.status = .blocked;
+    state.runtime_session.active_log_path = ".contubernium/logs/run-1.json";
+
+    try persistSessionMemory(scratch, config, &state, "mission");
+
+    const index = try loadSessionIndex(scratch, config.paths.session_index_file);
+    try testing.expectEqual(@as(usize, 1), index.sessions.len);
+    try testing.expect(index.current_session_id.len > 0);
+    try testing.expectEqualStrings(index.current_session_id, state.runtime_session.session_id);
+
+    const record_path = try sessionRecordPath(scratch, config.paths.sessions_dir, index.current_session_id);
+    const record = try loadSessionRecord(scratch, record_path);
+    try testing.expectEqualStrings("resume phase 4", record.mission_prompt);
+    try testing.expectEqualStrings(".contubernium/logs/run-1.json", record.last_log_path);
+    try testing.expectEqual(@as(usize, 1), record.run_log_paths.len);
+    try testing.expect(record.project_id.len > 0);
+
+    const global_index_path = try resolveGlobalSessionIndexPath(scratch);
+    const global_index = try loadGlobalSessionIndex(scratch, global_index_path);
+    try testing.expectEqual(@as(usize, 1), global_index.sessions.len);
+    try testing.expectEqualStrings(record.session_id, global_index.sessions[0].session_id);
+}
+
+test "executeToolRequests honors session approval bypass for guarded tools" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    defer original_cwd.close();
+    try tmp.dir.setAsCwd();
+    defer original_cwd.setAsCwd() catch {};
+
+    var state = AppState{};
+    state.runtime_session.approval_bypass_enabled = true;
+    state.runtime_session.approval_mode = "session-bypass";
+
+    const outcome = try executeToolRequests(testing.allocator, AppConfig{}, &state, .decanus, .command, &.{
+        .{
+            .tool = "write_file",
+            .path = "notes.txt",
+            .content = "phase 4 durable session test",
+        },
+    }, .{ .approval_fn = testDenyApproval });
+    defer testing.allocator.free(outcome.summary);
+
+    try testing.expect(!outcome.blocked);
+    try testing.expect(pathExists("notes.txt"));
+    try testing.expectEqual(ApprovalStatus.idle, state.runtime_session.active_approval.status);
 }
 
 test "condenseHistoryForContext replaces older entries with a retained digest" {
