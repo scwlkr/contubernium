@@ -8,10 +8,10 @@ const freeOwnedToolRequest = core.freeOwnedToolRequest;
 const trimAscii = core.trimAscii;
 
 pub fn parseJson(comptime T: type, allocator: std.mem.Allocator, text: []const u8) !T {
-    const parsed = try std.json.parseFromSlice(T, allocator, text, .{
+    return try std.json.parseFromSliceLeaky(T, allocator, text, .{
         .ignore_unknown_fields = true,
+        .allocate = .alloc_always,
     });
-    return parsed.value;
 }
 
 pub fn parseModelJson(comptime T: type, allocator: std.mem.Allocator, text: []const u8) !T {
@@ -254,4 +254,31 @@ pub fn normalizeModelJson(text: []const u8) ![]const u8 {
     }
 
     return normalized;
+}
+
+test "parseJson copies string fields out of the source buffer" {
+    const testing = std.testing;
+    const Example = struct {
+        project_name: []const u8 = "",
+        mission_prompt: []const u8 = "",
+    };
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const text = try testing.allocator.dupe(
+        u8,
+        \\{
+        \\  "project_name": "Contubernium",
+        \\  "mission_prompt": "ship runtime logging"
+        \\}
+    );
+    defer testing.allocator.free(text);
+
+    const parsed = try parseJson(Example, scratch, text);
+    @memset(text, 'x');
+
+    try testing.expectEqualStrings("Contubernium", parsed.project_name);
+    try testing.expectEqualStrings("ship runtime logging", parsed.mission_prompt);
 }

@@ -60,6 +60,13 @@ Available commands:
 - `contubernium sessions resume <session-id> [project-root]`
 - `contubernium sessions approvals <on|off>`
 
+## OpenTUI
+
+Current shipped behavior:
+
+- `Esc`, `/exit`, and `/quit` tear down the OpenTUI renderer before the process exits
+- terminal state is restored on those exits, including mouse tracking cleanup
+
 ## Provider Configuration
 
 Current shipped behavior:
@@ -173,6 +180,7 @@ If behavior changes and no row changes here, the feature is not documented compl
 | Durable sessions | Every mission conversation writes a canonical session record plus project-local and home-level session index metadata. | `src/runtime_app.zig` test: `persistSessionMemory writes durable local and global session indexes` |
 | Memory format migration | Legacy unversioned session/global-memory files are normalized to the current format, and newer unknown versions are rejected explicitly. | `src/runtime_app.zig` tests: `loadSessionIndex migrates legacy unversioned format to the current version`; `loadSessionRecord migrates legacy unversioned format to the current version`; `loadGlobalSessionIndex rejects unsupported future format versions`; `normalizeGlobalMemoryMarkdown adds a version marker and strips it for prompt use` |
 | Session retrieval | Operators can list, inspect, and target stored sessions deliberately, including explicit cross-project roots. | `src/cli.zig` tests: `parse routes sessions subcommands with optional project roots`; `parse requires a session id for sessions show` |
+| OpenTUI exit cleanup | `Esc`, `/exit`, and `/quit` restore terminal state before leaving OpenTUI. | `opentui/exit.test.ts` test: `requestOpenTuiExit sends bridge exit before shutdown` |
 | Model policy config | Project config uses `model_policy` routes and mirrors them onto legacy provider fields for compatibility. | `src/runtime_app.zig` test: `loadConfig mirrors model_policy routes into legacy provider fields` |
 | Model policy log metadata | Each run log stores primary route metadata, escalation metadata, and fallback metadata. | `src/runtime_app.zig` test: `initializeRuntimeRunLog stores model policy metadata` |
 | Active routed provider visibility | Status snapshots show the currently active provider/model when the runtime switches routes. | `src/runtime_app.zig` test: `snapshotFromState prefers the active routed provider over the primary config` |

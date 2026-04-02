@@ -6,6 +6,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react"
 import { readFile } from "node:fs/promises"
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import path from "node:path"
+import { requestOpenTuiExit } from "./exit"
 
 type BridgeKind =
   | "log"
@@ -501,8 +502,7 @@ function App() {
       return
     }
     if (key.name === "escape") {
-      sendBridge({ type: "exit" })
-      process.exit(0)
+      return requestOpenTuiExit(sendBridge, shutdown)
     }
   })
 
@@ -581,8 +581,7 @@ function App() {
         break
       case "exit":
       case "quit":
-        sendBridge({ type: "exit" })
-        process.exit(0)
+        return requestOpenTuiExit(sendBridge, shutdown)
       default:
         appendLocalEntry("Unknown Command", input, "danger")
         break

@@ -356,7 +356,7 @@ fn normalizeVersionedJsonObject(
         }
     }
 
-    try root.put(allocator, "format_version", .{ .integer = @as(i64, @intCast(current_version)) });
+    try root.put("format_version", .{ .integer = @as(i64, @intCast(current_version)) });
     return try std.fmt.allocPrint(
         allocator,
         "{f}",
