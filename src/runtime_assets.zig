@@ -258,22 +258,32 @@ pub fn loadProjectConfig(allocator: std.mem.Allocator) !AppConfig {
 
 pub fn loadState(allocator: std.mem.Allocator, path: []const u8) !AppState {
     const data = try std.fs.cwd().readFileAlloc(allocator, path, max_file_bytes);
+    defer allocator.free(data);
 
-    return parseJson(AppState, allocator, data) catch |err| switch (err) {
-        error.InvalidEnumTag => {
-            const normalized = try normalizeLegacyStateJson(allocator, data);
-            return try parseJson(AppState, allocator, normalized);
-        },
-        else => return err,
-    };
+    const normalized = try normalizeLegacyStateJson(allocator, data);
+    defer allocator.free(normalized);
+    return try parseJson(AppState, allocator, normalized);
 }
 
 pub fn normalizeLegacyStateJson(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
     const without_empty_active_tool = try std.mem.replaceOwned(u8, allocator, data, "\"active_tool\": \"\"", "\"active_tool\": null");
     errdefer allocator.free(without_empty_active_tool);
 
-    const normalized = try std.mem.replaceOwned(u8, allocator, without_empty_active_tool, "\"next_recommended_agent\": \"\"", "\"next_recommended_agent\": null");
+    const without_empty_next_agent = try std.mem.replaceOwned(u8, allocator, without_empty_active_tool, "\"next_recommended_agent\": \"\"", "\"next_recommended_agent\": null");
     allocator.free(without_empty_active_tool);
+    errdefer allocator.free(without_empty_next_agent);
+
+    const normalized = try normalizeLegacyFailureJson(allocator, without_empty_next_agent);
+    allocator.free(without_empty_next_agent);
+    return normalized;
+}
+
+pub fn normalizeLegacyFailureJson(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+    const without_error_code = try std.mem.replaceOwned(u8, allocator, data, "\"error_code\":", "\"code\":");
+    errdefer allocator.free(without_error_code);
+
+    const normalized = try std.mem.replaceOwned(u8, allocator, without_error_code, "\"message\":", "\"cause\":");
+    allocator.free(without_error_code);
     return normalized;
 }
 
@@ -305,7 +315,11 @@ pub fn saveConfig(allocator: std.mem.Allocator, path: []const u8, config: AppCon
 
 pub fn loadRuntimeRunLog(allocator: std.mem.Allocator, path: []const u8) !RuntimeRunLog {
     const data = try std.fs.cwd().readFileAlloc(allocator, path, max_file_bytes);
-    return try parseJson(RuntimeRunLog, allocator, data);
+    defer allocator.free(data);
+
+    const normalized = try normalizeLegacyFailureJson(allocator, data);
+    defer allocator.free(normalized);
+    return try parseJson(RuntimeRunLog, allocator, normalized);
 }
 
 pub fn saveRuntimeRunLog(allocator: std.mem.Allocator, path: []const u8, log: RuntimeRunLog) !void {

@@ -1233,7 +1233,7 @@ pub fn structuredChatWithRepair(
                 .policy_reason = active_route.reason,
                 .summary = "model returned invalid JSON",
                 .output = response.raw_text,
-                .error_text = failure.message,
+                .error_text = failure.cause,
                 .failure = failure,
             });
             emitStreamFinalize(hooks, actor, response.raw_text, .json);

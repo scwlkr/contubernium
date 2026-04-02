@@ -56,7 +56,12 @@ const TaskLane = core.TaskLane;
 const Tasks = core.Tasks;
 const ToolRequest = core.ToolRequest;
 const RuntimeToolKind = core.RuntimeToolKind;
+const RuntimePermissionClass = core.RuntimePermissionClass;
 const ToolApprovalGate = core.ToolApprovalGate;
+const ToolConfirmationMode = core.ToolConfirmationMode;
+const RuntimeToolTimeoutBehavior = core.RuntimeToolTimeoutBehavior;
+const RuntimeToolFieldKind = core.RuntimeToolFieldKind;
+const RuntimeToolSchemaField = core.RuntimeToolSchemaField;
 const RuntimeToolSpec = core.RuntimeToolSpec;
 const ValidatedToolRequest = core.ValidatedToolRequest;
 const ToolRequestValidation = core.ToolRequestValidation;
@@ -281,7 +286,7 @@ pub fn executeToolRequests(
         const validated = switch (validateToolRequest(config, state, actor, lane, request)) {
             .ok => |value| value,
             .blocked => |failure| {
-                const blocked_summary = try std.fmt.allocPrint(allocator, "blocked: {s}", .{failure.message});
+                const blocked_summary = try std.fmt.allocPrint(allocator, "blocked: {s}", .{failure.cause});
                 try summaries.append(allocator, blocked_summary);
                 try logRuntimeEvent(allocator, config, state, .{
                     .actor = actor,
@@ -289,13 +294,13 @@ pub fn executeToolRequests(
                     .action = "tool_result",
                     .status = "blocked",
                     .tool = if (tool_name.len > 0) tool_name else request.tool,
-                    .summary = failure.message,
-                    .error_text = failure.message,
+                    .summary = failure.cause,
+                    .error_text = failure.cause,
                     .failure = failure,
                     .include_snapshot = true,
                 });
                 recordRuntimeFailure(state, failure);
-                stateManager(state).markBlocked(actor, lane, failure.message);
+                stateManager(state).markBlocked(actor, lane, failure.cause);
                 return .{
                     .blocked = true,
                     .summary = try joinStrings(allocator, summaries.items, "\n"),
@@ -305,7 +310,7 @@ pub fn executeToolRequests(
 
         const execution = executeValidatedToolRequest(allocator, config, state, actor, lane, validated, hooks) catch |err| {
             const failure = try buildToolExecutionFailure(allocator, config, state, actor, lane, validated, err);
-            const blocked_summary = try std.fmt.allocPrint(allocator, "blocked: {s}", .{failure.message});
+            const blocked_summary = try std.fmt.allocPrint(allocator, "blocked: {s}", .{failure.cause});
             try summaries.append(allocator, blocked_summary);
             try logRuntimeEvent(allocator, config, state, .{
                 .actor = actor,
@@ -313,13 +318,13 @@ pub fn executeToolRequests(
                 .action = "tool_result",
                 .status = if (err == error.ToolTimedOut) "blocked" else "error",
                 .tool = validated.spec.name,
-                .summary = failure.message,
-                .error_text = failure.message,
+                .summary = failure.cause,
+                .error_text = failure.cause,
                 .failure = failure,
                 .include_snapshot = true,
             });
             recordRuntimeFailure(state, failure);
-            stateManager(state).markBlocked(actor, lane, failure.message);
+            stateManager(state).markBlocked(actor, lane, failure.cause);
             return .{
                 .blocked = true,
                 .summary = try joinStrings(allocator, summaries.items, "\n"),
@@ -337,12 +342,12 @@ pub fn executeToolRequests(
                 .status = "blocked",
                 .tool = validated.spec.name,
                 .summary = execution.summary,
-                .error_text = failure.message,
+                .error_text = failure.cause,
                 .failure = failure,
                 .include_snapshot = true,
             });
             recordRuntimeFailure(state, failure);
-            stateManager(state).markBlocked(actor, lane, failure.message);
+            stateManager(state).markBlocked(actor, lane, failure.cause);
             return .{
                 .blocked = true,
                 .summary = try joinStrings(allocator, summaries.items, "\n"),
@@ -534,23 +539,143 @@ pub fn writeFile(path: []const u8, content: []const u8) !void {
     defer file.close();
     try file.writeAll(content);
 }
+
+const summary_output_schema = [_]RuntimeToolSchemaField{
+    .{
+        .name = "summary",
+        .kind = .text,
+        .required = true,
+        .description = "Human-readable result text returned to the active agent turn.",
+    },
+};
+
+const list_files_input_schema = [_]RuntimeToolSchemaField{
+    .{ .name = "path", .required = false, .description = "Workspace-relative directory path. Defaults to the current workspace root." },
+    .{ .name = "description", .required = false, .description = "Optional reason for the listing request." },
+};
+
+const read_file_input_schema = [_]RuntimeToolSchemaField{
+    .{ .name = "path", .required = true, .description = "Workspace-relative file path to read." },
+    .{ .name = "description", .required = false, .description = "Optional reason for the file read request." },
+};
+
+const search_text_input_schema = [_]RuntimeToolSchemaField{
+    .{ .name = "pattern", .required = true, .description = "Literal or regex search pattern." },
+    .{ .name = "path", .required = false, .description = "Workspace-relative path to search. Defaults to the current workspace root." },
+    .{ .name = "description", .required = false, .description = "Optional reason for the search request." },
+};
+
+const run_command_input_schema = [_]RuntimeToolSchemaField{
+    .{ .name = "command", .required = true, .description = "Shell command executed through `sh -lc`." },
+    .{ .name = "description", .required = false, .description = "Optional operator-facing justification shown during approval." },
+};
+
+const write_file_input_schema = [_]RuntimeToolSchemaField{
+    .{ .name = "path", .required = true, .description = "Workspace-relative file path to create or replace." },
+    .{ .name = "content", .kind = .text, .required = true, .description = "Full file content written to the target path." },
+    .{ .name = "description", .required = false, .description = "Optional operator-facing justification shown during approval." },
+};
+
+const ask_user_input_schema = [_]RuntimeToolSchemaField{
+    .{ .name = "description", .kind = .text, .required = true, .description = "Question or clarification that must be returned to the operator." },
+};
+
+const runtime_tool_specs = [_]RuntimeToolSpec{
+    .{
+        .kind = .list_files,
+        .name = "list_files",
+        .permission_class = .read,
+        .approval_gate = .read,
+        .approval_kind = .read,
+        .confirmation_mode = .policy_guarded,
+        .timeout_behavior = .none,
+        .input_schema = list_files_input_schema[0..],
+        .output_schema = summary_output_schema[0..],
+    },
+    .{
+        .kind = .read_file,
+        .name = "read_file",
+        .permission_class = .read,
+        .approval_gate = .read,
+        .approval_kind = .read,
+        .confirmation_mode = .policy_guarded,
+        .timeout_behavior = .none,
+        .input_schema = read_file_input_schema[0..],
+        .output_schema = summary_output_schema[0..],
+    },
+    .{
+        .kind = .search_text,
+        .name = "search_text",
+        .permission_class = .read,
+        .approval_gate = .read,
+        .approval_kind = .read,
+        .confirmation_mode = .policy_guarded,
+        .timeout_behavior = .policy_default,
+        .input_schema = search_text_input_schema[0..],
+        .output_schema = summary_output_schema[0..],
+    },
+    .{
+        .kind = .run_command,
+        .name = "run_command",
+        .permission_class = .execute,
+        .approval_gate = .shell,
+        .approval_kind = .shell,
+        .confirmation_mode = .policy_guarded,
+        .timeout_behavior = .policy_default,
+        .input_schema = run_command_input_schema[0..],
+        .output_schema = summary_output_schema[0..],
+    },
+    .{
+        .kind = .write_file,
+        .name = "write_file",
+        .permission_class = .write,
+        .approval_gate = .write,
+        .approval_kind = .write,
+        .confirmation_mode = .policy_guarded,
+        .timeout_behavior = .none,
+        .input_schema = write_file_input_schema[0..],
+        .output_schema = summary_output_schema[0..],
+    },
+    .{
+        .kind = .ask_user,
+        .name = "ask_user",
+        .permission_class = .execute,
+        .approval_gate = .none,
+        .approval_kind = .read,
+        .confirmation_mode = .none,
+        .timeout_behavior = .none,
+        .input_schema = ask_user_input_schema[0..],
+        .output_schema = summary_output_schema[0..],
+    },
+};
+
+pub fn runtimeToolContracts() []const RuntimeToolSpec {
+    return runtime_tool_specs[0..];
+}
+
 pub fn runtimeToolSpec(tool_name: []const u8) ?RuntimeToolSpec {
     const normalized = canonicalToolName(tool_name);
-    if (eql(normalized, "list_files")) return .{ .kind = .list_files, .name = "list_files", .approval_gate = .read };
-    if (eql(normalized, "read_file")) return .{ .kind = .read_file, .name = "read_file", .approval_gate = .read };
-    if (eql(normalized, "search_text")) return .{ .kind = .search_text, .name = "search_text", .approval_gate = .read };
-    if (eql(normalized, "run_command")) return .{ .kind = .run_command, .name = "run_command", .approval_gate = .shell };
-    if (eql(normalized, "write_file")) return .{ .kind = .write_file, .name = "write_file", .approval_gate = .write };
-    if (eql(normalized, "ask_user")) return .{ .kind = .ask_user, .name = "ask_user", .approval_gate = .none };
+    for (runtime_tool_specs) |spec| {
+        if (eql(normalized, spec.name)) return spec;
+    }
     return null;
 }
 
 pub fn toolAllowsWithoutConfirmation(spec: RuntimeToolSpec, policy: PolicyConfig) bool {
-    return switch (spec.approval_gate) {
+    return switch (spec.confirmation_mode) {
         .none => true,
-        .read => policy.allow_read_tools_without_confirmation,
-        .shell => policy.allow_shell_without_confirmation,
-        .write => policy.allow_workspace_writes_without_confirmation,
+        .policy_guarded => switch (spec.permission_class) {
+            .read => policy.allow_read_tools_without_confirmation,
+            .write => policy.allow_workspace_writes_without_confirmation,
+            .execute => policy.allow_shell_without_confirmation,
+        },
+    };
+}
+
+pub fn toolTimeoutMs(spec: RuntimeToolSpec, policy: PolicyConfig) ?usize {
+    return switch (spec.timeout_behavior) {
+        .none => null,
+        .policy_default => policy.tool_timeout_ms,
     };
 }
 
@@ -761,12 +886,13 @@ pub fn buildToolExecutionFailure(
     err: anyerror,
 ) !RuntimeFailure {
     if (err == error.ToolTimedOut) {
+        const timeout_ms = toolTimeoutMs(request.spec, config.policy) orelse config.policy.tool_timeout_ms;
         return buildRuntimeFailure(
             state,
             actor,
             lane,
             "TOOL_TIMEOUT",
-            try std.fmt.allocPrint(allocator, "{s} exceeded the {d}ms runtime limit", .{ request.spec.name, config.policy.tool_timeout_ms }),
+            try std.fmt.allocPrint(allocator, "{s} exceeded the {d}ms runtime limit", .{ request.spec.name, timeout_ms }),
             validatedToolContextSpec(request),
         );
     }
@@ -799,7 +925,7 @@ pub fn executeValidatedToolRequest(
     hooks: RuntimeHooks,
 ) !ToolRequestExecution {
     if (!toolAllowsWithoutConfirmation(request.spec, config.policy) and
-        !try confirmTool(allocator, config, state, hooks, actor, lane, request.spec.name, request.detail, request.target))
+        !try confirmTool(allocator, config, state, hooks, actor, lane, request.spec.approval_kind, request.spec.name, request.detail, request.target))
     {
         return .{
             .blocked = true,
@@ -828,7 +954,8 @@ pub fn executeValidatedToolRequest(
             };
         },
         .search_text => {
-            const output = try searchText(allocator, request.pattern, request.path, config.context.max_search_hits, config.policy.tool_timeout_ms);
+            const timeout_ms = toolTimeoutMs(request.spec, config.policy) orelse config.policy.tool_timeout_ms;
+            const output = try searchText(allocator, request.pattern, request.path, config.context.max_search_hits, timeout_ms);
             defer allocator.free(output);
             return .{
                 .summary = try truncateOwnedText(
@@ -839,7 +966,8 @@ pub fn executeValidatedToolRequest(
             };
         },
         .run_command => {
-            const output = try runShellCommand(allocator, request.command, config.policy.tool_timeout_ms);
+            const timeout_ms = toolTimeoutMs(request.spec, config.policy) orelse config.policy.tool_timeout_ms;
+            const output = try runShellCommand(allocator, request.command, timeout_ms);
             defer freeCommandResult(allocator, output);
             return .{
                 .summary = try summarizeCommandResult(allocator, request.spec.name, output, config.context.max_tool_result_chars),
@@ -877,11 +1005,12 @@ pub fn confirmTool(
     hooks: RuntimeHooks,
     actor: Actor,
     lane: Lane,
+    approval_kind: ApprovalKind,
     tool_name: []const u8,
     detail: []const u8,
     target: []const u8,
 ) !bool {
-    beginApprovalRequest(state, actor, lane, tool_name, detail, detail, target);
+    beginApprovalRequest(state, actor, lane, approval_kind, tool_name, detail, detail, target);
     emitStateSnapshot(hooks, config, state.*);
     try logRuntimeEvent(allocator, config, state, .{
         .actor = actor,

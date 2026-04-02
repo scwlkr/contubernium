@@ -276,15 +276,15 @@ Priority: P0
 
 Requirements
 	•	Every failure returns:
-	•	error_code
-	•	message
+	•	code
+	•	cause
 	•	context
 
 Example:
 
 {
-  "error_code": "TOOL_TIMEOUT",
-  "message": "Tool execution exceeded 5s",
+  "code": "TOOL_TIMEOUT",
+  "cause": "Tool execution exceeded 5s",
   "context": { "tool": "read_file" }
 }
 

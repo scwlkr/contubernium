@@ -219,8 +219,8 @@ Add `runtime_session` to `.contubernium/state.json`:
     "last_health_check": "",
     "last_error": "",
     "last_failure": {
-      "error_code": "",
-      "message": "",
+      "code": "",
+      "cause": "",
       "context": {
         "actor": "",
         "lane": "",

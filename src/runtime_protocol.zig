@@ -1,5 +1,3 @@
-const std = @import("std");
-
 pub const Actor = enum {
     decanus,
     faber,
@@ -405,13 +403,6 @@ pub fn restrictedActionsForActor(actor: Actor) []const []const u8 {
             "finalize_mission",
         },
     };
-}
-
-pub fn approvalKindForToolName(tool_name: []const u8) ApprovalKind {
-    if (std.mem.eql(u8, tool_name, "run_command")) return .shell;
-    if (std.mem.eql(u8, tool_name, "write_file")) return .write;
-    if (std.mem.eql(u8, tool_name, "deploy")) return .deployment;
-    return .read;
 }
 
 pub fn invocationStatusForResult(status: InvocationResultStatus) InvocationStatus {

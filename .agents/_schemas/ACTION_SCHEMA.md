@@ -59,9 +59,13 @@ Required fields:
 - `- Must not:` hard prohibitions.
 - `- Escalate when:` conditions that require blocking or handoff.
 
+Optional fields:
+- `- Permission needs:` expected runtime permission classes (`Read`, `Write`, `Execute`) when this action relies on runtime tools.
+
 Validation:
 - MUST align with the agent contract.
 - MUST state at least one boundary condition.
+- If `- Permission needs:` is present, it MUST use only the canonical permission classes.
 
 ### `## Process`
 

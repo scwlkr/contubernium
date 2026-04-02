@@ -20,6 +20,7 @@ The protocol is valid only when all of these remain true:
 - Specialists do not chain to other specialists.
 - All specialist output returns to `decanus`.
 - Risky side effects pass through explicit approval gates.
+- Runtime tools execute only through published contracts that declare permission class, timeout behavior, and failure shape.
 - The runtime stays local-first.
 - The primary interface remains OpenTUI.
 
@@ -144,7 +145,31 @@ Supporting enums cover:
 - invocation result status
 - loop step kind
 
-## 7. Non-Goals
+## 7. Runtime Tool Contracts
+
+Runtime tool contracts are published in [docs/RUNTIME_TOOL_CONTRACTS.md](./RUNTIME_TOOL_CONTRACTS.md).
+
+Every supported runtime tool must publish:
+
+- permission class: `Read`, `Write`, or `Execute`
+- canonical input schema
+- canonical output schema
+- timeout behavior
+- failure response format
+
+Approval behavior is derived from the published tool contract metadata, not from hidden tool-name branches.
+
+The canonical failure response shape is:
+
+```json
+{
+  "code": "MACHINE_READABLE_CODE",
+  "cause": "operator-facing explanation",
+  "context": {}
+}
+```
+
+## 8. Non-Goals
 
 This protocol does not allow:
 
