@@ -106,6 +106,9 @@ Current guarantees:
 - `decanus` is the sole orchestrator
 - specialists return structured results
 - guarded shell and write actions require approval by default
+- when a TTY mission run blocks on `USER_INPUT_REQUIRED`, `contubernium mission`, `contubernium mission start`, `contubernium mission continue`, and `contubernium sessions resume` prompt inline with `reply >` instead of dropping immediately back to the shell
+- pressing `Enter` on an empty inline reply leaves the mission blocked so it can be resumed later
+- the plain CLI spinner shows a short rolling thinking preview for streaming `ollama-native` model runs while the model is active
 
 ## Approvals And Safety
 
@@ -186,6 +189,8 @@ If behavior changes and no row changes here, the feature is not documented compl
 | Active routed provider visibility | Status snapshots show the currently active provider/model when the runtime switches routes. | `src/runtime_app.zig` test: `snapshotFromState prefers the active routed provider over the primary config` |
 | Context compression | Older history can be condensed into a retained digest when context pressure rises. | `src/runtime_app.zig` test: `condenseHistoryForContext replaces older entries with a retained digest` |
 | Prompt assembly | Commander prompts include project context and loaded memory layers. | `src/runtime_app.zig` test: `buildDecanusUserPrompt includes project context and memory layers` |
+| Inline mission follow-up | TTY mission resumes prompt for operator clarification inline and keep the same mission state alive after `USER_INPUT_REQUIRED`. | `src/runtime_app.zig` test: `resumeAfterOperatorReply clears the blocked state and records operator history` |
+| Streaming thinking preview | Streaming Ollama runs enable provider thinking and surface a bounded live preview before the final structured result lands. | `src/runtime_app.zig` tests: `buildOllamaChatBody preserves structured output settings across stream modes`; `processOllamaPendingLines emits bounded thinking chunks separately from content` |
 
 ## Manual Update Rule
 

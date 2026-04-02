@@ -142,6 +142,7 @@ const currentLaneForState = core.currentLaneForState;
 const toneForOutcome = core.toneForOutcome;
 const emitLog = core.emitLog;
 const emitStreamStart = core.emitStreamStart;
+const emitThinkingChunk = core.emitThinkingChunk;
 const emitStreamChunk = core.emitStreamChunk;
 const emitStreamFinalize = core.emitStreamFinalize;
 const emitStateSnapshot = core.emitStateSnapshot;
@@ -435,6 +436,7 @@ pub fn buildOllamaChatBody(
         OllamaChatRequest{
             .model = provider.model,
             .stream = stream,
+            .think = stream,
             .format = provider.structured_output,
             .messages = &messages,
         },
@@ -750,6 +752,9 @@ pub fn processOllamaPendingLine(
     defer parsed.deinit();
     const chunk = parsed.value;
     if (chunk.@"error".len > 0) return error.ProviderRejectedRequest;
+    if (chunk.message.thinking.len > 0) {
+        emitThinkingChunk(hooks, actor, chunk.message.thinking);
+    }
     if (chunk.message.content.len > 0) {
         try full_text.appendSlice(allocator, chunk.message.content);
         emitStreamChunk(hooks, actor, chunk.message.content);

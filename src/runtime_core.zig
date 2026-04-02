@@ -910,6 +910,36 @@ pub const StateManager = struct {
         });
     }
 
+    pub fn resumeAfterOperatorReplyWithHistory(
+        self: StateManager,
+        allocator: std.mem.Allocator,
+        reply: []const u8,
+    ) !void {
+        const prior_actor = self.state.current_actor;
+        const prior_lane = laneForActor(prior_actor);
+        const trimmed = trimAscii(reply);
+        if (trimmed.len == 0) return;
+        const owned_reply = try allocator.dupe(u8, trimmed);
+
+        self.clearFailure();
+        self.state.current_actor = .decanus;
+        self.state.global_status = .planning;
+        self.state.agent_loop.status = .thinking;
+        self.state.agent_loop.active_tool = null;
+        self.state.runtime_session.status = .ready;
+        setLoopStep(self.state, .think, .decanus, .command, owned_reply);
+
+        try appendHistory(allocator, self.state, .{
+            .iteration = self.state.agent_loop.iteration,
+            .type = "operator_reply",
+            .actor = "operator",
+            .lane = if (prior_lane == .command) "" else laneName(prior_lane),
+            .summary = owned_reply,
+            .artifacts = &.{},
+            .timestamp = try unixTimestampString(allocator),
+        });
+    }
+
     fn applyPromptBudgetEstimate(self: StateManager, config: ContextConfig, estimate: PromptBudgetEstimate) void {
         self.state.runtime_session.context_budget.estimated_prompt_chars = estimate.prompt_chars;
         self.state.runtime_session.context_budget.estimated_prompt_tokens = estimate.prompt_tokens;
@@ -1196,6 +1226,7 @@ pub const WorkerCommandKind = enum {
 pub const RuntimeUiEventKind = enum {
     log,
     stream_start,
+    thinking_chunk,
     stream_chunk,
     stream_finalize,
     state_snapshot,
@@ -2019,6 +2050,14 @@ pub fn emitStreamStart(hooks: RuntimeHooks, actor: []const u8) void {
     });
 }
 
+pub fn emitThinkingChunk(hooks: RuntimeHooks, actor: []const u8, text: []const u8) void {
+    hooks.emit(.{
+        .kind = .thinking_chunk,
+        .actor = actor,
+        .text = text,
+    });
+}
+
 pub fn emitStreamChunk(hooks: RuntimeHooks, actor: []const u8, text: []const u8) void {
     hooks.emit(.{
         .kind = .stream_chunk,
@@ -2262,6 +2301,10 @@ pub fn resetStateForMission(state: *AppState, mission_prompt: []const u8) void {
 pub fn initializeRuntimeSession(allocator: std.mem.Allocator, state: *AppState, config: AppConfig) void {
     _ = allocator;
     stateManager(state).initializeRuntimeSession(config);
+}
+
+pub fn resumeAfterOperatorReply(allocator: std.mem.Allocator, state: *AppState, reply: []const u8) !void {
+    try stateManager(state).resumeAfterOperatorReplyWithHistory(allocator, reply);
 }
 
 pub fn appendHistory(allocator: std.mem.Allocator, state: *AppState, entry: HistoryEntry) !void {

@@ -34,6 +34,7 @@ const pathExists = core.pathExists;
 const pollInput = core.pollInput;
 const resolvedApprovalMode = core.resolvedApprovalMode;
 const resetStateForMission = core.resetStateForMission;
+const resumeAfterOperatorReply = core.resumeAfterOperatorReply;
 const setOwnedSnapshot = core.setOwnedSnapshot;
 const snapshotFromState = core.snapshotFromState;
 const stdoutPrint = core.stdoutPrint;
@@ -157,6 +158,8 @@ pub const CliSpinnerState = struct {
     phase: usize = 0,
     actor_len: usize = 0,
     actor_buf: [32]u8 = [_]u8{0} ** 32,
+    preview_len: usize = 0,
+    preview_buf: [96]u8 = [_]u8{0} ** 96,
 };
 
 pub const CliSpinner = struct {
@@ -339,7 +342,7 @@ pub fn cmdMissionContinue(allocator: std.mem.Allocator) !void {
     var spinner = try CliSpinner.init(allocator);
     defer spinner.deinit();
     try startRunFromState(allocator, config, &state, "mission_continue", "active session resume requested", "", true, spinner.hooks());
-    try runLoop(allocator, config, &state, spinner.hooks());
+    try runLoopWithInlineUserReplies(allocator, config, &state, "mission_continue", spinner.hooks());
     try finishRunState(allocator, config, &state, "mission_continue", spinner.hooks());
     try stdoutPrint("{s}\n", .{try renderCliMissionOutcome(allocator, state)});
 }
@@ -398,7 +401,7 @@ pub fn cmdSessionsResume(allocator: std.mem.Allocator, args: []const []const u8)
     var spinner = try CliSpinner.init(allocator);
     defer spinner.deinit();
     try startRunFromState(allocator, config, &state, "sessions_resume", "stored session resume requested", "", true, spinner.hooks());
-    try runLoop(allocator, config, &state, spinner.hooks());
+    try runLoopWithInlineUserReplies(allocator, config, &state, "sessions_resume", spinner.hooks());
     try finishRunState(allocator, config, &state, "sessions_resume", spinner.hooks());
     try stdoutPrint("{s}\n", .{try renderCliMissionOutcome(allocator, state)});
 }
@@ -674,6 +677,41 @@ fn readInteractiveKey() !InteractiveKey {
     };
 }
 
+fn appendSpinnerPreview(state: *CliSpinnerState, text: []const u8) void {
+    const trimmed = trimAscii(text);
+    if (trimmed.len == 0) return;
+
+    var index: usize = 0;
+    var previous_space = state.preview_len > 0 and state.preview_buf[state.preview_len - 1] == ' ';
+    while (index < trimmed.len and state.preview_len < state.preview_buf.len) {
+        const scalar = decodeUtf8Scalar(trimmed, index);
+        const chunk = trimmed[index .. index + scalar.byte_len];
+        index += scalar.byte_len;
+
+        const whitespace = scalar.codepoint == ' ' or
+            scalar.codepoint == '\n' or
+            scalar.codepoint == '\r' or
+            scalar.codepoint == '\t';
+        if (whitespace) {
+            if (!previous_space and state.preview_len < state.preview_buf.len) {
+                state.preview_buf[state.preview_len] = ' ';
+                state.preview_len += 1;
+                previous_space = true;
+            }
+            continue;
+        }
+
+        if (state.preview_len + chunk.len > state.preview_buf.len) break;
+        @memcpy(state.preview_buf[state.preview_len .. state.preview_len + chunk.len], chunk);
+        state.preview_len += chunk.len;
+        previous_space = false;
+    }
+
+    while (state.preview_len > 0 and state.preview_buf[state.preview_len - 1] == ' ') {
+        state.preview_len -= 1;
+    }
+}
+
 fn cliSpinnerEmit(context: ?*anyopaque, event: RuntimeUiEvent) void {
     const state: *CliSpinnerState = @ptrCast(@alignCast(context.?));
     state.mutex.lock();
@@ -687,13 +725,17 @@ fn cliSpinnerEmit(context: ?*anyopaque, event: RuntimeUiEvent) void {
             const actor_len = @min(actor.len, state.actor_buf.len);
             @memcpy(state.actor_buf[0..actor_len], actor[0..actor_len]);
             state.actor_len = actor_len;
+            state.preview_len = 0;
         },
+        .thinking_chunk => appendSpinnerPreview(state, event.text),
         .stream_finalize, .approval_request => {
             state.active = false;
+            state.preview_len = 0;
         },
         .state_snapshot => {
             if (eql(event.runtime_status, "blocked") or eql(event.runtime_status, "complete") or eql(event.runtime_status, "idle")) {
                 state.active = false;
+                state.preview_len = 0;
             }
         },
         else => {},
@@ -709,6 +751,8 @@ fn cliSpinnerMain(state: *CliSpinnerState) void {
         var clear_line = false;
         var actor_len: usize = 0;
         var actor_buf: [32]u8 = undefined;
+        var preview_len: usize = 0;
+        var preview_buf: [96]u8 = undefined;
         var frame: []const u8 = "";
 
         state.mutex.lock();
@@ -721,6 +765,8 @@ fn cliSpinnerMain(state: *CliSpinnerState) void {
             state.rendered = true;
             actor_len = state.actor_len;
             @memcpy(actor_buf[0..actor_len], state.actor_buf[0..actor_len]);
+            preview_len = state.preview_len;
+            @memcpy(preview_buf[0..preview_len], state.preview_buf[0..preview_len]);
         } else if (clear_line) {
             state.rendered = false;
         }
@@ -732,7 +778,7 @@ fn cliSpinnerMain(state: *CliSpinnerState) void {
         }
 
         if (active) {
-            cliRenderSpinnerFrame(frame, actor_buf[0..actor_len]);
+            cliRenderSpinnerFrame(frame, actor_buf[0..actor_len], preview_buf[0..preview_len]);
             std.Thread.sleep(120 * std.time.ns_per_ms);
             continue;
         }
@@ -744,7 +790,7 @@ fn cliSpinnerMain(state: *CliSpinnerState) void {
     }
 }
 
-fn cliRenderSpinnerFrame(frame: []const u8, actor: []const u8) void {
+fn cliRenderSpinnerFrame(frame: []const u8, actor: []const u8, preview: []const u8) void {
     const label = if (actor.len > 0) actor else "decanus";
     stderrPrint("{s}{s}{s}{s} {s}testudo advancing{s} {s}{s}{s}", .{
         interactive_clear_line,
@@ -757,6 +803,13 @@ fn cliRenderSpinnerFrame(frame: []const u8, actor: []const u8) void {
         label,
         interactive_reset,
     }) catch {};
+    if (preview.len > 0) {
+        stderrPrint(" {s}{s}{s}", .{
+            interactive_color_muted,
+            preview,
+            interactive_reset,
+        }) catch {};
+    }
 }
 
 fn cliClearSpinnerLine() void {
@@ -800,6 +853,13 @@ fn renderCliMissionOutcome(allocator: std.mem.Allocator, state: AppState) ![]con
         try writeCliMissionStatus(writer, styled, "complete", interactive_color_success);
         try writeCliMissionSection(writer, styled, "prompt", state.mission.initial_prompt, interactive_color_prompt, true);
         try writeCliMissionSection(writer, styled, "response", state.mission.final_response, interactive_color_blue, false);
+        return try buffer.toOwnedSlice(allocator);
+    }
+
+    if (pendingUserReplyQuestion(state).len > 0) {
+        try writeCliMissionStatus(writer, styled, "awaiting reply", interactive_color_gold);
+        try writeCliMissionSection(writer, styled, "prompt", state.mission.initial_prompt, interactive_color_prompt, true);
+        try writeCliMissionSection(writer, styled, "question", pendingUserReplyQuestion(state), interactive_color_gold, false);
         return try buffer.toOwnedSlice(allocator);
     }
 
@@ -926,6 +986,73 @@ fn launchOpenTuiFrontend(allocator: std.mem.Allocator) !void {
     }
 }
 
+fn pendingUserReplyQuestion(state: AppState) []const u8 {
+    if (state.runtime_session.status != .blocked) return "";
+    if (!eql(state.runtime_session.last_failure.code, "USER_INPUT_REQUIRED")) return "";
+    if (state.runtime_session.last_failure.cause.len > 0) return state.runtime_session.last_failure.cause;
+    return state.runtime_session.last_error;
+}
+
+fn inlineUserPromptSupported() bool {
+    return std.posix.isatty(std.posix.STDIN_FILENO) and std.posix.isatty(std.posix.STDOUT_FILENO);
+}
+
+fn promptInlineUserReply(allocator: std.mem.Allocator, question: []const u8) !?[]const u8 {
+    if (question.len == 0) return null;
+
+    try stdoutPrint("\nfollow-up\n  {s}\nreply > ", .{question});
+    const input = try std.fs.File.stdin().deprecatedReader().readUntilDelimiterOrEofAlloc(allocator, '\n', 4096);
+    const text = input orelse return null;
+    defer allocator.free(text);
+    const trimmed = trimAscii(text);
+    if (trimmed.len == 0) return null;
+    return try allocator.dupe(u8, trimmed);
+}
+
+fn applyInlineUserReply(
+    allocator: std.mem.Allocator,
+    config: core.AppConfig,
+    state: *AppState,
+    command_label: []const u8,
+    reply: []const u8,
+    hooks: RuntimeHooks,
+) !void {
+    try resumeAfterOperatorReply(allocator, state, reply);
+    try logRuntimeEvent(allocator, config, state, .{
+        .actor = .decanus,
+        .lane = .command,
+        .action = "operator_reply",
+        .status = "provided",
+        .summary = "operator supplied follow-up input",
+        .input = reply,
+        .include_snapshot = true,
+    });
+    try persistSessionMemory(allocator, config, state, command_label);
+    try saveState(allocator, config.paths.state_file, state.*);
+    emitStateSnapshot(hooks, config, state.*);
+}
+
+fn runLoopWithInlineUserReplies(
+    allocator: std.mem.Allocator,
+    config: core.AppConfig,
+    state: *AppState,
+    command_label: []const u8,
+    hooks: RuntimeHooks,
+) !void {
+    while (true) {
+        const pending_question = pendingUserReplyQuestion(state.*);
+        if (pending_question.len > 0) {
+            if (!inlineUserPromptSupported()) return;
+            const reply = try promptInlineUserReply(allocator, pending_question) orelse return;
+            defer allocator.free(reply);
+            try applyInlineUserReply(allocator, config, state, command_label, reply, hooks);
+        }
+
+        try runLoop(allocator, config, state, hooks);
+        if (pendingUserReplyQuestion(state.*).len == 0) return;
+    }
+}
+
 fn runMissionInternal(allocator: std.mem.Allocator, mission_prompt: []const u8, hooks: RuntimeHooks) !void {
     try scaffoldProject(allocator);
 
@@ -935,7 +1062,7 @@ fn runMissionInternal(allocator: std.mem.Allocator, mission_prompt: []const u8, 
     resetStateForMission(&state, mission_prompt);
     try startRunFromState(allocator, config, &state, "mission", "mission initialized", mission_prompt, false, hooks);
 
-    try runLoop(allocator, config, &state, hooks);
+    try runLoopWithInlineUserReplies(allocator, config, &state, "mission", hooks);
     try finishRunState(allocator, config, &state, "mission", hooks);
 }
 

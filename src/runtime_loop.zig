@@ -710,6 +710,15 @@ pub fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state
         });
         recordRuntimeFailure(state, failure);
         stateManager(state).markBlocked(.decanus, .command, decision.question);
+        try appendHistory(allocator, state, .{
+            .iteration = state.agent_loop.iteration,
+            .type = "ask_user",
+            .actor = "decanus",
+            .lane = "",
+            .summary = decision.question,
+            .artifacts = &.{},
+            .timestamp = try unixTimestampString(allocator),
+        });
         try logRuntimeEvent(allocator, config, state, .{
             .actor = .decanus,
             .lane = .command,
@@ -978,6 +987,15 @@ pub fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, st
         try stateManager(state).finalizeInvocationWithHistory(allocator, lane, actor, invocation_result, result.description);
         recordRuntimeFailure(state, failure);
         stateManager(state).markBlocked(actor, lane, result.question);
+        try appendHistory(allocator, state, .{
+            .iteration = state.agent_loop.iteration,
+            .type = "ask_user",
+            .actor = actorName(actor),
+            .lane = if (lane == .command) "" else laneName(lane),
+            .summary = result.question,
+            .artifacts = &.{},
+            .timestamp = try unixTimestampString(allocator),
+        });
         try logRuntimeEvent(allocator, config, state, .{
             .actor = actor,
             .lane = lane,

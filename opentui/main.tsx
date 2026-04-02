@@ -11,6 +11,7 @@ import { requestOpenTuiExit } from "./exit"
 type BridgeKind =
   | "log"
   | "stream_start"
+  | "thinking_chunk"
   | "stream_chunk"
   | "stream_finalize"
   | "state_snapshot"
@@ -356,7 +357,7 @@ function App() {
         return
       }
 
-      if (event.kind === "stream_chunk") {
+      if (event.kind === "thinking_chunk" || event.kind === "stream_chunk") {
         setTimeline((current) => {
           const next = [...current]
           const target = [...next].reverse().find((entry) => entry.streaming && entry.actor === event.actor)

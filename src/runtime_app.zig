@@ -171,6 +171,7 @@ const runCommandCaptureWithTimeout = core.runCommandCaptureWithTimeout;
 const runShellCommand = core.runShellCommand;
 const resetStateForMission = core.resetStateForMission;
 const initializeRuntimeSession = core.initializeRuntimeSession;
+const resumeAfterOperatorReply = core.resumeAfterOperatorReply;
 const appendHistory = core.appendHistory;
 const taskForLane = core.taskForLane;
 const taskForLaneConst = core.taskForLaneConst;
@@ -603,7 +604,7 @@ test "buildOllamaChatBody preserves structured output settings across stream mod
 
     try testing.expect(std.mem.indexOf(u8, streaming_body, "\"stream\":true") != null);
     try testing.expect(std.mem.indexOf(u8, non_streaming_body, "\"stream\":false") != null);
-    try testing.expect(std.mem.indexOf(u8, streaming_body, "\"think\":false") != null);
+    try testing.expect(std.mem.indexOf(u8, streaming_body, "\"think\":true") != null);
     try testing.expect(std.mem.indexOf(u8, non_streaming_body, "\"think\":false") != null);
 }
 
@@ -776,6 +777,35 @@ test "processOllamaPendingLines emits stream chunks and preserves partial tail" 
     try testing.expectEqualStrings("hel", first_events[0].text);
 }
 
+test "processOllamaPendingLines emits bounded thinking chunks separately from content" {
+    const testing = std.testing;
+    var queue = RuntimeEventQueue{ .allocator = testing.allocator };
+    defer queue.deinit();
+
+    var pending: std.ArrayList(u8) = .empty;
+    defer pending.deinit(testing.allocator);
+    var full_text: std.ArrayList(u8) = .empty;
+    defer full_text.deinit(testing.allocator);
+
+    const hooks = RuntimeHooks{
+        .context = &queue,
+        .emit_fn = testQueueEmit,
+    };
+
+    try pending.appendSlice(testing.allocator, "{\"message\":{\"thinking\":\"Need to inspect docs. \",\"content\":\"{\\\"action\\\":\"},\"done\":false}\n");
+    try processOllamaPendingLines(testing.allocator, &pending, &full_text, "decanus", hooks);
+
+    try testing.expectEqualStrings("{\"action\":", full_text.items);
+
+    const events = try queue.drain(testing.allocator);
+    defer freeRuntimeUiEvents(testing.allocator, events);
+    try testing.expectEqual(@as(usize, 2), events.len);
+    try testing.expectEqual(RuntimeUiEventKind.thinking_chunk, events[0].kind);
+    try testing.expectEqualStrings("Need to inspect docs. ", events[0].text);
+    try testing.expectEqual(RuntimeUiEventKind.stream_chunk, events[1].kind);
+    try testing.expectEqualStrings("{\"action\":", events[1].text);
+}
+
 test "processOllamaPendingLines completes buffered stream output" {
     const testing = std.testing;
     var queue = RuntimeEventQueue{ .allocator = testing.allocator };
@@ -913,6 +943,38 @@ test "blocked transition keeps loop and runtime state aligned" {
     try testing.expectEqual(RuntimeStatus.blocked, state.runtime_session.status);
     try testing.expectEqual(LoopStepKind.blocked, state.agent_loop.last_step.kind);
     try testing.expectEqualStrings("waiting on operator", state.agent_loop.last_step.summary);
+}
+
+test "resumeAfterOperatorReply clears the blocked state and records operator history" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+    var state = AppState{};
+    state.current_actor = .faber;
+    state.global_status = .waiting_on_tool;
+    state.agent_loop.status = .blocked;
+    state.agent_loop.active_tool = .faber;
+    state.agent_loop.iteration = 2;
+    state.runtime_session.status = .blocked;
+    state.runtime_session.last_error = "Need clarification";
+    state.runtime_session.last_failure = .{
+        .code = "USER_INPUT_REQUIRED",
+        .cause = "Need clarification",
+    };
+
+    try resumeAfterOperatorReply(allocator, &state, "keep this conversational");
+
+    try testing.expectEqual(Actor.decanus, state.current_actor);
+    try testing.expectEqual(GlobalStatus.planning, state.global_status);
+    try testing.expectEqual(LoopStatus.thinking, state.agent_loop.status);
+    try testing.expectEqual(RuntimeStatus.ready, state.runtime_session.status);
+    try testing.expect(state.agent_loop.active_tool == null);
+    try testing.expectEqualStrings("", state.runtime_session.last_error);
+    try testing.expectEqualStrings("", state.runtime_session.last_failure.code);
+    try testing.expectEqual(@as(usize, 1), state.agent_loop.history.len);
+    try testing.expectEqualStrings("operator_reply", state.agent_loop.history[0].type);
+    try testing.expectEqualStrings("operator", state.agent_loop.history[0].actor);
+    try testing.expectEqualStrings("backend", state.agent_loop.history[0].lane);
+    try testing.expectEqualStrings("keep this conversational", state.agent_loop.history[0].summary);
 }
 
 test "runtime tool result records an explicit loop result step" {
