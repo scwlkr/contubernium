@@ -145,8 +145,8 @@ pub const RuntimeErrorContext = struct {
 };
 
 pub const RuntimeFailure = struct {
-    error_code: []const u8 = "",
-    message: []const u8 = "",
+    code: []const u8 = "",
+    cause: []const u8 = "",
     context: RuntimeErrorContext = .{},
 };
 
@@ -248,6 +248,12 @@ pub const RuntimeToolKind = enum {
     ask_user,
 };
 
+pub const RuntimePermissionClass = enum {
+    read,
+    write,
+    execute,
+};
+
 pub const ToolApprovalGate = enum {
     none,
     read,
@@ -255,10 +261,38 @@ pub const ToolApprovalGate = enum {
     write,
 };
 
+pub const ToolConfirmationMode = enum {
+    none,
+    policy_guarded,
+};
+
+pub const RuntimeToolTimeoutBehavior = enum {
+    none,
+    policy_default,
+};
+
+pub const RuntimeToolFieldKind = enum {
+    string,
+    text,
+};
+
+pub const RuntimeToolSchemaField = struct {
+    name: []const u8,
+    kind: RuntimeToolFieldKind = .string,
+    required: bool = false,
+    description: []const u8 = "",
+};
+
 pub const RuntimeToolSpec = struct {
     kind: RuntimeToolKind,
     name: []const u8,
+    permission_class: RuntimePermissionClass = .read,
     approval_gate: ToolApprovalGate = .none,
+    approval_kind: ApprovalKind = .read,
+    confirmation_mode: ToolConfirmationMode = .none,
+    timeout_behavior: RuntimeToolTimeoutBehavior = .none,
+    input_schema: []const RuntimeToolSchemaField = &.{},
+    output_schema: []const RuntimeToolSchemaField = &.{},
 };
 
 pub const ValidatedToolRequest = struct {
@@ -430,7 +464,7 @@ pub const StateManager = struct {
     }
 
     fn recordFailure(self: StateManager, failure: RuntimeFailure) void {
-        self.state.runtime_session.last_error = failure.message;
+        self.state.runtime_session.last_error = failure.cause;
         self.state.runtime_session.last_failure = failure;
     }
 
@@ -612,6 +646,7 @@ pub const StateManager = struct {
         self: StateManager,
         actor: Actor,
         lane: Lane,
+        kind: ApprovalKind,
         tool_name: []const u8,
         detail: []const u8,
         reason: []const u8,
@@ -619,7 +654,7 @@ pub const StateManager = struct {
     ) void {
         self.state.runtime_session.active_approval = .{
             .status = .pending,
-            .kind = protocol.approvalKindForToolName(tool_name),
+            .kind = kind,
             .requested_by = actor,
             .lane = lane,
             .tool_name = tool_name,
@@ -1628,13 +1663,13 @@ pub fn buildRuntimeFailure(
     state: *const AppState,
     actor: Actor,
     lane: Lane,
-    error_code: []const u8,
-    message: []const u8,
+    code: []const u8,
+    cause: []const u8,
     context_spec: RuntimeFailureContextSpec,
 ) RuntimeFailure {
     return .{
-        .error_code = error_code,
-        .message = message,
+        .code = code,
+        .cause = cause,
         .context = .{
             .actor = actorName(actor),
             .lane = laneName(lane),
@@ -1986,12 +2021,13 @@ pub fn beginApprovalRequest(
     state: *AppState,
     actor: Actor,
     lane: Lane,
+    kind: ApprovalKind,
     tool_name: []const u8,
     detail: []const u8,
     reason: []const u8,
     target: []const u8,
 ) void {
-    stateManager(state).beginApprovalRequest(actor, lane, tool_name, detail, reason, target);
+    stateManager(state).beginApprovalRequest(actor, lane, kind, tool_name, detail, reason, target);
 }
 
 pub fn resolveApprovalRequest(state: *AppState, approved: bool) void {

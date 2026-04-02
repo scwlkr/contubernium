@@ -33,7 +33,7 @@ Reference:
 - [FEATURES.md](docs/FEATURES.md) section `7. Error System`
 
 Done:
-- [x] Added a structured runtime failure object with `error_code`, `message`, and `context`
+- [x] Added a structured runtime failure object with `code`, `cause`, and `context`
 - [x] Preserved the existing `last_error` string as a compatibility surface while storing canonical structured failure data beside it
 - [x] Standardized blocked/error paths across loop interruption, loop limits, context exhaustion, tool denials, invalid model JSON, and blocked actor turns
 - [x] Included structured failure payloads in runtime log events so failures are inspectable beyond plain text

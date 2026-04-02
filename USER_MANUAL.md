@@ -85,15 +85,16 @@ Current guarantees:
 
 Current approval behavior:
 
-- read tools can run automatically
-- writes require approval
-- shell commands require approval
+- runtime tools publish formal `Read` / `Write` / `Execute` contracts in `docs/RUNTIME_TOOL_CONTRACTS.md`
+- read tools can run automatically when session policy allows it
+- writes require approval by default
+- shell commands require approval by default
 - blocked command patterns fail immediately
+- failures surface canonical `code` / `cause` fields plus contextual metadata
 
 Current constitutional gap:
 
 - explicit operator consent to bypass approvals is not yet fully modeled
-- permissions are not yet published as a formal `Read` / `Write` / `Execute` contract per tool
 
 ## Memory And Logs
 

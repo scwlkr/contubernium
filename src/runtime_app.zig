@@ -63,7 +63,10 @@ const TaskLane = core.TaskLane;
 const Tasks = core.Tasks;
 const ToolRequest = core.ToolRequest;
 const RuntimeToolKind = core.RuntimeToolKind;
+const RuntimePermissionClass = core.RuntimePermissionClass;
 const ToolApprovalGate = core.ToolApprovalGate;
+const ToolConfirmationMode = core.ToolConfirmationMode;
+const RuntimeToolTimeoutBehavior = core.RuntimeToolTimeoutBehavior;
 const RuntimeToolSpec = core.RuntimeToolSpec;
 const ValidatedToolRequest = core.ValidatedToolRequest;
 const ToolRequestValidation = core.ToolRequestValidation;
@@ -302,6 +305,7 @@ const summarizeCommandResult = tools_mod.summarizeCommandResult;
 const searchText = tools_mod.searchText;
 const readFileLimited = tools_mod.readFileLimited;
 const writeFile = tools_mod.writeFile;
+const runtimeToolContracts = tools_mod.runtimeToolContracts;
 const runtimeToolSpec = tools_mod.runtimeToolSpec;
 const toolAllowsWithoutConfirmation = tools_mod.toolAllowsWithoutConfirmation;
 const toolRequestContextSpec = tools_mod.toolRequestContextSpec;
@@ -650,7 +654,7 @@ test "executeToolRequests blocks policy-denied commands with structured failure 
     defer testing.allocator.free(outcome.summary);
 
     try testing.expect(outcome.blocked);
-    try testing.expectEqualStrings("TOOL_POLICY_BLOCKED", state.runtime_session.last_failure.error_code);
+    try testing.expectEqualStrings("TOOL_POLICY_BLOCKED", state.runtime_session.last_failure.code);
     try testing.expectEqualStrings("run_command", state.runtime_session.last_failure.context.tool);
     try testing.expect(std.mem.indexOf(u8, outcome.summary, "blocked: run_command blocked by policy") != null);
 }
@@ -665,7 +669,7 @@ test "executeToolRequests converts malformed read_file requests into structured 
     defer testing.allocator.free(outcome.summary);
 
     try testing.expect(outcome.blocked);
-    try testing.expectEqualStrings("MISSING_PATH", state.runtime_session.last_failure.error_code);
+    try testing.expectEqualStrings("MISSING_PATH", state.runtime_session.last_failure.code);
     try testing.expectEqualStrings("read_file", state.runtime_session.last_failure.context.tool);
     try testing.expect(std.mem.indexOf(u8, outcome.summary, "blocked: read_file requires a path") != null);
 }
@@ -683,7 +687,7 @@ test "executeToolRequests records approval denials through the mediated write_fi
     defer testing.allocator.free(outcome.summary);
 
     try testing.expect(outcome.blocked);
-    try testing.expectEqualStrings("TOOL_DENIED", state.runtime_session.last_failure.error_code);
+    try testing.expectEqualStrings("TOOL_DENIED", state.runtime_session.last_failure.code);
     try testing.expectEqualStrings("write_file", state.runtime_session.last_failure.context.tool);
     try testing.expectEqual(ApprovalStatus.denied, state.runtime_session.active_approval.status);
 }
@@ -828,7 +832,7 @@ test "approval transitions update canonical state ownership" {
     const testing = std.testing;
     var state = AppState{};
 
-    beginApprovalRequest(&state, .decanus, .command, "run_command", "zig build test", "zig build test", "zig build test");
+    beginApprovalRequest(&state, .decanus, .command, .shell, "run_command", "zig build test", "zig build test", "zig build test");
     try testing.expectEqual(RuntimeStatus.awaiting_approval, state.runtime_session.status);
     try testing.expectEqual(ApprovalStatus.pending, state.runtime_session.active_approval.status);
     try testing.expectEqual(ApprovalKind.shell, state.runtime_session.active_approval.kind);
@@ -837,6 +841,26 @@ test "approval transitions update canonical state ownership" {
     resolveApprovalRequest(&state, true);
     try testing.expectEqual(ApprovalStatus.approved, state.runtime_session.active_approval.status);
     try testing.expectEqual(RuntimeStatus.running, state.runtime_session.status);
+}
+
+test "runtime tool contracts publish permission class schemas and timeout behavior" {
+    const testing = std.testing;
+    const contracts = runtimeToolContracts();
+
+    try testing.expectEqual(@as(usize, 6), contracts.len);
+
+    const run_command = runtimeToolSpec("run_command").?;
+    try testing.expectEqual(RuntimePermissionClass.execute, run_command.permission_class);
+    try testing.expectEqual(ApprovalKind.shell, run_command.approval_kind);
+    try testing.expectEqual(ToolConfirmationMode.policy_guarded, run_command.confirmation_mode);
+    try testing.expectEqual(RuntimeToolTimeoutBehavior.policy_default, run_command.timeout_behavior);
+    try testing.expect(run_command.input_schema.len > 0);
+    try testing.expect(run_command.output_schema.len > 0);
+
+    const ask_user = runtimeToolSpec("ask_user").?;
+    try testing.expectEqual(RuntimePermissionClass.execute, ask_user.permission_class);
+    try testing.expectEqual(ToolConfirmationMode.none, ask_user.confirmation_mode);
+    try testing.expectEqual(RuntimeToolTimeoutBehavior.none, ask_user.timeout_behavior);
 }
 
 test "blocked transition keeps loop and runtime state aligned" {
@@ -1147,7 +1171,7 @@ test "buildPromptWithContextBudget blocks when a required memory layer is missin
         error.MemoryLoadBlocked,
         buildPromptWithContextBudget(allocator, config, &state, .{}, "system prompt", .decanus, ""),
     );
-    try testing.expectEqualStrings("MEMORY_LAYER_MISSING", state.runtime_session.last_failure.error_code);
+    try testing.expectEqualStrings("MEMORY_LAYER_MISSING", state.runtime_session.last_failure.code);
     try testing.expectEqualStrings("global.md", state.runtime_session.last_failure.context.target);
     try testing.expectEqual(@as(usize, 1), state.agent_loop.history.len);
     try testing.expectEqualStrings("memory_load_blocked", state.agent_loop.history[0].type);
@@ -1204,8 +1228,8 @@ test "recordRuntimeFailure preserves structured and legacy error surfaces" {
     recordRuntimeFailure(&state, failure);
 
     try testing.expectEqualStrings("Tool execution exceeded 5s", state.runtime_session.last_error);
-    try testing.expectEqualStrings("TOOL_TIMEOUT", state.runtime_session.last_failure.error_code);
-    try testing.expectEqualStrings("Tool execution exceeded 5s", state.runtime_session.last_failure.message);
+    try testing.expectEqualStrings("TOOL_TIMEOUT", state.runtime_session.last_failure.code);
+    try testing.expectEqualStrings("Tool execution exceeded 5s", state.runtime_session.last_failure.cause);
     try testing.expectEqualStrings("decanus", state.runtime_session.last_failure.context.actor);
     try testing.expectEqualStrings("command", state.runtime_session.last_failure.context.lane);
     try testing.expectEqualStrings("read_file", state.runtime_session.last_failure.context.tool);
@@ -1255,6 +1279,94 @@ test "runtime run log stores structured events" {
     try testing.expectEqualStrings("turn_started", loaded.events[0].action);
     try testing.expectEqualStrings("running", loaded.events[0].status);
     try testing.expectEqualStrings("phase 1 logging", loaded.events[0].summary);
+}
+
+test "normalizeLegacyStateJson migrates legacy failure envelope keys" {
+    const testing = std.testing;
+    const normalized = try normalizeLegacyStateJson(testing.allocator,
+        \\{
+        \\  "agent_loop": {
+        \\    "active_tool": "",
+        \\    "history": []
+        \\  },
+        \\  "tasks": {
+        \\    "backend": {
+        \\      "invocation": {
+        \\        "result": {
+        \\          "next_recommended_agent": ""
+        \\        }
+        \\      }
+        \\    }
+        \\  },
+        \\  "runtime_session": {
+        \\    "last_failure": {
+        \\      "error_code": "TOOL_TIMEOUT",
+        \\      "message": "timed out"
+        \\    }
+        \\  }
+        \\}
+    );
+    defer testing.allocator.free(normalized);
+
+    try testing.expect(std.mem.indexOf(u8, normalized, "\"code\": \"TOOL_TIMEOUT\"") != null);
+    try testing.expect(std.mem.indexOf(u8, normalized, "\"cause\": \"timed out\"") != null);
+    try testing.expect(std.mem.indexOf(u8, normalized, "\"active_tool\": null") != null);
+    try testing.expect(std.mem.indexOf(u8, normalized, "\"next_recommended_agent\": null") != null);
+}
+
+test "loadRuntimeRunLog normalizes legacy failure envelope keys" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const root = try tmp.dir.realpathAlloc(scratch, ".");
+    const path = try std.fs.path.join(scratch, &.{ root, "legacy-run-log.json" });
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "legacy-run-log.json",
+        .data =
+        \\{
+        \\  "format_version": 1,
+        \\  "run_id": "run-legacy",
+        \\  "command": "mission",
+        \\  "created_at": "1",
+        \\  "updated_at": "1",
+        \\  "project_name": "Contubernium",
+        \\  "provider": "ollama-native",
+        \\  "model": "qwen2.5-coder:7b",
+        \\  "approval_mode": "guarded",
+        \\  "mission_prompt": "resume session",
+        \\  "events": [
+        \\    {
+        \\      "timestamp": "2",
+        \\      "iteration": 1,
+        \\      "turn_id": "turn-1",
+        \\      "actor": "decanus",
+        \\      "lane": "command",
+        \\      "action": "tool_result",
+        \\      "status": "blocked",
+        \\      "summary": "timed out",
+        \\      "failure": {
+        \\        "error_code": "TOOL_TIMEOUT",
+        \\        "message": "timed out",
+        \\        "context": {
+        \\          "tool": "read_file"
+        \\        }
+        \\      }
+        \\    }
+        \\  ]
+        \\}
+        ,
+    });
+
+    const loaded = try loadRuntimeRunLog(scratch, path);
+    const failure = loaded.events[0].failure.?;
+    try testing.expectEqualStrings("TOOL_TIMEOUT", failure.code);
+    try testing.expectEqualStrings("timed out", failure.cause);
+    try testing.expectEqualStrings("read_file", failure.context.tool);
 }
 
 test "condenseHistoryForContext replaces older entries with a retained digest" {
