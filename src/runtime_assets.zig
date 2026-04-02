@@ -24,6 +24,11 @@ const default_response_reserve_tokens = core.default_response_reserve_tokens;
 const default_tool_timeout_ms = core.default_tool_timeout_ms;
 const default_max_project_memory_chars = core.default_max_project_memory_chars;
 const default_max_global_memory_chars = core.default_max_global_memory_chars;
+const legacy_memory_format_version = core.legacy_memory_format_version;
+const global_memory_format_version = core.global_memory_format_version;
+const session_record_format_version = core.session_record_format_version;
+const session_index_format_version = core.session_index_format_version;
+const global_session_index_format_version = core.global_session_index_format_version;
 const Actor = core.Actor;
 const Lane = core.Lane;
 const GlobalStatus = core.GlobalStatus;
@@ -238,6 +243,13 @@ const providerStructuredChatOllamaStreaming = provider.providerStructuredChatOll
 const processOllamaPendingLines = provider.processOllamaPendingLines;
 const processOllamaPendingLine = provider.processOllamaPendingLine;
 
+const global_memory_version_prefix = "<!-- contubernium:global-memory format_version=";
+const global_memory_version_suffix = " -->";
+const global_memory_version_header = std.fmt.comptimePrint(
+    "{s}{d}{s}",
+    .{ global_memory_version_prefix, global_memory_format_version, global_memory_version_suffix },
+);
+
 pub const EmbeddedAsset = struct {
     relative_path: []const u8,
     content: []const u8,
@@ -303,6 +315,98 @@ pub fn normalizeLegacyFailureJson(allocator: std.mem.Allocator, data: []const u8
     return normalized;
 }
 
+fn formatVersionFromJsonValue(value: std.json.Value) !?usize {
+    return switch (value) {
+        .null => null,
+        .integer => |number| {
+            if (number < 0) return error.InvalidMemoryFormat;
+            return @as(usize, @intCast(number));
+        },
+        .number_string, .string => |text| try std.fmt.parseInt(usize, trimAscii(text), 10),
+        else => error.InvalidMemoryFormat,
+    };
+}
+
+fn normalizeVersionedJsonObject(
+    allocator: std.mem.Allocator,
+    data: []const u8,
+    current_version: usize,
+) ![]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, data, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    const root = switch (parsed.value) {
+        .object => |*object| object,
+        else => return error.InvalidMemoryFormat,
+    };
+
+    const detected_version = if (root.get("format_version")) |value|
+        try formatVersionFromJsonValue(value)
+    else
+        null;
+
+    if (detected_version) |version| {
+        if (version == current_version) {
+            return try allocator.dupe(u8, data);
+        }
+        if (version != legacy_memory_format_version) {
+            return error.UnsupportedMemoryFormatVersion;
+        }
+    }
+
+    try root.put(allocator, "format_version", .{ .integer = @as(i64, @intCast(current_version)) });
+    return try std.fmt.allocPrint(
+        allocator,
+        "{f}",
+        .{std.json.fmt(parsed.value, .{ .whitespace = .indent_2 })},
+    );
+}
+
+fn parsedGlobalMemoryFormatVersion(text: []const u8) !?usize {
+    const trimmed = trimAscii(text);
+    if (!std.mem.startsWith(u8, trimmed, global_memory_version_prefix)) return null;
+
+    const suffix_index = std.mem.indexOf(u8, trimmed, global_memory_version_suffix) orelse return error.InvalidMemoryFormat;
+    const version_text = trimAscii(trimmed[global_memory_version_prefix.len..suffix_index]);
+    if (version_text.len == 0) return error.InvalidMemoryFormat;
+    return try std.fmt.parseInt(usize, version_text, 10);
+}
+
+pub fn stripGlobalMemoryVersionHeader(text: []const u8) []const u8 {
+    const trimmed = trimAscii(text);
+    if (!std.mem.startsWith(u8, trimmed, global_memory_version_prefix)) return trimmed;
+
+    const suffix_index = std.mem.indexOf(u8, trimmed, global_memory_version_suffix) orelse return trimmed;
+    var remainder = trimmed[suffix_index + global_memory_version_suffix.len ..];
+
+    while (remainder.len > 0 and (remainder[0] == '\n' or remainder[0] == '\r')) {
+        remainder = remainder[1..];
+    }
+    return trimAscii(remainder);
+}
+
+pub fn normalizeGlobalMemoryMarkdown(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+    const trimmed = trimAscii(data);
+    const detected_version = try parsedGlobalMemoryFormatVersion(trimmed);
+
+    if (detected_version) |version| {
+        if (version == global_memory_format_version) {
+            return try allocator.dupe(u8, trimmed);
+        }
+        if (version != legacy_memory_format_version) {
+            return error.UnsupportedMemoryFormatVersion;
+        }
+    }
+
+    if (trimmed.len == 0) return try allocator.dupe(u8, global_memory_version_header);
+    return try std.fmt.allocPrint(allocator, "{s}\n\n{s}", .{
+        global_memory_version_header,
+        stripGlobalMemoryVersionHeader(trimmed),
+    });
+}
+
 pub fn saveState(allocator: std.mem.Allocator, path: []const u8, state: AppState) !void {
     const rendered = try std.fmt.allocPrint(
         allocator,
@@ -355,7 +459,11 @@ pub fn loadSessionIndex(allocator: std.mem.Allocator, path: []const u8) !Session
         error.FileNotFound => return .{},
         else => return err,
     };
-    return try parseJson(SessionIndex, allocator, data);
+    defer allocator.free(data);
+
+    const normalized = try normalizeVersionedJsonObject(allocator, data, session_index_format_version);
+    defer allocator.free(normalized);
+    return try parseJson(SessionIndex, allocator, normalized);
 }
 
 pub fn saveSessionIndex(allocator: std.mem.Allocator, path: []const u8, index: SessionIndex) !void {
@@ -375,7 +483,11 @@ pub fn saveSessionIndex(allocator: std.mem.Allocator, path: []const u8, index: S
 
 pub fn loadSessionRecord(allocator: std.mem.Allocator, path: []const u8) !SessionRecord {
     const data = try std.fs.cwd().readFileAlloc(allocator, path, max_file_bytes);
-    return try parseJson(SessionRecord, allocator, data);
+    defer allocator.free(data);
+
+    const normalized = try normalizeVersionedJsonObject(allocator, data, session_record_format_version);
+    defer allocator.free(normalized);
+    return try parseJson(SessionRecord, allocator, normalized);
 }
 
 pub fn saveSessionRecord(allocator: std.mem.Allocator, path: []const u8, record: SessionRecord) !void {
@@ -398,7 +510,11 @@ pub fn loadGlobalSessionIndex(allocator: std.mem.Allocator, path: []const u8) !G
         error.FileNotFound => return .{},
         else => return err,
     };
-    return try parseJson(GlobalSessionIndex, allocator, data);
+    defer allocator.free(data);
+
+    const normalized = try normalizeVersionedJsonObject(allocator, data, global_session_index_format_version);
+    defer allocator.free(normalized);
+    return try parseJson(GlobalSessionIndex, allocator, normalized);
 }
 
 pub fn saveGlobalSessionIndex(allocator: std.mem.Allocator, path: []const u8, index: GlobalSessionIndex) !void {
@@ -430,7 +546,9 @@ pub fn sessionIdIsSafe(session_id: []const u8) bool {
 
 pub fn sessionRecordPath(allocator: std.mem.Allocator, sessions_dir: []const u8, session_id: []const u8) ![]const u8 {
     if (!sessionIdIsSafe(session_id)) return error.InvalidSessionId;
-    return try std.fmt.allocPrint(allocator, "{s}/{s}.json", .{ sessions_dir, trimAscii(session_id) });
+    const file_name = try std.fmt.allocPrint(allocator, "{s}.json", .{trimAscii(session_id)});
+    defer allocator.free(file_name);
+    return try std.fs.path.join(allocator, &.{ sessions_dir, file_name });
 }
 
 pub fn resolveGlobalSessionIndexPath(allocator: std.mem.Allocator) ![]const u8 {
@@ -1160,7 +1278,10 @@ pub fn runtimePath(allocator: std.mem.Allocator, relative_path: []const u8) ![]c
 pub fn resolveContuberniumHome(allocator: std.mem.Allocator) ![]const u8 {
     return std.process.getEnvVarOwned(allocator, "CONTUBERNIUM_HOME") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => {
-            const home = try std.process.getEnvVarOwned(allocator, "HOME");
+            const home = std.process.getEnvVarOwned(allocator, "HOME") catch |home_err| switch (home_err) {
+                error.EnvironmentVariableNotFound => try std.process.getEnvVarOwned(allocator, "USERPROFILE"),
+                else => return home_err,
+            };
             defer allocator.free(home);
             return try std.fs.path.join(allocator, &.{ home, ".contubernium" });
         },

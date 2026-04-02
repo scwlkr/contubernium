@@ -146,6 +146,7 @@ install_global_assets() {
 
     install -m 0644 "$source_dir/templates/contubernium_state.template.json" "$templates_dir/state.json"
     install -m 0644 "$source_dir/templates/contubernium.config.template.json" "$templates_dir/config.json"
+    install -m 0644 "$source_dir/templates/session_index.template.json" "$templates_dir/session_index.json"
     install -m 0644 "$source_dir/templates/project.template.md" "$templates_dir/project.md"
     install -m 0644 "$source_dir/templates/global.template.md" "$templates_dir/global.md"
     install -m 0644 "$source_dir/templates/architecture.template.md" "$templates_dir/architecture.md"

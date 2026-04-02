@@ -22,6 +22,11 @@ pub const default_response_reserve_tokens = 4096;
 pub const default_tool_timeout_ms = 120000;
 pub const default_max_project_memory_chars = 4000;
 pub const default_max_global_memory_chars = 4000;
+pub const legacy_memory_format_version = 0;
+pub const global_memory_format_version = 1;
+pub const session_record_format_version = 1;
+pub const session_index_format_version = 1;
+pub const global_session_index_format_version = 1;
 
 pub const Actor = protocol.Actor;
 pub const Lane = protocol.Lane;
@@ -972,7 +977,7 @@ pub const RuntimeRunLog = struct {
 };
 
 pub const SessionRecord = struct {
-    format_version: usize = 1,
+    format_version: usize = session_record_format_version,
     session_id: []const u8 = "",
     project_id: []const u8 = "",
     project_label: []const u8 = "",
@@ -1010,7 +1015,7 @@ pub const SessionIndexEntry = struct {
 };
 
 pub const SessionIndex = struct {
-    format_version: usize = 1,
+    format_version: usize = session_index_format_version,
     current_session_id: []const u8 = "",
     sessions: []const SessionIndexEntry = &.{},
 };
@@ -1027,7 +1032,7 @@ pub const GlobalSessionIndexEntry = struct {
 };
 
 pub const GlobalSessionIndex = struct {
-    format_version: usize = 1,
+    format_version: usize = global_session_index_format_version,
     sessions: []const GlobalSessionIndexEntry = &.{},
 };
 
@@ -2072,6 +2077,12 @@ pub fn markInterrupted(state: *AppState) void {
 }
 
 pub fn friendlyRuntimeError(allocator: std.mem.Allocator, err: anyerror) ![]const u8 {
+    if (err == error.InvalidMemoryFormat) {
+        return try allocator.dupe(u8, "stored memory data is malformed. Repair the file or reinitialize the affected project memory surface.");
+    }
+    if (err == error.UnsupportedMemoryFormatVersion) {
+        return try allocator.dupe(u8, "stored memory data uses a newer format version than this runtime supports. Upgrade Contubernium before continuing.");
+    }
     if (err == error.BackendUnavailable) {
         return try allocator.dupe(u8, "backend unavailable. Start your local model server, then run /doctor or /models again.");
     }

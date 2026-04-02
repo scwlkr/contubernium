@@ -254,6 +254,7 @@ cd contubernium
 `install.sh` installs the CLI onto your `PATH`, syncs the global Contubernium home into `~/.contubernium/`, and installs the bundled OpenTUI frontend in `~/.contubernium/opentui/`.
 
 Current shipped behavior and operator-facing feature notes live in [USER_MANUAL.md](/Users/shanewalker/Desktop/dev/Contubernium/USER_MANUAL.md).
+Memory-format compatibility and portability notes live in [docs/MEMORY_FORMATS.md](/Users/shanewalker/Desktop/dev/Contubernium/docs/MEMORY_FORMATS.md).
 
 ## Run
 
@@ -282,6 +283,8 @@ contubernium init
 .contubernium/
   state.json
   config.json
+  sessions/
+    index.json
   ARCHITECTURE.md
   PLAN.md
   PROJECT_CONTEXT.md
@@ -297,6 +300,8 @@ If you need a Bash-only fallback from a source checkout, run:
 ```bash
 ./init.sh /path/to/project
 ```
+
+The Bash bootstrap helpers are intended for macOS/Linux environments. The compiled `contubernium` CLI remains the canonical initialization path as platform support expands.
 
 See [docs/installation.md](/Users/shanewalker/Desktop/dev/Contubernium/docs/installation.md) for the full install and initialization flow and [USER_MANUAL.md](/Users/shanewalker/Desktop/dev/Contubernium/USER_MANUAL.md) for shipped operator-facing behavior.
 

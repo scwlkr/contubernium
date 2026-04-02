@@ -231,6 +231,8 @@ const copyFileIfMissing = assets_mod.copyFileIfMissing;
 const scaffoldProject = assets_mod.scaffoldProject;
 const runtimePath = assets_mod.runtimePath;
 const resolveContuberniumHome = assets_mod.resolveContuberniumHome;
+const normalizeGlobalMemoryMarkdown = assets_mod.normalizeGlobalMemoryMarkdown;
+const stripGlobalMemoryVersionHeader = assets_mod.stripGlobalMemoryVersionHeader;
 const deinitGlobalAssetLayout = assets_mod.deinitGlobalAssetLayout;
 const resolveSourceAssetRoot = assets_mod.resolveSourceAssetRoot;
 const resolveGlobalAssetLayout = assets_mod.resolveGlobalAssetLayout;
@@ -767,7 +769,16 @@ pub fn loadRuntimeMemoryLayer(allocator: std.mem.Allocator, spec: RuntimeMemoryS
     };
     defer allocator.free(data);
 
-    const trimmed = trimAscii(data);
+    const normalized = if (eql(spec.kind, "global"))
+        try normalizeGlobalMemoryMarkdown(allocator, data)
+    else
+        try allocator.dupe(u8, data);
+    defer allocator.free(normalized);
+
+    const trimmed = if (eql(spec.kind, "global"))
+        stripGlobalMemoryVersionHeader(normalized)
+    else
+        trimAscii(normalized);
     const truncated = spec.max_chars > 0 and trimmed.len > spec.max_chars;
     const content = if (trimmed.len == 0)
         ""

@@ -26,6 +26,10 @@ const default_response_reserve_tokens = core.default_response_reserve_tokens;
 const default_tool_timeout_ms = core.default_tool_timeout_ms;
 const default_max_project_memory_chars = core.default_max_project_memory_chars;
 const default_max_global_memory_chars = core.default_max_global_memory_chars;
+const global_memory_format_version = core.global_memory_format_version;
+const session_record_format_version = core.session_record_format_version;
+const session_index_format_version = core.session_index_format_version;
+const global_session_index_format_version = core.global_session_index_format_version;
 const Actor = core.Actor;
 const Lane = core.Lane;
 const GlobalStatus = core.GlobalStatus;
@@ -228,6 +232,8 @@ const loadSessionRecord = assets_mod.loadSessionRecord;
 const loadGlobalSessionIndex = assets_mod.loadGlobalSessionIndex;
 const loadRuntimeRunLog = assets_mod.loadRuntimeRunLog;
 const saveRuntimeRunLog = assets_mod.saveRuntimeRunLog;
+const normalizeGlobalMemoryMarkdown = assets_mod.normalizeGlobalMemoryMarkdown;
+const stripGlobalMemoryVersionHeader = assets_mod.stripGlobalMemoryVersionHeader;
 const persistSessionMemory = assets_mod.persistSessionMemory;
 const runDoctorCheck = assets_mod.runDoctorCheck;
 const missionOutcomeSummary = assets_mod.missionOutcomeSummary;
@@ -1241,6 +1247,9 @@ test "scaffoldProject creates canonical runtime and context assets" {
     const testing = std.testing;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
 
     var original_cwd = try std.fs.cwd().openDir(".", .{});
     defer original_cwd.close();
@@ -1259,6 +1268,50 @@ test "scaffoldProject creates canonical runtime and context assets" {
     try testing.expect(pathExists(".contubernium/sessions/index.json"));
     try testing.expect(!pathExists(".contubernium/prompts"));
     try testing.expect(!pathExists(".agents"));
+
+    const global_memory = try std.fs.cwd().readFileAlloc(scratch, ".contubernium/global.md", max_file_bytes);
+    try testing.expect(std.mem.indexOf(u8, global_memory, "format_version=1") != null);
+
+    const session_index = try loadSessionIndex(scratch, ".contubernium/sessions/index.json");
+    try testing.expectEqual(@as(usize, session_index_format_version), session_index.format_version);
+}
+
+test "init.sh fallback scaffold creates session index and versioned global memory" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const repo_root = try std.fs.cwd().realpathAlloc(scratch, ".");
+    const tmp_root = try tmp.dir.realpathAlloc(scratch, ".");
+    const script_path = try std.fs.path.join(scratch, &.{ repo_root, "init.sh" });
+    const project_path = try std.fs.path.join(scratch, &.{ tmp_root, "project" });
+    const fake_home = try std.fs.path.join(scratch, &.{ tmp_root, "missing-home" });
+
+    var env_map = try std.process.getEnvMap(scratch);
+    try env_map.put("CONTUBERNIUM_HOME", fake_home);
+
+    const result = try std.process.Child.run(.{
+        .allocator = scratch,
+        .argv = &.{ "bash", script_path, project_path },
+        .cwd = repo_root,
+        .env_map = &env_map,
+    });
+    try testing.expectEqual(@as(i32, 0), exitCode(result.term));
+
+    const session_index_path = try std.fs.path.join(scratch, &.{ project_path, ".contubernium", "sessions", "index.json" });
+    const global_memory_path = try std.fs.path.join(scratch, &.{ project_path, ".contubernium", "global.md" });
+
+    try testing.expect(pathExists(session_index_path));
+    try testing.expect(pathExists(global_memory_path));
+
+    const session_index = try loadSessionIndex(scratch, session_index_path);
+    try testing.expectEqual(@as(usize, session_index_format_version), session_index.format_version);
+
+    const global_memory = try std.fs.cwd().readFileAlloc(scratch, global_memory_path, max_file_bytes);
+    try testing.expect(std.mem.indexOf(u8, global_memory, "format_version=1") != null);
 }
 
 test "estimatePromptBudget reserves response headroom" {
@@ -1541,6 +1594,151 @@ test "loadRuntimeRunLog normalizes legacy failure envelope keys" {
     try testing.expectEqualStrings("TOOL_TIMEOUT", failure.code);
     try testing.expectEqualStrings("timed out", failure.cause);
     try testing.expectEqualStrings("read_file", failure.context.tool);
+}
+
+test "loadSessionIndex migrates legacy unversioned format to the current version" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const root = try tmp.dir.realpathAlloc(scratch, ".");
+    const path = try std.fs.path.join(scratch, &.{ root, "sessions-index.json" });
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "sessions-index.json",
+        .data =
+        \\{
+        \\  "current_session_id": "session-legacy",
+        \\  "sessions": []
+        \\}
+        ,
+    });
+
+    const index = try loadSessionIndex(scratch, path);
+    try testing.expectEqual(@as(usize, session_index_format_version), index.format_version);
+    try testing.expectEqualStrings("session-legacy", index.current_session_id);
+}
+
+test "loadSessionRecord migrates legacy unversioned format to the current version" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const root = try tmp.dir.realpathAlloc(scratch, ".");
+    const path = try std.fs.path.join(scratch, &.{ root, "session-record.json" });
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "session-record.json",
+        .data =
+        \\{
+        \\  "session_id": "session-legacy",
+        \\  "mission_prompt": "resume mission",
+        \\  "state_snapshot": {}
+        \\}
+        ,
+    });
+
+    const record = try loadSessionRecord(scratch, path);
+    try testing.expectEqual(@as(usize, session_record_format_version), record.format_version);
+    try testing.expectEqualStrings("session-legacy", record.session_id);
+    try testing.expectEqualStrings("resume mission", record.mission_prompt);
+}
+
+test "loadGlobalSessionIndex rejects unsupported future format versions" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const root = try tmp.dir.realpathAlloc(scratch, ".");
+    const path = try std.fs.path.join(scratch, &.{ root, "global-session-index.json" });
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "global-session-index.json",
+        .data =
+        \\{
+        \\  "format_version": 99,
+        \\  "sessions": []
+        \\}
+        ,
+    });
+
+    _ = loadGlobalSessionIndex(scratch, path) catch |err| {
+        try testing.expectEqual(error.UnsupportedMemoryFormatVersion, err);
+        return;
+    };
+    return error.TestUnexpectedResult;
+}
+
+test "normalizeGlobalMemoryMarkdown adds a version marker and strips it for prompt use" {
+    const testing = std.testing;
+    const normalized = try normalizeGlobalMemoryMarkdown(
+        testing.allocator,
+        \\# Global Memory
+        \\
+        \\Keep the rules concise.
+    );
+    defer testing.allocator.free(normalized);
+
+    try testing.expect(std.mem.indexOf(u8, normalized, "format_version=1") != null);
+    try testing.expectEqual(@as(usize, global_memory_format_version), 1);
+    try testing.expectEqualStrings(
+        "# Global Memory\n\nKeep the rules concise.",
+        stripGlobalMemoryVersionHeader(normalized),
+    );
+}
+
+test "resolveContuberniumHome falls back to USERPROFILE when HOME is unavailable" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const userprofile_path = try tmp.dir.realpathAlloc(scratch, ".");
+    const original_contubernium_home = std.posix.getenv("CONTUBERNIUM_HOME");
+    const original_home = std.posix.getenv("HOME");
+    const original_userprofile = std.posix.getenv("USERPROFILE");
+
+    const contubernium_home_name = try scratch.dupeZ(u8, "CONTUBERNIUM_HOME");
+    const home_name = try scratch.dupeZ(u8, "HOME");
+    const userprofile_name = try scratch.dupeZ(u8, "USERPROFILE");
+    const userprofile_value = try scratch.dupeZ(u8, userprofile_path);
+
+    defer {
+        if (original_contubernium_home) |value| {
+            _ = std.c.setenv(contubernium_home_name.ptr, value, 1);
+        } else {
+            _ = std.c.unsetenv(contubernium_home_name.ptr);
+        }
+        if (original_home) |value| {
+            _ = std.c.setenv(home_name.ptr, value, 1);
+        } else {
+            _ = std.c.unsetenv(home_name.ptr);
+        }
+        if (original_userprofile) |value| {
+            _ = std.c.setenv(userprofile_name.ptr, value, 1);
+        } else {
+            _ = std.c.unsetenv(userprofile_name.ptr);
+        }
+    }
+
+    _ = std.c.unsetenv(contubernium_home_name.ptr);
+    _ = std.c.unsetenv(home_name.ptr);
+    try testing.expectEqual(@as(c_int, 0), std.c.setenv(userprofile_name.ptr, userprofile_value.ptr, 1));
+
+    const resolved = try resolveContuberniumHome(scratch);
+    const expected = try std.fs.path.join(scratch, &.{ userprofile_path, ".contubernium" });
+    try testing.expectEqualStrings(expected, resolved);
 }
 
 test "snapshotFromState prefers the active routed provider over the primary config" {

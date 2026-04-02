@@ -27,6 +27,7 @@ source/        # managed checkout when install.sh clones for you
 
 `~/.contubernium/templates/` contains the canonical bootstrap files used by the Bash fallback initializer:
 
+- `session_index.json`
 - `state.json`
 - `config.json`
 - `architecture.md`
@@ -50,6 +51,8 @@ This creates the canonical project layout:
 ```text
 .contubernium/
   state.json
+  sessions/
+    index.json
   ARCHITECTURE.md
   PLAN.md
   PROJECT_CONTEXT.md
@@ -60,6 +63,7 @@ This creates the canonical project layout:
 ```
 
 `contubernium init` uses embedded assets from the built binary, so it does not need symlinks or a live source checkout to scaffold a project.
+Session memory files use versioned JSON, and `global.md` carries a version marker comment. See [docs/MEMORY_FORMATS.md](/Users/shanewalker/Desktop/dev/Contubernium/docs/MEMORY_FORMATS.md) for the compatibility rules.
 
 ## Bash Fallback
 
@@ -70,6 +74,7 @@ If you want to initialize a project from a source checkout without using the com
 ```
 
 `init.sh` uses the installed global home when it exists and falls back to the repository’s tracked `templates/` directory when it does not. Agent behavior always stays global.
+`install.sh` and `init.sh` are Bash-oriented helpers for macOS and Linux today; the compiled CLI is the canonical path for future cross-platform bootstrap work.
 
 ## Recommended Verification
 

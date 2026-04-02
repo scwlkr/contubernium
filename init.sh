@@ -67,6 +67,7 @@ if [[ "$ASSET_ROOT" == "$SCRIPT_DIR" ]]; then
     :
 fi
 
+SESSION_INDEX_TEMPLATE="$(template_path "$TEMPLATES_SOURCE" "session_index.json" "session_index.template.json")"
 STATE_TEMPLATE="$(template_path "$TEMPLATES_SOURCE" "state.json" "contubernium_state.template.json")"
 CONFIG_TEMPLATE="$(template_path "$TEMPLATES_SOURCE" "config.json" "contubernium.config.template.json")"
 PROJECT_TEMPLATE="$(template_path "$TEMPLATES_SOURCE" "project.md" "project.template.md")"
@@ -75,6 +76,7 @@ ARCHITECTURE_TEMPLATE="$(template_path "$TEMPLATES_SOURCE" "architecture.md" "ar
 PLAN_TEMPLATE="$(template_path "$TEMPLATES_SOURCE" "plan.md" "plan.template.md")"
 PROJECT_CONTEXT_TEMPLATE="$(template_path "$TEMPLATES_SOURCE" "project_context.md" "project_context.template.md")"
 
+require_path "$SESSION_INDEX_TEMPLATE" "session index template"
 require_path "$STATE_TEMPLATE" "state template"
 require_path "$CONFIG_TEMPLATE" "config template"
 require_path "$PROJECT_TEMPLATE" "project memory template"
@@ -83,8 +85,9 @@ require_path "$ARCHITECTURE_TEMPLATE" "architecture template"
 require_path "$PLAN_TEMPLATE" "plan template"
 require_path "$PROJECT_CONTEXT_TEMPLATE" "project context template"
 
-mkdir -p "$PROJECT_DIR/.contubernium/logs"
+mkdir -p "$PROJECT_DIR/.contubernium/logs" "$PROJECT_DIR/.contubernium/sessions"
 
+copy_if_missing "$SESSION_INDEX_TEMPLATE" "$PROJECT_DIR/.contubernium/sessions/index.json"
 copy_if_missing "$STATE_TEMPLATE" "$PROJECT_DIR/.contubernium/state.json"
 copy_if_missing "$CONFIG_TEMPLATE" "$PROJECT_DIR/.contubernium/config.json"
 copy_if_missing "$PROJECT_TEMPLATE" "$PROJECT_DIR/.contubernium/project.md"

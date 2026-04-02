@@ -38,6 +38,7 @@ This prepares:
 
 - `.contubernium/config.json`
 - `.contubernium/state.json`
+- `.contubernium/sessions/index.json`
 - `.contubernium/ARCHITECTURE.md`
 - `.contubernium/PLAN.md`
 - `.contubernium/PROJECT_CONTEXT.md`
@@ -52,6 +53,8 @@ If you need a Bash-only fallback from a source checkout, run:
 ```bash
 ./init.sh /path/to/project
 ```
+
+Those Bash helpers target macOS/Linux today. For future cross-platform work, treat the compiled `contubernium` CLI as the canonical bootstrap path and keep file/path handling aligned with [docs/MEMORY_FORMATS.md](/Users/shanewalker/Desktop/dev/Contubernium/docs/MEMORY_FORMATS.md).
 
 ### 3. Start Ollama
 

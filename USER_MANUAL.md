@@ -28,6 +28,7 @@ What this does today:
 - builds the Zig binary
 - installs `contubernium` into a user bin directory
 - syncs global Contubernium assets into `~/.contubernium/`
+- installs the fallback template set, including the session index template used by `init.sh`
 
 Project initialization:
 
@@ -135,6 +136,10 @@ Current behavior:
 - mission state is stored in `state.json`
 - run logs are written as structured JSON under `.contubernium/logs/`
 - durable session records are written under `.contubernium/sessions/`
+- session indexes and session records are written as `format_version: 1` JSON
+- `global.md` starts with `<!-- contubernium:global-memory format_version=1 -->`
+- legacy unversioned session/global-memory files are normalized forward at load time
+- newer unknown memory-format versions are rejected until the runtime is upgraded
 - the current project keeps the canonical session payload; the home-level `~/.contubernium/session-index.json` stores lightweight session metadata only
 - `contubernium sessions list` and `contubernium sessions show` inspect stored sessions intentionally
 - `contubernium sessions resume` restores a stored session snapshot and continues it
@@ -143,6 +148,13 @@ Current behavior:
 - each run log stores the primary model policy metadata at the top level
 - each log event stores the active provider/model and, when applicable, the model-policy role and reason
 - prompt context is condensed when the context budget gets tight
+
+Portability note:
+
+- `CONTUBERNIUM_HOME` is honored before platform home-directory fallbacks
+- the Bash bootstrap helpers target macOS/Linux today
+- runtime shell execution still uses `sh -lc`, so the compiled CLI is the canonical path as future Windows support is added
+- detailed compatibility notes live in [docs/MEMORY_FORMATS.md](/Users/shanewalker/Desktop/dev/Contubernium/docs/MEMORY_FORMATS.md)
 
 ## Feature And Test Ledger
 
@@ -159,6 +171,7 @@ If behavior changes and no row changes here, the feature is not documented compl
 | Tool validation | Invalid or blocked tool requests produce structured failures instead of silent execution. | `src/runtime_app.zig` tests: `executeToolRequests blocks policy-denied commands with structured failure state`; `executeToolRequests converts malformed read_file requests into structured failures` |
 | Structured run logs | Runtime events are written into structured JSON run logs. | `src/runtime_app.zig` test: `runtime run log stores structured events` |
 | Durable sessions | Every mission conversation writes a canonical session record plus project-local and home-level session index metadata. | `src/runtime_app.zig` test: `persistSessionMemory writes durable local and global session indexes` |
+| Memory format migration | Legacy unversioned session/global-memory files are normalized to the current format, and newer unknown versions are rejected explicitly. | `src/runtime_app.zig` tests: `loadSessionIndex migrates legacy unversioned format to the current version`; `loadSessionRecord migrates legacy unversioned format to the current version`; `loadGlobalSessionIndex rejects unsupported future format versions`; `normalizeGlobalMemoryMarkdown adds a version marker and strips it for prompt use` |
 | Session retrieval | Operators can list, inspect, and target stored sessions deliberately, including explicit cross-project roots. | `src/cli.zig` tests: `parse routes sessions subcommands with optional project roots`; `parse requires a session id for sessions show` |
 | Model policy config | Project config uses `model_policy` routes and mirrors them onto legacy provider fields for compatibility. | `src/runtime_app.zig` test: `loadConfig mirrors model_policy routes into legacy provider fields` |
 | Model policy log metadata | Each run log stores primary route metadata, escalation metadata, and fallback metadata. | `src/runtime_app.zig` test: `initializeRuntimeRunLog stores model policy metadata` |

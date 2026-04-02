@@ -1,3 +1,5 @@
+<!-- contubernium:global-memory format_version=1 -->
+
 # Global Memory
 
 Capture reusable strategies, defaults, and stable patterns that can inform future runs.
