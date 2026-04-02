@@ -86,6 +86,9 @@ const interactive_color_danger = "\x1b[38;5;203m";
 const interactive_color_success = "\x1b[38;5;114m";
 const interactive_style_italic = "\x1b[3m";
 const interactive_clear_line = "\r\x1b[2K";
+const cli_spinner_label = "testudo advancing";
+const cli_spinner_fallback_columns: usize = 80;
+const cli_spinner_visible_preview_cap: usize = 40;
 
 const InteractiveKey = union(enum) {
     character: u8,
@@ -683,7 +686,7 @@ fn appendSpinnerPreview(state: *CliSpinnerState, text: []const u8) void {
 
     var index: usize = 0;
     var previous_space = state.preview_len > 0 and state.preview_buf[state.preview_len - 1] == ' ';
-    while (index < trimmed.len and state.preview_len < state.preview_buf.len) {
+    while (index < trimmed.len) {
         const scalar = decodeUtf8Scalar(trimmed, index);
         const chunk = trimmed[index .. index + scalar.byte_len];
         index += scalar.byte_len;
@@ -693,23 +696,93 @@ fn appendSpinnerPreview(state: *CliSpinnerState, text: []const u8) void {
             scalar.codepoint == '\r' or
             scalar.codepoint == '\t';
         if (whitespace) {
-            if (!previous_space and state.preview_len < state.preview_buf.len) {
-                state.preview_buf[state.preview_len] = ' ';
-                state.preview_len += 1;
+            if (!previous_space) {
+                appendSpinnerPreviewChunk(state, " ");
                 previous_space = true;
             }
             continue;
         }
 
-        if (state.preview_len + chunk.len > state.preview_buf.len) break;
-        @memcpy(state.preview_buf[state.preview_len .. state.preview_len + chunk.len], chunk);
-        state.preview_len += chunk.len;
+        appendSpinnerPreviewChunk(state, chunk);
         previous_space = false;
     }
 
     while (state.preview_len > 0 and state.preview_buf[state.preview_len - 1] == ' ') {
         state.preview_len -= 1;
     }
+}
+
+fn appendSpinnerPreviewChunk(state: *CliSpinnerState, chunk: []const u8) void {
+    if (chunk.len == 0) return;
+
+    if (chunk.len >= state.preview_buf.len) {
+        const tail = utf8SafeTail(chunk, state.preview_buf.len);
+        @memcpy(state.preview_buf[0..tail.len], tail);
+        state.preview_len = tail.len;
+        return;
+    }
+
+    if (state.preview_len + chunk.len > state.preview_buf.len) {
+        dropSpinnerPreviewPrefix(state, state.preview_len + chunk.len - state.preview_buf.len);
+    }
+
+    @memcpy(state.preview_buf[state.preview_len .. state.preview_len + chunk.len], chunk);
+    state.preview_len += chunk.len;
+}
+
+fn dropSpinnerPreviewPrefix(state: *CliSpinnerState, bytes_to_drop: usize) void {
+    if (bytes_to_drop == 0 or state.preview_len == 0) return;
+    if (bytes_to_drop >= state.preview_len) {
+        state.preview_len = 0;
+        return;
+    }
+
+    var drop = bytes_to_drop;
+    while (drop < state.preview_len and (state.preview_buf[drop] & 0b1100_0000) == 0b1000_0000) : (drop += 1) {}
+    const remaining = state.preview_len - drop;
+    std.mem.copyForwards(u8, state.preview_buf[0..remaining], state.preview_buf[drop..state.preview_len]);
+    state.preview_len = remaining;
+}
+
+fn utf8SafeTail(text: []const u8, max_len: usize) []const u8 {
+    if (text.len <= max_len) return text;
+
+    var start = text.len - max_len;
+    while (start < text.len and (text[start] & 0b1100_0000) == 0b1000_0000) : (start += 1) {}
+    return text[start..];
+}
+
+fn cliTerminalColumns(file_no: std.posix.fd_t) usize {
+    if (std.posix.isatty(file_no)) {
+        var winsize: std.posix.winsize = .{
+            .row = 0,
+            .col = 0,
+            .xpixel = 0,
+            .ypixel = 0,
+        };
+        const err = std.posix.system.ioctl(file_no, std.posix.T.IOCGWINSZ, @intFromPtr(&winsize));
+        if (std.posix.errno(err) == .SUCCESS and winsize.col > 0) {
+            return winsize.col;
+        }
+    }
+
+    const columns_text = std.posix.getenv("COLUMNS") orelse return cli_spinner_fallback_columns;
+    const trimmed = trimAscii(columns_text);
+    const parsed = std.fmt.parseInt(usize, trimmed, 10) catch return cli_spinner_fallback_columns;
+    return if (parsed > 0) parsed else cli_spinner_fallback_columns;
+}
+
+fn visibleSpinnerPreview(frame: []const u8, actor: []const u8, preview: []const u8, columns: usize) []const u8 {
+    if (preview.len == 0 or columns == 0) return "";
+
+    const label = if (actor.len > 0) actor else "decanus";
+    const base_len = frame.len + 1 + cli_spinner_label.len + 1 + label.len;
+    if (columns <= base_len + 1) return "";
+
+    const preview_budget = @min(columns - base_len - 1, cli_spinner_visible_preview_cap);
+    if (preview_budget == 0) return "";
+
+    return utf8SafeTail(preview, preview_budget);
 }
 
 fn cliSpinnerEmit(context: ?*anyopaque, event: RuntimeUiEvent) void {
@@ -792,6 +865,7 @@ fn cliSpinnerMain(state: *CliSpinnerState) void {
 
 fn cliRenderSpinnerFrame(frame: []const u8, actor: []const u8, preview: []const u8) void {
     const label = if (actor.len > 0) actor else "decanus";
+    const visible_preview = visibleSpinnerPreview(frame, label, preview, cliTerminalColumns(std.posix.STDERR_FILENO));
     stderrPrint("{s}{s}{s}{s} {s}testudo advancing{s} {s}{s}{s}", .{
         interactive_clear_line,
         interactive_color_gold,
@@ -803,10 +877,10 @@ fn cliRenderSpinnerFrame(frame: []const u8, actor: []const u8, preview: []const 
         label,
         interactive_reset,
     }) catch {};
-    if (preview.len > 0) {
+    if (visible_preview.len > 0) {
         stderrPrint(" {s}{s}{s}", .{
             interactive_color_muted,
-            preview,
+            visible_preview,
             interactive_reset,
         }) catch {};
     }
@@ -1691,4 +1765,31 @@ fn bridgeProcessInputBytes(bridge: *OpenTuiBridge, bytes: []const u8) !bool {
         if (!keep_running) return false;
     }
     return true;
+}
+
+test "appendSpinnerPreview normalizes whitespace and keeps a rolling tail" {
+    const testing = std.testing;
+    var state = CliSpinnerState{};
+
+    appendSpinnerPreview(&state, "alpha   \n beta\tgamma");
+    try testing.expectEqualStrings("alpha beta gamma", state.preview_buf[0..state.preview_len]);
+
+    const overflow = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    appendSpinnerPreview(&state, overflow);
+
+    const preview = state.preview_buf[0..state.preview_len];
+    try testing.expectEqual(@as(usize, state.preview_buf.len), preview.len);
+    try testing.expect(std.mem.endsWith(u8, preview, "QRSTUVWXYZ"));
+    try testing.expect(!std.mem.startsWith(u8, preview, "alpha beta gamma"));
+}
+
+test "visibleSpinnerPreview fits the terminal budget" {
+    const testing = std.testing;
+    const preview = "Need to inspect the current state and summarize the last step clearly";
+    const clipped = visibleSpinnerPreview("III", "explorator", preview, 48);
+
+    try testing.expect(clipped.len > 0);
+    try testing.expect(clipped.len <= cli_spinner_visible_preview_cap);
+    try testing.expect(clipped.len <= 48 - ("III".len + 1 + cli_spinner_label.len + 1 + "explorator".len) - 1);
+    try testing.expect(std.mem.endsWith(u8, preview, clipped));
 }
