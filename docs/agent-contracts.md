@@ -23,6 +23,7 @@ All agents MUST:
 - accept structured input
 - return structured output
 - avoid expanding scope without instruction
+- use only published runtime tools when tool use is necessary to satisfy the assigned invocation
 - return control to `decanus` after execution
 
 All agents MUST NOT:
@@ -30,6 +31,7 @@ All agents MUST NOT:
 - act as general-purpose assistants
 - take ownership of the mission
 - chain-call other agents (v1)
+- use runtime tools to emulate, trigger, or route around another specialist
 - write canonical memory unless explicitly instructed
 
 Runtime asset loading rules:
@@ -38,6 +40,13 @@ Runtime asset loading rules:
 - when the global home is unavailable, the runtime may fall back to the source repository asset tree
 - project-local `.agents/` directories are not part of the canonical initialized-project layout
 - project-local `.contubernium/prompts/` directories are not part of the current runtime model
+
+Runtime tool sub-loop rules:
+
+- Specialists may request published runtime tools only while executing the currently assigned invocation.
+- Tool results return to the same specialist until that invocation completes or blocks.
+- Tool usage does not transfer mission ownership away from `decanus`.
+- Approval behavior follows the published runtime tool contract plus the current session approval mode.
 
 ---
 
@@ -368,16 +377,21 @@ All invocations must:
 
 Actions requiring approval:
 
-* shell commands
 * file deletion or large refactors
 * external API mutations
 * deployment actions
+* guarded shell commands unless session approval bypass is active
+* guarded workspace writes unless session approval bypass is active
+
+Session approval bypass is valid only when the operator explicitly consents.
+It is session-scoped, reversible, off by default for each new session, and must remain visible in session state and durable logs.
 
 Agents must:
 
 * declare intent
-* wait for approval
-* proceed only after confirmation
+* wait for approval when the current action is still guarded
+* proceed only after confirmation or after an already-recorded operator-consented `session-bypass` mode applies
+* treat `session-bypass` as a bounded runtime mode, not as independent authority
 
 ---
 

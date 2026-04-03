@@ -118,7 +118,9 @@ Current guarantees:
 
 - `decanus` is the sole orchestrator
 - specialists return structured results
-- guarded shell and write actions require approval by default
+- specialists may request published runtime tools inside a bounded subordinate loop while working the assigned objective
+- runtime tool results return to the same specialist until that invocation completes or blocks; specialists do not invoke other specialists directly
+- guarded shell and write actions require approval by default unless the active session is in explicit operator-consented approval bypass
 - greeting-only mission openers stay in the same mission and ask a direct follow-up instead of completing immediately
 - plain-language project-summary questions such as `what does this project do?` are answered from the already-loaded project and global memory when that context is sufficient, instead of forcing extra clarification or a broad repository scan
 - when a TTY mission run completes successfully, `contubernium mission`, `contubernium mission start`, `contubernium mission continue`, and `contubernium sessions resume` keep the same session alive and offer an inline `reply >` follow-up prompt instead of dropping immediately back to the shell
@@ -143,10 +145,12 @@ Current approval behavior:
 - read tools can run automatically when session policy allows it
 - writes require approval by default
 - shell commands require approval by default
+- `contubernium sessions approvals on|off` switches the active session between guarded approval mode and operator-consented `session-bypass` mode for guarded runtime tools
+- approval bypass is off by default for each new session, affects only the active session, and does not change project config defaults
+- approval bypass state is surfaced in session records and the active approval mode is recorded in run logs
 - blocked command patterns fail immediately
 - root `search_text` requests include canonical hidden `.contubernium` context while pruning logs, sessions, caches, and vendored directories so evidence gathering stays bounded
 - failures surface canonical `code` / `cause` fields plus contextual metadata
-- `contubernium sessions approvals on|off` can enable or disable session-scoped approval bypass without changing project config defaults
 
 Current constitutional gap:
 
@@ -181,7 +185,9 @@ Current behavior:
 - `contubernium sessions resume` restores a stored session snapshot and continues it
 - cross-project recall stays blocked by default; operators must pass an explicit project root to inspect or resume another project's sessions
 - session approval bypass defaults to off for each new session
+- session records store both `approval_mode` and `approval_bypass_enabled`
 - each run log stores the primary model policy metadata at the top level
+- each run log stores the active approval mode at the top level
 - each log event stores the active provider/model and, when applicable, the model-policy role and reason
 - prompt context is condensed when the context budget gets tight
 
@@ -202,8 +208,8 @@ If behavior changes and no row changes here, the feature is not documented compl
 | --- | --- | --- |
 | Project scaffold | `contubernium init` creates the canonical local `.contubernium/` runtime files. | `src/runtime_app.zig` test: `scaffoldProject creates canonical runtime and context assets` |
 | Mission reset | Starting a mission resets the canonical mission state and loop surfaces. | `src/runtime_app.zig` test: `resetStateForMission resets canonical phase 3 state surfaces` |
-| Approval gating | Guarded writes and shell actions are mediated through approval state. | `src/runtime_app.zig` tests: `approval transitions update canonical state ownership`; `executeToolRequests records approval denials through the mediated write_file path` |
-| Session approval bypass | `contubernium sessions approvals on|off` changes approval bypass for the active session only. | `src/runtime_app.zig` test: `executeToolRequests honors session approval bypass for guarded tools`; `src/cli.zig` test: `parse requires a mode for sessions approvals` |
+| Approval gating | Guarded writes and shell actions are mediated through approval state unless the active session is already in operator-consented bypass mode. | `src/runtime_app.zig` tests: `approval transitions update canonical state ownership`; `executeToolRequests records approval denials through the mediated write_file path` |
+| Session approval bypass | `contubernium sessions approvals on|off` enables or disables operator-consented approval bypass for guarded runtime tools in the active session only. | `src/runtime_app.zig` test: `executeToolRequests honors session approval bypass for guarded tools`; `src/cli.zig` test: `parse requires a mode for sessions approvals` |
 | Tool validation | Invalid or blocked tool requests produce structured failures instead of silent execution. | `src/runtime_app.zig` tests: `executeToolRequests blocks policy-denied commands with structured failure state`; `executeToolRequests converts malformed read_file requests into structured failures` |
 | Structured run logs | Runtime events are written into structured JSON run logs. | `src/runtime_app.zig` test: `runtime run log stores structured events` |
 | Durable sessions | Every mission conversation writes a canonical session record plus project-local and home-level session index metadata. | `src/runtime_app.zig` test: `persistSessionMemory writes durable local and global session indexes` |

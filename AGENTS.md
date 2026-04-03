@@ -17,6 +17,9 @@ Think → Tool → Result → Think → Finish
 
 At no point should control leave `decanus`.
 
+Specialists may execute published runtime tools inside a bounded subordinate sub-loop when `decanus` has already assigned the objective.
+That subordinate loop never grants mission ownership, specialist chaining, or autonomous orchestration.
+
 ---
 
 # 2. Agent Hierarchy
@@ -44,6 +47,7 @@ All specialist usage must follow:
 - One clear objective per invocation
 - No vague or multi-domain tasks
 - No autonomous chaining between specialists
+- Runtime tool usage only within the assigned scope and published tool contracts
 - All results return to `decanus`
 
 Bad:
@@ -65,9 +69,11 @@ The system MAY:
 The system MUST:
 - require approval for:
   - destructive changes
-  - shell execution
   - external system mutations
   - deployments
+  - guarded shell execution unless the active session is in explicit operator-consented approval-bypass mode
+  - guarded workspace writes unless the active session is in explicit operator-consented approval-bypass mode
+- keep approval-bypass state explicit, session-scoped, reversible, and off by default
 
 No silent side effects.
 

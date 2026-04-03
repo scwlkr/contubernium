@@ -26,7 +26,10 @@ All runtime tools share the same failure envelope:
 Shared rules:
 
 - `Permission class` is one of `Read`, `Write`, `Execute`.
+- Runtime tools may be requested by `decanus` or by the currently active specialist invocation.
+- When a specialist requests a runtime tool, the result returns to that same specialist until the invocation completes or blocks.
 - `Approval behavior` is derived from the tool's published metadata and session policy.
+- `session-bypass` is an operator-consented approval mode for guarded runtime tools: it is active-session-only, off by default, reversible, and surfaced in session state and durable logs.
 - `Timeout behavior` is either `None` or `Policy default` (`policy.tool_timeout_ms`).
 - Success responses return human-readable `summary` text to the active turn.
 
@@ -34,7 +37,7 @@ Shared rules:
 
 ### Contract
 - Permission class: `Read`
-- Approval behavior: Policy-guarded through the read-tool policy toggle.
+- Approval behavior: Policy-guarded through the read-tool policy toggle. If the active session is in `session-bypass`, the per-request confirmation step is skipped for this guarded tool.
 - Timeout behavior: `None`
 
 ### Input Schema
@@ -52,7 +55,7 @@ Shared rules:
 
 ### Contract
 - Permission class: `Read`
-- Approval behavior: Policy-guarded through the read-tool policy toggle.
+- Approval behavior: Policy-guarded through the read-tool policy toggle. If the active session is in `session-bypass`, the per-request confirmation step is skipped for this guarded tool.
 - Timeout behavior: `None`
 
 ### Input Schema
@@ -70,7 +73,7 @@ Shared rules:
 
 ### Contract
 - Permission class: `Read`
-- Approval behavior: Policy-guarded through the read-tool policy toggle.
+- Approval behavior: Policy-guarded through the read-tool policy toggle. If the active session is in `session-bypass`, the per-request confirmation step is skipped for this guarded tool.
 - Timeout behavior: `Policy default`
 
 ### Input Schema
@@ -89,7 +92,7 @@ Shared rules:
 
 ### Contract
 - Permission class: `Execute`
-- Approval behavior: Policy-guarded through the shell-execution policy toggle.
+- Approval behavior: Policy-guarded through the shell-execution policy toggle. If the active session is in `session-bypass`, the per-request confirmation step is skipped for this guarded tool.
 - Timeout behavior: `Policy default`
 
 ### Input Schema
@@ -107,7 +110,7 @@ Shared rules:
 
 ### Contract
 - Permission class: `Write`
-- Approval behavior: Policy-guarded through the workspace-write policy toggle.
+- Approval behavior: Policy-guarded through the workspace-write policy toggle. If the active session is in `session-bypass`, the per-request confirmation step is skipped for this guarded tool.
 - Timeout behavior: `None`
 
 ### Input Schema

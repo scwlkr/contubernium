@@ -29,7 +29,7 @@
 | 6 | [MEMORY_FORMATS.md](./MEMORY_FORMATS.md) | Core | Aligned | Matches the documented memory tiers, portability notes, and migration discipline. |
 | 7 | [RUNTIME_TOOL_CONTRACTS.md](./RUNTIME_TOOL_CONTRACTS.md) | Core | Aligned | Publishes the permission, schema, timeout, and failure-contract expectations required by the Constitution. |
 | 8 | [agent-contracts.md](./agent-contracts.md) | Core | Aligned | Preserves `decanus` authority and specialist-tool boundaries. |
-| 9 | [scratchpad/context_engineering_high_level.md](./scratchpad/context_engineering_high_level.md) | Scratchpad | Non-canonical | General context-engineering background; not a governing Contubernium spec. |
+| 9 | [scratchpad/context_engineering.md](./scratchpad/context_engineering.md) | Scratchpad | Non-canonical | General context-engineering background; not a governing Contubernium spec. |
 | 10 | [doctrine.md](./doctrine.md) | Core | Aligned | Consistent with commander-first control, local-first runtime, and layered memory. |
 | 11 | [installation.md](./installation.md) | Core | Aligned | Describes the current global-home install flow and canonical project scaffold. |
 | 12 | [invocation-protocol.md](./invocation-protocol.md) | Core | Aligned | Keeps all specialist work routed through `decanus` with explicit approvals and structured envelopes. |

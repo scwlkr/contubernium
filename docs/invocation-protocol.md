@@ -18,8 +18,9 @@ The protocol is valid only when all of these remain true:
 - Every invocation targets exactly one specialist.
 - Every invocation carries exactly one clear objective.
 - Specialists do not chain to other specialists.
+- Specialists may request published runtime tools only within the currently assigned invocation scope.
 - All specialist output returns to `decanus`.
-- Risky side effects pass through explicit approval gates.
+- Risky side effects pass through explicit approval gates or an already-recorded operator-consented session approval mode.
 - Runtime tools execute only through published contracts that declare permission class, timeout behavior, and failure shape.
 - The runtime stays local-first.
 - The primary interface remains OpenTUI.
@@ -81,15 +82,42 @@ Rules:
 - `blockers` must be explicit. No silent failure.
 - `next_recommended_agent` is advisory only. It does not transfer control.
 
-## 4. Approval Gates
+## 4. Specialist Subordinate Tool Loop
+
+An active specialist invocation may execute a bounded runtime-tool sub-loop before it returns its final invocation result.
+
+That loop works like this:
+
+1. the specialist evaluates the current invocation
+2. the specialist requests one or more published runtime tools when needed
+3. the runtime executes those tools under their published contracts and the current session approval mode
+4. tool results are recorded and returned to the same specialist
+5. the specialist either completes, blocks, or requests another bounded tool step
+6. the invocation returns to `decanus` only after that specialist result is known
+
+This sub-loop must not:
+
+- invoke another specialist
+- transfer mission ownership away from `decanus`
+- expand scope beyond the original invocation
+- hide tool execution from the runtime log and approval system
+
+## 5. Approval Gates
 
 Approval is not implicit. The runtime must materialize an approval request before any risky action:
 
-- shell execution
-- workspace writes outside already-approved flow
+- guarded shell execution
+- guarded workspace writes outside already-approved flow
 - destructive change
 - external mutation
 - deployment
+
+`session-bypass` is also a valid approval mode, but only when:
+
+- the operator explicitly enables it
+- the active session records that mode
+- the affected runtime tool has a published approval gate that is not `none`
+- the UI and durable logs surface the active approval mode
 
 Approval request lifecycle:
 
@@ -99,7 +127,9 @@ Approval request lifecycle:
 4. Runtime records `approved` or `denied`.
 5. `decanus` continues only after the result is known.
 
-## 5. Loop Lifecycle
+When `session-bypass` applies, the runtime skips the pending approval request and records execution under the active session approval mode instead.
+
+## 6. Loop Lifecycle
 
 The loop is modeled as explicit steps:
 
@@ -117,11 +147,12 @@ State transitions:
 - Specialist handoff: runtime records `invoke` and sets the active invocation.
 - Approval required: runtime records `wait_for_approval`.
 - Specialist execution: runtime records `execute`.
+- Specialist runtime tool request: runtime records `execute` and `result` while the active invocation remains assigned to that same specialist.
 - Specialist return: runtime records `result` and restores `current_actor=decanus`.
 - Mission completion: runtime records `finish`.
 - Any unresolved stop: runtime records `blocked`.
 
-## 6. Runtime Mapping
+## 7. Runtime Mapping
 
 The Zig runtime maps this protocol to typed structures:
 
@@ -145,7 +176,7 @@ Supporting enums cover:
 - invocation result status
 - loop step kind
 
-## 7. Runtime Tool Contracts
+## 8. Runtime Tool Contracts
 
 Runtime tool contracts are published in [docs/RUNTIME_TOOL_CONTRACTS.md](./RUNTIME_TOOL_CONTRACTS.md).
 
@@ -169,7 +200,7 @@ The canonical failure response shape is:
 }
 ```
 
-## 8. Non-Goals
+## 9. Non-Goals
 
 This protocol does not allow:
 
