@@ -266,23 +266,33 @@ fn appendProviderRequestHeaders(
 fn providerListModelsOpenAICompatible(allocator: std.mem.Allocator, provider: ProviderConfig) ![][]const u8 {
     const url = try std.fmt.allocPrint(allocator, "{s}/v1/models", .{provider.base_url});
     defer allocator.free(url);
+    const timeout_arg = try timeoutSeconds(allocator, provider.timeout_ms);
+    defer allocator.free(timeout_arg);
 
     const headers = try buildProviderRequestHeaders(allocator, provider);
     defer headers.deinit(allocator);
 
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
-    try argv.appendSlice(allocator, &.{ "curl", "-fsS", "--max-time", try timeoutSeconds(allocator, provider.timeout_ms) });
+    try argv.appendSlice(allocator, &.{ "curl", "-fsS", "--max-time", timeout_arg });
     try appendProviderRequestHeaders(allocator, &argv, headers);
     try argv.append(allocator, url);
 
     const result = try runCommandCapture(allocator, argv.items);
+    defer freeCommandResult(allocator, result);
     if (result.exit_code != 0) return error.BackendUnavailable;
-    const parsed = try parseJson(OpenAIModelsResponse, allocator, result.stdout);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    const parsed = try parseJson(OpenAIModelsResponse, scratch, result.stdout);
     if (parsed.@"error".message.len > 0) return error.BackendUnavailable;
     var models: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (models.items) |model| allocator.free(model);
+        models.deinit(allocator);
+    }
     for (parsed.data) |model| {
-        try models.append(allocator, model.id);
+        try models.append(allocator, try allocator.dupe(u8, model.id));
     }
     return try models.toOwnedSlice(allocator);
 }
@@ -298,6 +308,7 @@ fn providerListModelsLlamaCpp(allocator: std.mem.Allocator, provider: ProviderCo
         },
         else => return err,
     };
+    errdefer freeOwnedStringSlice(allocator, models);
 
     const configured_model = trimAscii(provider.model);
     if (configured_model.len == 0 or containsString(models, configured_model)) return models;
@@ -308,8 +319,9 @@ fn providerListModelsLlamaCpp(allocator: std.mem.Allocator, provider: ProviderCo
         try collected.append(allocator, model);
     }
     try collected.append(allocator, configured_model);
-    allocator.free(models);
+    const previous_models = models;
     models = try collected.toOwnedSlice(allocator);
+    allocator.free(previous_models);
     return models;
 }
 
@@ -338,6 +350,8 @@ fn providerStructuredChatOpenAICompatible(
 
     const headers = try buildProviderRequestHeaders(allocator, provider);
     defer headers.deinit(allocator);
+    const timeout_arg = try timeoutSeconds(allocator, provider.timeout_ms);
+    defer allocator.free(timeout_arg);
 
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
@@ -345,7 +359,7 @@ fn providerStructuredChatOpenAICompatible(
         "curl",
         "-fsS",
         "--max-time",
-        try timeoutSeconds(allocator, provider.timeout_ms),
+        timeout_arg,
         "-X",
         "POST",
         "-d",
@@ -355,14 +369,20 @@ fn providerStructuredChatOpenAICompatible(
     try argv.append(allocator, url);
 
     const result = try runCommandCapture(allocator, argv.items);
+    errdefer freeCommandResult(allocator, result);
     if (result.exit_code != 0) return error.BackendUnavailable;
-    const parsed = try parseJson(OpenAIChatResponse, allocator, result.stdout);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    const parsed = try parseJson(OpenAIChatResponse, scratch, result.stdout);
     if (parsed.@"error".message.len > 0) return error.ProviderRejectedRequest;
     if (parsed.choices.len == 0) return error.EmptyProviderResponse;
     const raw_text = try openAIMessageRawText(allocator, parsed.choices[0].message);
+    const transport_text = result.stdout;
+    allocator.free(result.stderr);
     return .{
         .raw_text = raw_text,
-        .transport_text = result.stdout,
+        .transport_text = transport_text,
         .provider_name = provider.type,
         .model_name = provider.model,
         .latency_ms = std.time.milliTimestamp() - started,
@@ -373,13 +393,23 @@ pub fn providerListModels(allocator: std.mem.Allocator, provider: ProviderConfig
     if (eql(provider.type, "ollama-native")) {
         const url = try std.fmt.allocPrint(allocator, "{s}/api/tags", .{provider.base_url});
         defer allocator.free(url);
-        const result = try runCommandCapture(allocator, &.{ "curl", "-fsS", "--max-time", try timeoutSeconds(allocator, provider.timeout_ms), url });
+        const timeout_arg = try timeoutSeconds(allocator, provider.timeout_ms);
+        defer allocator.free(timeout_arg);
+        const result = try runCommandCapture(allocator, &.{ "curl", "-fsS", "--max-time", timeout_arg, url });
+        defer freeCommandResult(allocator, result);
         if (result.exit_code != 0) return error.BackendUnavailable;
-        const parsed = try parseJson(OllamaTagsResponse, allocator, result.stdout);
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const scratch = arena.allocator();
+        const parsed = try parseJson(OllamaTagsResponse, scratch, result.stdout);
         if (parsed.@"error".len > 0) return error.BackendUnavailable;
         var models: std.ArrayList([]const u8) = .empty;
+        errdefer {
+            for (models.items) |model| allocator.free(model);
+            models.deinit(allocator);
+        }
         for (parsed.models) |model| {
-            try models.append(allocator, model.name);
+            try models.append(allocator, try allocator.dupe(u8, model.name));
         }
         return try models.toOwnedSlice(allocator);
     }
@@ -488,13 +518,15 @@ pub fn providerStructuredChatOllamaNonStreaming(
     url: []const u8,
     started: i64,
 ) !ProviderResponse {
+    const timeout_arg = try timeoutSeconds(allocator, provider.timeout_ms);
+    defer allocator.free(timeout_arg);
     const result = try runCommandCapture(
         allocator,
         &.{
             "curl",
             "-fsS",
             "--max-time",
-            try timeoutSeconds(allocator, provider.timeout_ms),
+            timeout_arg,
             "-H",
             "Content-Type: application/json",
             "-X",
@@ -504,13 +536,19 @@ pub fn providerStructuredChatOllamaNonStreaming(
             url,
         },
     );
+    errdefer freeCommandResult(allocator, result);
     if (result.exit_code != 0) return error.BackendUnavailable;
-    const parsed = try parseJson(OllamaChatResponse, allocator, result.stdout);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    const parsed = try parseJson(OllamaChatResponse, scratch, result.stdout);
     if (parsed.@"error".len > 0) return error.ProviderRejectedRequest;
     const raw_text = try ollamaMessageRawText(allocator, parsed.message);
+    const transport_text = result.stdout;
+    allocator.free(result.stderr);
     return .{
         .raw_text = raw_text,
-        .transport_text = result.stdout,
+        .transport_text = transport_text,
         .provider_name = provider.type,
         .model_name = provider.model,
         .latency_ms = std.time.milliTimestamp() - started,
@@ -518,13 +556,13 @@ pub fn providerStructuredChatOllamaNonStreaming(
 }
 
 pub fn ollamaMessageRawText(allocator: std.mem.Allocator, message: OllamaMessage) ![]const u8 {
-    if (trimAscii(message.content).len > 0) return message.content;
+    if (trimAscii(message.content).len > 0) return try allocator.dupe(u8, message.content);
     if (message.tool_calls.len > 0) return try ollamaToolCallsToStructuredJson(allocator, message);
     return error.EmptyModelOutput;
 }
 
 pub fn openAIMessageRawText(allocator: std.mem.Allocator, message: OpenAIMessage) ![]const u8 {
-    if (trimAscii(message.content).len > 0) return message.content;
+    if (trimAscii(message.content).len > 0) return try allocator.dupe(u8, message.content);
     if (message.tool_calls.len > 0) return try openAIToolCallsToStructuredJson(allocator, message.tool_calls);
     return error.EmptyModelOutput;
 }
@@ -665,13 +703,15 @@ pub fn providerStructuredChatOllamaStreaming(
     started: i64,
     hooks: RuntimeHooks,
 ) !ProviderResponse {
+    const timeout_arg = try timeoutSeconds(allocator, provider.timeout_ms);
+    defer allocator.free(timeout_arg);
     var child = std.process.Child.init(
         &.{
             "curl",
             "-fsS",
             "--no-buffer",
             "--max-time",
-            try timeoutSeconds(allocator, provider.timeout_ms),
+            timeout_arg,
             "-H",
             "Content-Type: application/json",
             "-X",
@@ -689,9 +729,13 @@ pub fn providerStructuredChatOllamaStreaming(
     var stdout_open = true;
     var stderr_open = true;
     var pending = std.ArrayList(u8).empty;
+    defer pending.deinit(allocator);
     var full_text = std.ArrayList(u8).empty;
+    errdefer full_text.deinit(allocator);
     var transport = std.ArrayList(u8).empty;
+    errdefer transport.deinit(allocator);
     var stderr_text = std.ArrayList(u8).empty;
+    defer stderr_text.deinit(allocator);
 
     while (stdout_open or stderr_open) {
         if (hooks.isInterrupted()) {

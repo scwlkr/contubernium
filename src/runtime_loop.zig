@@ -426,11 +426,12 @@ pub fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state
     const asset_layout = try resolveGlobalAssetLayout(allocator);
     defer deinitGlobalAssetLayout(allocator, asset_layout);
     const system_prompt = try assembleSystemPrompt(allocator, asset_layout, state, .decanus);
+    defer allocator.free(system_prompt);
     const prompt_build = buildPromptWithContextBudget(allocator, config, state, hooks, system_prompt, .decanus, "") catch |err| {
         if (err == error.ContextBudgetExceeded or err == error.MemoryLoadBlocked) return .blocked;
         return err;
     };
-    defer prompt_build.memory.deinit(allocator);
+    defer prompt_build.deinit(allocator);
     const user_prompt = prompt_build.user_prompt;
     try logRuntimeEvent(allocator, config, state, .{
         .actor = .decanus,
@@ -456,7 +457,7 @@ pub fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state
         .output = user_prompt,
     });
 
-    const response = structuredChatWithRepair(
+    var response = structuredChatWithRepair(
         allocator,
         config,
         system_prompt,
@@ -501,8 +502,10 @@ pub fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state
         emitLog(hooks, .danger, "decanus", "Commander Failed", message, .plain);
         return .blocked;
     };
+    var owned_response_raw_text: ?[]const u8 = response.raw_text;
+    defer if (owned_response_raw_text) |text| allocator.free(text);
     var decision = response.value;
-    var decision_raw_text = response.raw_text;
+    var decision_raw_text = owned_response_raw_text.?;
     var normalized_action = resolvedDecanusControlAction(decision);
     var repaired_decision = false;
     if (normalized_action.len == 0) {
@@ -531,6 +534,8 @@ pub fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state
         );
         defer allocator.free(repair_prompt);
         freeOwnedDecanusDecision(allocator, decision);
+        allocator.free(owned_response_raw_text.?);
+        owned_response_raw_text = null;
 
         const repaired_response = structuredChatWithRepair(
             allocator,
@@ -563,8 +568,10 @@ pub fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state
             emitStateSnapshot(hooks, config, state.*);
             return .blocked;
         };
-        decision = repaired_response.value;
-        decision_raw_text = repaired_response.raw_text;
+        response = repaired_response;
+        owned_response_raw_text = response.raw_text;
+        decision = response.value;
+        decision_raw_text = owned_response_raw_text.?;
         normalized_action = resolvedDecanusControlAction(decision);
         repaired_decision = true;
     }
@@ -819,11 +826,12 @@ pub fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, st
     const asset_layout = try resolveGlobalAssetLayout(allocator);
     defer deinitGlobalAssetLayout(allocator, asset_layout);
     const system_prompt = try assembleSystemPrompt(allocator, asset_layout, state, actor);
+    defer allocator.free(system_prompt);
     const prompt_build = buildPromptWithContextBudget(allocator, config, state, hooks, system_prompt, .specialist, laneName(lane)) catch |err| {
         if (err == error.ContextBudgetExceeded or err == error.MemoryLoadBlocked) return .blocked;
         return err;
     };
-    defer prompt_build.memory.deinit(allocator);
+    defer prompt_build.deinit(allocator);
     const user_prompt = prompt_build.user_prompt;
     try logRuntimeEvent(allocator, config, state, .{
         .actor = actor,
@@ -896,6 +904,7 @@ pub fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, st
         emitLog(hooks, .danger, actorName(actor), "Specialist Failed", message, .plain);
         return .blocked;
     };
+    defer allocator.free(response.raw_text);
     const result = response.value;
     try logRuntimeEvent(allocator, config, state, .{
         .actor = actor,
@@ -1230,6 +1239,7 @@ pub fn structuredChatWithRepair(
                 .failure = failure,
             });
             emitStreamFinalize(hooks, actor, "report", response.raw_text, .json);
+            response.deinit(allocator);
             const next_attempt = attempt + 1;
             if (!used_escalation and shouldEscalateAfterRepair(config, next_attempt)) {
                 if (owned_repair_prompt) |prompt| {
@@ -1304,6 +1314,7 @@ pub fn structuredChatWithRepair(
             continue;
         };
         stateManager(state).setRepairAttempts(attempt);
+        allocator.free(response.transport_text);
         return .{ .value = parsed, .raw_text = response.raw_text };
     }
 }
