@@ -1329,8 +1329,65 @@ test "buildDecanusUserPrompt includes project context and memory layers" {
     try testing.expect(std.mem.indexOf(u8, prompt, "Helper specialists are explicit-only.") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Mission handling rules") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "If the prompt is only a greeting, presence check, or other conversational opener") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "If the operator asks what the project does, what problem it solves, or requests a plain-language summary") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Assigned specialist tasks") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "none assigned") != null);
+}
+
+test "searchText includes hidden project context while pruning runtime noise" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    defer original_cwd.close();
+    try tmp.dir.setAsCwd();
+    defer original_cwd.setAsCwd() catch {};
+
+    try tmp.dir.makePath(".contubernium/logs");
+
+    var project_context = try tmp.dir.createFile(".contubernium/PROJECT_CONTEXT.md", .{ .truncate = true });
+    defer project_context.close();
+    try project_context.writeAll("Business domain: commander-first execution system.\n");
+
+    var noisy_log = try tmp.dir.createFile(".contubernium/logs/run.log", .{ .truncate = true });
+    defer noisy_log.close();
+    try noisy_log.writeAll("Business domain: log noise.\n");
+
+    const output = try searchText(testing.allocator, "Business domain", ".", 20, 5000);
+    defer testing.allocator.free(output);
+
+    try testing.expect(std.mem.indexOf(u8, output, ".contubernium/PROJECT_CONTEXT.md") != null);
+    try testing.expect(std.mem.indexOf(u8, output, ".contubernium/logs/run.log") == null);
+}
+
+test "searchText truncates root-search hits to the configured limit" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    defer original_cwd.close();
+    try tmp.dir.setAsCwd();
+    defer original_cwd.setAsCwd() catch {};
+
+    var first = try tmp.dir.createFile("first.md", .{ .truncate = true });
+    defer first.close();
+    try first.writeAll("goal one\n");
+
+    var second = try tmp.dir.createFile("second.md", .{ .truncate = true });
+    defer second.close();
+    try second.writeAll("goal two\n");
+
+    var third = try tmp.dir.createFile("third.md", .{ .truncate = true });
+    defer third.close();
+    try third.writeAll("goal three\n");
+
+    const output = try searchText(testing.allocator, "goal", ".", 2, 5000);
+    defer testing.allocator.free(output);
+
+    try testing.expect(std.mem.indexOf(u8, output, "first.md") != null or std.mem.indexOf(u8, output, "second.md") != null or std.mem.indexOf(u8, output, "third.md") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "...[truncated]...") != null);
 }
 
 test "buildDecanusUserPrompt keeps greeting-only mission intake in follow-up mode" {

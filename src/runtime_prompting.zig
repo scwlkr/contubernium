@@ -321,10 +321,12 @@ pub fn specialistRoutingGuideText(allocator: std.mem.Allocator) ![]const u8 {
 }
 
 pub fn decanusMissionHandlingGuidanceText() []const u8 {
-    return
-        "- Treat the initial prompt as the source of mission intent.\n" ++
+    return "- Treat the initial prompt as the source of mission intent.\n" ++
         "- If the prompt is only a greeting, presence check, or other conversational opener that does not ask for project work yet, return `action: \"ask_user\"`.\n" ++
         "- For that greeting-only opener, keep the mission alive by leaving `final_response` empty and setting `question` to a short direct follow-up such as `Hello! What can I help with?`.\n" ++
+        "- If the operator asks what the project does, what problem it solves, or requests a plain-language summary, use the already-loaded architecture, plan, project context, project memory, and global memory as evidence before asking follow-up questions or requesting more tools.\n" ++
+        "- When that loaded memory already answers the question, prefer `action: \"finish\"` with a concise summary instead of broad repository searches.\n" ++
+        "- If a search is still necessary, target the narrowest path that can answer the question. Do not leave `search_text` at the workspace root when the intent is to inspect project context files.\n" ++
         "- Do not invoke a specialist just because routing options exist.\n" ++
         "- Do not invent follow-on implementation work from the routing table or from unassigned task lanes.\n" ++
         "- The task summary only reflects specialist work that has been explicitly assigned during this mission.\n";

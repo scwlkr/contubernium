@@ -381,6 +381,8 @@ pub fn shouldSkipWorkspacePath(path: []const u8, prune_noise: bool) bool {
         std.mem.startsWith(u8, path, "zig-out/") or
         eql(path, "node_modules") or
         std.mem.startsWith(u8, path, "node_modules/") or
+        eql(path, ".contubernium/sessions") or
+        std.mem.startsWith(u8, path, ".contubernium/sessions/") or
         eql(path, ".contubernium/logs") or
         std.mem.startsWith(u8, path, ".contubernium/logs/");
 }
@@ -505,26 +507,128 @@ pub fn summarizeCommandResult(
     return try truncateOwnedText(allocator, combined, max_chars);
 }
 
-pub fn searchText(allocator: std.mem.Allocator, pattern: []const u8, path: []const u8, max_hits: usize, timeout_ms: usize) ![]const u8 {
+const root_search_rg_globs = [_][]const u8{
+    "!.git/**",
+    "!.zig-cache/**",
+    "!zig-out/**",
+    "!**/node_modules/**",
+    "!.contubernium/logs/**",
+    "!.contubernium/sessions/**",
+};
+
+const root_search_grep_exclude_dirs = [_][]const u8{
+    ".git",
+    ".zig-cache",
+    "zig-out",
+    "node_modules",
+    "logs",
+    "sessions",
+};
+
+fn isWorkspaceRootSearch(path: []const u8) bool {
+    const trimmed = trimAscii(path);
+    return trimmed.len == 0 or eql(trimmed, ".");
+}
+
+fn appendRootSearchRgArgs(args: *std.ArrayList([]const u8), allocator: std.mem.Allocator) !void {
+    try args.append(allocator, "--hidden");
+    for (root_search_rg_globs) |glob| {
+        try args.append(allocator, "--glob");
+        try args.append(allocator, glob);
+    }
+}
+
+fn appendRootSearchGrepArgs(args: *std.ArrayList([]const u8), allocator: std.mem.Allocator) !void {
+    try args.append(allocator, "--binary-files=without-match");
+    for (root_search_grep_exclude_dirs) |dir_name| {
+        try args.append(allocator, "--exclude-dir");
+        try args.append(allocator, dir_name);
+    }
+}
+
+fn truncateSearchHits(allocator: std.mem.Allocator, text: []const u8, max_hits: usize) ![]const u8 {
+    if (text.len == 0 or max_hits == 0) return try allocator.dupe(u8, text);
+
+    var lines: std.ArrayList([]const u8) = .empty;
+    defer lines.deinit(allocator);
+
+    var iter = std.mem.splitScalar(u8, text, '\n');
+    var total_hits: usize = 0;
+    var truncated = false;
+
+    while (iter.next()) |line| {
+        if (line.len == 0) continue;
+        total_hits += 1;
+        if (total_hits > max_hits) {
+            truncated = true;
+            break;
+        }
+        try lines.append(allocator, line);
+    }
+
+    if (!truncated) return try allocator.dupe(u8, text);
+
+    const joined = if (lines.items.len == 0)
+        try allocator.dupe(u8, "")
+    else
+        try joinStrings(allocator, lines.items, "\n");
+    defer allocator.free(joined);
+
+    return try std.fmt.allocPrint(allocator, "{s}\n...[truncated]...", .{joined});
+}
+
+fn searchTextWithGrep(
+    allocator: std.mem.Allocator,
+    pattern: []const u8,
+    path: []const u8,
+    max_hits: usize,
+    timeout_ms: usize,
+) ![]const u8 {
     const max_count = try std.fmt.allocPrint(allocator, "{d}", .{max_hits});
     defer allocator.free(max_count);
 
-    const rg_result = runCommandCaptureWithTimeout(allocator, &.{ "rg", "-n", "--no-heading", "--max-count", max_count, pattern, path }, timeout_ms) catch |err| switch (err) {
+    var args: std.ArrayList([]const u8) = .empty;
+    defer args.deinit(allocator);
+
+    try args.appendSlice(allocator, &.{ "grep", "-R", "-n", "-E", "-m", max_count });
+    if (isWorkspaceRootSearch(path)) {
+        try appendRootSearchGrepArgs(&args, allocator);
+    }
+    try args.append(allocator, pattern);
+    try args.append(allocator, path);
+
+    const grep_result = try runCommandCaptureWithTimeout(allocator, args.items, timeout_ms);
+    defer freeCommandResult(allocator, grep_result);
+
+    return try truncateSearchHits(allocator, grep_result.stdout, max_hits);
+}
+
+pub fn searchText(allocator: std.mem.Allocator, pattern: []const u8, path: []const u8, max_hits: usize, timeout_ms: usize) ![]const u8 {
+    const search_path = if (trimAscii(path).len > 0) trimAscii(path) else ".";
+    const max_count = try std.fmt.allocPrint(allocator, "{d}", .{max_hits});
+    defer allocator.free(max_count);
+
+    var rg_args: std.ArrayList([]const u8) = .empty;
+    defer rg_args.deinit(allocator);
+    try rg_args.appendSlice(allocator, &.{ "rg", "-n", "--no-heading", "--max-count", max_count });
+    if (isWorkspaceRootSearch(search_path)) {
+        try appendRootSearchRgArgs(&rg_args, allocator);
+    }
+    try rg_args.append(allocator, pattern);
+    try rg_args.append(allocator, search_path);
+
+    const rg_result = runCommandCaptureWithTimeout(allocator, rg_args.items, timeout_ms) catch |err| switch (err) {
         error.FileNotFound => {
-            const grep_result = try runCommandCaptureWithTimeout(allocator, &.{ "grep", "-R", "-n", pattern, path }, timeout_ms);
-            allocator.free(grep_result.stderr);
-            return grep_result.stdout;
+            return try searchTextWithGrep(allocator, pattern, search_path, max_hits, timeout_ms);
         },
         else => return err,
     };
     if (rg_result.exit_code == 0 or rg_result.exit_code == 1) {
-        allocator.free(rg_result.stderr);
-        return rg_result.stdout;
+        defer freeCommandResult(allocator, rg_result);
+        return try truncateSearchHits(allocator, rg_result.stdout, max_hits);
     }
     freeCommandResult(allocator, rg_result);
-    const grep_result = try runCommandCaptureWithTimeout(allocator, &.{ "grep", "-R", "-n", pattern, path }, timeout_ms);
-    allocator.free(grep_result.stderr);
-    return grep_result.stdout;
+    return try searchTextWithGrep(allocator, pattern, search_path, max_hits, timeout_ms);
 }
 
 pub fn readFileLimited(allocator: std.mem.Allocator, path: []const u8, limit: usize) ![]const u8 {

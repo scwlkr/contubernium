@@ -117,6 +117,7 @@ Current guarantees:
 - specialists return structured results
 - guarded shell and write actions require approval by default
 - greeting-only mission openers stay in the same mission and ask a direct follow-up instead of completing immediately
+- plain-language project-summary questions such as `what does this project do?` are answered from the already-loaded project and global memory when that context is sufficient, instead of forcing extra clarification or a broad repository scan
 - when a TTY mission run blocks on `USER_INPUT_REQUIRED`, `contubernium mission`, `contubernium mission start`, `contubernium mission continue`, and `contubernium sessions resume` show an `awaiting your command` follow-up block with a highlighted question and inline `reply >` prompt instead of dropping immediately back to the shell
 - pressing `Enter` on an empty inline reply leaves the mission blocked so it can be resumed later
 - the plain CLI spinner shows a short rolling thinking preview for streaming `ollama-native` model runs while the model is active, clips the preview to the current terminal width, and keeps it on a single status line
@@ -130,6 +131,7 @@ Current approval behavior:
 - writes require approval by default
 - shell commands require approval by default
 - blocked command patterns fail immediately
+- root `search_text` requests include canonical hidden `.contubernium` context while pruning logs, sessions, caches, and vendored directories so evidence gathering stays bounded
 - failures surface canonical `code` / `cause` fields plus contextual metadata
 - `contubernium sessions approvals on|off` can enable or disable session-scoped approval bypass without changing project config defaults
 
@@ -202,8 +204,10 @@ If behavior changes and no row changes here, the feature is not documented compl
 | Capability-based local model resolver | Registry-backed local routes pick the smallest capable model for the active actor and choose alternate local routes for fallback. | `src/runtime_app.zig` tests: `initialModelRouteForActor resolves the smallest capable registry model per actor`; `fallbackRouteForActor selects an alternate registry model when explicit fallback is absent` |
 | Context compression | Older history can be condensed into a retained digest when context pressure rises. | `src/runtime_app.zig` test: `condenseHistoryForContext replaces older entries with a retained digest` |
 | Prompt assembly | Commander prompts include project context and loaded memory layers. | `src/runtime_app.zig` test: `buildDecanusUserPrompt includes project context and memory layers` |
+| Project summary from memory | Plain-language project-summary prompts are guided to answer from loaded memory before broad exploration. | `src/runtime_app.zig` test: `buildDecanusUserPrompt includes project context and memory layers` |
 | Greeting-only mission intake | A greeting like `hello` keeps the mission open and asks what the operator wants to do next instead of completing immediately. | `src/runtime_app.zig` test: `buildDecanusUserPrompt keeps greeting-only mission intake in follow-up mode` |
 | Inline mission follow-up | TTY mission resumes prompt for operator clarification inline, label the blocked state as `awaiting your command`, highlight the pending question, and keep the same mission state alive after `USER_INPUT_REQUIRED`. | `src/runtime_app.zig` test: `resumeAfterOperatorReply clears the blocked state and records operator history`; `src/runtime_ui.zig` tests: `renderCliMissionOutcome labels follow-up questions as awaiting your command`; `renderInlineUserReplyPrompt highlights the pending question` |
+| Root search pruning | Workspace-root `search_text` requests search hidden Contubernium context while pruning runtime noise and truncating hit output. | `src/runtime_app.zig` tests: `searchText includes hidden project context while pruning runtime noise`; `searchText truncates root-search hits to the configured limit` |
 | Streaming thinking preview | Streaming Ollama runs enable provider thinking and surface a bounded rolling live preview before the final structured result lands, clipped to the active terminal width so the CLI status line does not wrap repeatedly. | `src/runtime_app.zig` tests: `buildOllamaChatBody preserves structured output settings across stream modes`; `processOllamaPendingLines emits bounded thinking chunks separately from content`; `src/runtime_ui.zig` tests: `appendSpinnerPreview normalizes whitespace and keeps a rolling tail`; `visibleSpinnerPreview fits the terminal budget` |
 
 ## Manual Update Rule
