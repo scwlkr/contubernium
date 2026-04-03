@@ -7,6 +7,7 @@ import { readFile } from "node:fs/promises"
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import path from "node:path"
 import { requestOpenTuiExit } from "./exit"
+import { applyTimelineEvent, formatTranscriptEntryLines } from "./transcript"
 
 type BridgeKind =
   | "log"
@@ -59,11 +60,12 @@ type Snapshot = Omit<BridgeEvent, "kind" | "tone" | "actor" | "title" | "text" |
 
 type TimelineEntry = {
   id: string
-  kind: BridgeKind | "local"
+  kind: string
   tone: string
   actor: string
   title: string
   text: string
+  highlight: string
   streaming?: boolean
 }
 
@@ -209,6 +211,7 @@ async function loadRuntimeLog(logPath: string): Promise<TimelineEntry[]> {
         actor: event.actor ?? "",
         title: `${event.action ?? "event"}${event.lane ? ` • ${event.lane}` : ""}`,
         text: body,
+        highlight: "plain",
       }
     })
   } catch (error) {
@@ -220,6 +223,7 @@ async function loadRuntimeLog(logPath: string): Promise<TimelineEntry[]> {
         actor: "opentui",
         title: "Run Log Unavailable",
         text: error instanceof Error ? error.message : String(error),
+        highlight: "plain",
       },
     ]
   }
@@ -275,6 +279,8 @@ function App() {
     () => models.map((model) => ({ name: model, value: model, description: model })),
     [models],
   )
+  const showRail = width >= 124
+  const transcriptBodyWidth = useMemo(() => Math.max(16, width - (showRail ? 52 : 14)), [showRail, width])
 
   const sendBridge = (payload: Record<string, unknown>) => {
     bridgeRef.current?.stdin.write(`${JSON.stringify(payload)}\n`)
@@ -307,6 +313,7 @@ function App() {
         actor: "opentui",
         title,
         text,
+        highlight: "plain",
       },
     ])
   }
@@ -340,83 +347,7 @@ function App() {
       if (event.kind === "model_roster") {
         setModels(parseModels(event.text))
       }
-
-      if (event.kind === "stream_start") {
-        setTimeline((current) => [
-          ...current,
-          {
-            id: `stream-${event.actor}-${Date.now()}`,
-            kind: event.kind,
-            tone: "agent",
-            actor: event.actor,
-            title: `${event.actor} thinking`,
-            text: "",
-            streaming: true,
-          },
-        ])
-        return
-      }
-
-      if (event.kind === "thinking_chunk" || event.kind === "stream_chunk") {
-        setTimeline((current) => {
-          const next = [...current]
-          const target = [...next].reverse().find((entry) => entry.streaming && entry.actor === event.actor)
-          if (target) {
-            target.text += event.text
-            return next
-          }
-          return [
-            ...next,
-            {
-              id: `stream-${event.actor}-${Date.now()}`,
-              kind: event.kind,
-              tone: "agent",
-              actor: event.actor,
-              title: `${event.actor} thinking`,
-              text: event.text,
-              streaming: true,
-            },
-          ]
-        })
-        return
-      }
-
-      if (event.kind === "stream_finalize") {
-        setTimeline((current) => {
-          const next = [...current]
-          const target = [...next].reverse().find((entry) => entry.streaming && entry.actor === event.actor)
-          if (target) {
-            target.streaming = false
-            target.kind = event.kind
-            target.text = event.text
-            return next
-          }
-          return [
-            ...next,
-            {
-              id: `final-${event.actor}-${Date.now()}`,
-              kind: event.kind,
-              tone: "agent",
-              actor: event.actor,
-              title: `${event.actor} report`,
-              text: event.text,
-            },
-          ]
-        })
-        return
-      }
-
-      setTimeline((current) => [
-        ...current,
-        {
-          id: `${event.kind}-${Date.now()}-${current.length}`,
-          kind: event.kind,
-          tone: event.tone,
-          actor: event.actor,
-          title: event.title,
-          text: event.text,
-        },
-      ])
+      setTimeline((current) => applyTimelineEvent(current, event))
     }
 
     bridge.stdout.on("data", (chunk) => {
@@ -507,7 +438,6 @@ function App() {
     }
   })
 
-  const showRail = width >= 124
   const transcriptEntries = activePane === "timeline" ? timeline : logEntries
   const composerTrimmed = composer.trimStart()
   const composerLooksLikeCommand = composerTrimmed.startsWith("/")
@@ -530,6 +460,7 @@ function App() {
           actor: "user",
           title: "Mission",
           text: input,
+          highlight: "plain",
         },
       ])
       setComposer("")
@@ -689,7 +620,13 @@ function App() {
                     {formatHeading(entry)}
                     {entry.actor ? <span fg={palette.muted}> • {entry.actor}</span> : null}
                   </text>
-                  <text fg={entryTextColor(entry)}>{entry.text || "…"}</text>
+                  <box style={{ flexDirection: "column" }}>
+                    {formatTranscriptEntryLines(entry, transcriptBodyWidth).map((line, index) => (
+                      <text key={`${entry.id}-line-${index}`} fg={entryTextColor(entry)}>
+                        {line || " "}
+                      </text>
+                    ))}
+                  </box>
                 </box>
               ))
             )}

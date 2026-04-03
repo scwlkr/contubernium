@@ -576,6 +576,12 @@ pub const StateManager = struct {
         self.state.runtime_session.last_failure = failure;
     }
 
+    fn clearIntermediateResults(self: StateManager, allocator: std.mem.Allocator) void {
+        const previous = self.state.agent_loop.intermediate_results;
+        self.state.agent_loop.intermediate_results = &.{};
+        if (previous.len > 0) allocator.free(previous);
+    }
+
     fn resetForMission(self: StateManager, mission_prompt: []const u8) void {
         self.state.global_status = .planning;
         self.state.current_actor = .decanus;
@@ -943,6 +949,7 @@ pub const StateManager = struct {
         self.state.mission.final_response = "";
         self.state.agent_loop.status = .thinking;
         self.state.agent_loop.active_tool = null;
+        self.clearIntermediateResults(allocator);
         self.state.runtime_session.status = .ready;
         setLoopStep(self.state, .think, .decanus, .command, owned_reply);
 
@@ -2042,11 +2049,6 @@ pub fn summarizeDecanusDecisionForUi(allocator: std.mem.Allocator, decision: Dec
         defer allocator.free(goal);
         try writer.print("\ngoal: {s}", .{goal});
     }
-    if (decision.reasoning.len > 0) {
-        const reasoning = try compactTextForUi(allocator, decision.reasoning, 3, 320);
-        defer allocator.free(reasoning);
-        try writer.print("\nreason: {s}", .{reasoning});
-    }
 
     if (eql(action, "tool_request")) {
         if (decision.tool_requests.len > 0) {
@@ -2112,11 +2114,6 @@ pub fn summarizeSpecialistResultForUi(allocator: std.mem.Allocator, result: Spec
     const summary = if (result.summary.len > 0) result.summary else result.result_summary;
 
     try writer.print("action: {s}", .{action});
-    if (result.reasoning.len > 0) {
-        const reasoning = try compactTextForUi(allocator, result.reasoning, 3, 320);
-        defer allocator.free(reasoning);
-        try writer.print("\nreason: {s}", .{reasoning});
-    }
 
     if (eql(action, "tool_request")) {
         if (result.tool_requests.len > 0) {

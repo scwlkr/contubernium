@@ -350,6 +350,9 @@ pub fn decanusMissionHandlingGuidanceText() []const u8 {
         "- When that loaded memory already answers the question, prefer `action: \"finish\"` with a concise summary instead of broad repository searches.\n" ++
         "- If a search is still necessary, target the narrowest path that can answer the question. Do not leave `search_text` at the workspace root when the intent is to inspect project context files.\n" ++
         "- If the operator asks for a read-only exploratory assessment or explicitly says to choose the scope yourself, pick a reasonable bounded review lens and proceed with a bounded read-only assessment. Do not bounce harmless prioritization back to the operator.\n" ++
+        "- When `final_response`, `question`, or blocked text needs multiple points, prefer markdown-lite operator output: a short lead sentence, then bullets or short headings when they improve scanability.\n" ++
+        "- Use fenced code blocks for commands, snippets, or exact terminal text when verbatim formatting helps.\n" ++
+        "- Keep trivial one-line replies short. Do not force headings or bullets when they add no value.\n" ++
         "- Do not invoke a specialist just because routing options exist.\n" ++
         "- Do not invent follow-on implementation work from the routing table or from unassigned task lanes.\n" ++
         "- The task summary only reflects specialist work that has been explicitly assigned during this mission.\n";

@@ -827,6 +827,7 @@ test "summarizeDecanusDecisionForUi renders compact tool request summary" {
     try testing.expect(std.mem.indexOf(u8, summary, "action: tool_request") != null);
     try testing.expect(std.mem.indexOf(u8, summary, "requested 1 runtime tool") != null);
     try testing.expect(std.mem.indexOf(u8, summary, "- list_files .") != null);
+    try testing.expect(std.mem.indexOf(u8, summary, "Need to inspect the workspace before reading docs.") == null);
     try testing.expect(std.mem.indexOf(u8, summary, "\"action\"") == null);
 }
 
@@ -1092,6 +1093,35 @@ test "resumeAfterOperatorReply clears stale completion state" {
     try testing.expectEqual(@as(usize, 1), state.agent_loop.history.len);
     try testing.expectEqualStrings("operator_reply", state.agent_loop.history[0].type);
     try testing.expectEqualStrings("what else does it do?", state.agent_loop.history[0].summary);
+}
+
+test "resumeAfterOperatorReply clears stale intermediate summaries for the next ask" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+    var state = AppState{};
+    state.global_status = .complete;
+    state.mission.final_response = "previous answer";
+    state.agent_loop.intermediate_results = try allocator.dupe(core.IntermediateResult, &.{
+        .{
+            .iteration = 2,
+            .actor = .decanus,
+            .lane = .command,
+            .kind = "decision_summary",
+            .summary = "action: tool_request",
+        },
+        .{
+            .iteration = 2,
+            .actor = .faber,
+            .lane = .backend,
+            .kind = "specialist_summary",
+            .summary = "action: complete",
+        },
+    });
+
+    try resumeAfterOperatorReply(allocator, &state, "what should happen next?");
+
+    try testing.expectEqual(@as(usize, 0), state.agent_loop.intermediate_results.len);
+    try testing.expectEqualStrings("what should happen next?", state.mission.current_goal);
 }
 
 test "resumeAfterOperatorReply ignores empty replies" {
@@ -1392,6 +1422,9 @@ test "buildDecanusUserPrompt includes project context and memory layers" {
     try testing.expect(std.mem.indexOf(u8, prompt, "Treat the latest non-empty operator reply as the active ask by default.") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "If the prompt is only a greeting, presence check, or other conversational opener") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "If the operator asks what the project does, what problem it solves, or requests a plain-language summary") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "prefer markdown-lite operator output") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Use fenced code blocks for commands, snippets, or exact terminal text when verbatim formatting helps.") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Keep trivial one-line replies short.") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Assigned specialist tasks") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "none assigned") != null);
 }

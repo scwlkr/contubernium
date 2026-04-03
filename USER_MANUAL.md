@@ -66,6 +66,9 @@ Current shipped behavior:
 
 - `Esc`, `/exit`, and `/quit` tear down the OpenTUI renderer before the process exits
 - terminal state is restored on those exits, including mouse tracking cleanup
+- transcript cards render markdown-lite structure for headings, paragraphs, lists, blank lines, and fenced code blocks
+- `stream_start` creates a temporary `thinking...` placeholder card, and `stream_finalize` replaces it with the compact structured summary emitted by the Zig runtime
+- raw streaming thinking/content chunks stay out of transcript bodies; JSON-highlighted entries remain verbatim
 
 ## Provider Configuration
 
@@ -125,6 +128,9 @@ Current guarantees:
 - read-only exploratory follow-ups can be scoped by `decanus` without forcing the operator to choose harmless prioritization details first
 - pressing `Enter` on an empty inline reply leaves the mission blocked so it can be resumed later
 - the plain CLI spinner shows a short rolling thinking preview for streaming `ollama-native` model runs while the model is active, clips the preview to the current terminal width, and keeps it on a single status line
+- plain mission output wraps markdown-lite prose on word boundaries, preserves headings/lists/fenced code blocks, and keeps list hanging indents intact
+- mission outcome views insert a bounded `thinking summary` section between the active ask/session seed and the final response, question, error, or status block
+- `thinking summary` only shows persisted structured summaries from parsed decisions, specialist results, runtime tool results, and invocation results; raw streaming thought/content text is not persisted into operator-facing mission transcripts
 
 ## Approvals And Safety
 
@@ -212,6 +218,9 @@ If behavior changes and no row changes here, the feature is not documented compl
 | Greeting-only mission intake | A greeting like `hello` keeps the mission open and asks what the operator wants to do next instead of completing immediately. | `src/runtime_app.zig` test: `buildDecanusUserPrompt keeps greeting-only mission intake in follow-up mode` |
 | Inline post-completion follow-up | Completed TTY mission runs keep the same session alive for the next prompt instead of exiting immediately to the shell, and mission output foregrounds the active follow-up ask instead of the original session seed. | `src/runtime_app.zig` test: `resumeAfterOperatorReply clears stale completion state`; `src/runtime_ui.zig` tests: `completedMissionFollowUpAvailable detects completed conversational state`; `renderCliMissionOutcome foregrounds the active ask after a follow-up` |
 | Inline mission follow-up | TTY mission resumes prompt for operator clarification inline, labels the blocked state as `awaiting your command`, highlights the pending question, keeps the same mission state alive after `USER_INPUT_REQUIRED`, and leaves empty inline replies from changing the active ask. | `src/runtime_app.zig` tests: `resumeAfterOperatorReply clears the blocked state and records operator history`; `resumeAfterOperatorReply ignores empty replies`; `src/runtime_ui.zig` tests: `renderCliMissionOutcome labels follow-up questions as awaiting your command`; `renderInlineUserReplyPrompt highlights the pending question` |
+| Mission markdown output | Plain mission output wraps markdown-lite prose on word boundaries, preserves headings/lists/fenced code, and keeps hanging indents inside mission sections. | `src/runtime_ui.zig` tests: `renderCliMarkdownLiteSection wraps prose without splitting words`; `renderCliMarkdownLiteSection preserves headings lists blank lines and fenced code` |
+| Mission thinking summary | Mission outcome views show a bounded structured `thinking summary` trail before the final response/question/error, and follow-up replies clear stale summaries before the next ask. | `src/runtime_ui.zig` tests: `renderCliMissionOutcome labels follow-up questions as awaiting your command`; `renderCliMissionOutcome foregrounds the active ask after a follow-up`; `src/runtime_app.zig` test: `resumeAfterOperatorReply clears stale intermediate summaries for the next ask` |
+| OpenTUI transcript formatting | OpenTUI transcript cards render markdown-lite bodies, keep JSON blocks verbatim, replace the temporary thinking placeholder with the final summary, and ignore raw streaming chunks. | `opentui/transcript.test.ts` tests: `markdown-lite formatting preserves list indentation and fenced code at narrow widths`; `stream_start placeholder is replaced by stream_finalize summary`; `raw thinking and content chunks do not append transcript card bodies`; `json highlight entries render verbatim` |
 | Root search pruning | Workspace-root `search_text` requests search hidden Contubernium context while pruning runtime noise and truncating hit output. | `src/runtime_app.zig` tests: `searchText includes hidden project context while pruning runtime noise`; `searchText truncates root-search hits to the configured limit` |
 | Streaming thinking preview | Streaming Ollama runs enable provider thinking and surface a bounded rolling live preview before the final structured result lands, clipped to the active terminal width so the CLI status line does not wrap repeatedly. | `src/runtime_app.zig` tests: `buildOllamaChatBody preserves structured output settings across stream modes`; `processOllamaPendingLines emits bounded thinking chunks separately from content`; `src/runtime_ui.zig` tests: `appendSpinnerPreview normalizes whitespace and keeps a rolling tail`; `visibleSpinnerPreview fits the terminal budget` |
 

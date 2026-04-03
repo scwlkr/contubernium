@@ -30,6 +30,7 @@ const freeTuiSnapshot = core.freeTuiSnapshot;
 const initializeRuntimeSession = core.initializeRuntimeSession;
 const joinArgs = core.joinArgs;
 const joinStrings = core.joinStrings;
+const laneName = core.laneName;
 const pathExists = core.pathExists;
 const pollInput = core.pollInput;
 const resolvedApprovalMode = core.resolvedApprovalMode;
@@ -89,6 +90,10 @@ const interactive_clear_line = "\r\x1b[2K";
 const cli_spinner_label = "testudo advancing";
 const cli_spinner_fallback_columns: usize = 80;
 const cli_spinner_visible_preview_cap: usize = 40;
+const cli_section_indent: usize = 2;
+const cli_section_right_gutter: usize = 2;
+const cli_section_min_columns: usize = cli_section_indent + 1;
+const cli_thinking_summary_visible_limit: usize = 6;
 const completed_mission_follow_up_question = "What next?";
 
 const InteractiveKey = union(enum) {
@@ -939,45 +944,49 @@ fn renderCliMissionOutcome(allocator: std.mem.Allocator, state: AppState) ![]con
 
     if (state.mission.final_response.len > 0 and state.global_status == .complete) {
         try writeCliMissionStatus(writer, styled, "complete", interactive_color_success);
-        try writeCliMissionAskContext(writer, styled, state);
-        try writeCliMissionSection(writer, styled, "response", state.mission.final_response, interactive_color_blue, false);
+        try writeCliMissionAskContext(allocator, writer, styled, state);
+        try writeCliMissionThinkingSummarySection(allocator, writer, styled, state);
+        try writeCliMissionSection(allocator, writer, styled, "response", state.mission.final_response, interactive_color_blue, false);
         return try buffer.toOwnedSlice(allocator);
     }
 
     if (pendingUserReplyQuestion(state).len > 0) {
         try writeCliMissionStatus(writer, styled, "awaiting your command", interactive_color_gold);
-        try writeCliMissionAskContext(writer, styled, state);
-        try writeCliMissionSection(writer, styled, "question", pendingUserReplyQuestion(state), interactive_color_blue, false);
+        try writeCliMissionAskContext(allocator, writer, styled, state);
+        try writeCliMissionThinkingSummarySection(allocator, writer, styled, state);
+        try writeCliMissionSection(allocator, writer, styled, "question", pendingUserReplyQuestion(state), interactive_color_blue, false);
         return try buffer.toOwnedSlice(allocator);
     }
 
     if (state.runtime_session.last_error.len > 0 and state.runtime_session.status == .blocked) {
         try writeCliMissionStatus(writer, styled, "blocked", interactive_color_danger);
-        try writeCliMissionAskContext(writer, styled, state);
-        try writeCliMissionSection(writer, styled, "error", state.runtime_session.last_error, interactive_color_danger, false);
+        try writeCliMissionAskContext(allocator, writer, styled, state);
+        try writeCliMissionThinkingSummarySection(allocator, writer, styled, state);
+        try writeCliMissionSection(allocator, writer, styled, "error", state.runtime_session.last_error, interactive_color_danger, false);
         return try buffer.toOwnedSlice(allocator);
     }
 
     try writeCliMissionStatus(writer, styled, "in progress", interactive_color_gold);
-    try writeCliMissionAskContext(writer, styled, state);
+    try writeCliMissionAskContext(allocator, writer, styled, state);
+    try writeCliMissionThinkingSummarySection(allocator, writer, styled, state);
     if (state.agent_loop.active_tool) |active_tool| {
-        const status_text = try std.fmt.allocPrint(allocator, "current actor: {s}\nactive tool: {s}\niteration: {d}", .{
+        const status_text = try std.fmt.allocPrint(allocator, "- current actor: {s}\n- active tool: {s}\n- iteration: {d}", .{
             actorName(state.current_actor),
             actorName(active_tool),
             state.agent_loop.iteration,
         });
         defer allocator.free(status_text);
-        try writeCliMissionSection(writer, styled, "status", status_text, interactive_color_blue, false);
+        try writeCliMissionSection(allocator, writer, styled, "status", status_text, interactive_color_blue, false);
         return try buffer.toOwnedSlice(allocator);
     }
 
-    const status_text = try std.fmt.allocPrint(allocator, "status: {s}\ncurrent actor: {s}\niteration: {d}", .{
+    const status_text = try std.fmt.allocPrint(allocator, "- status: {s}\n- current actor: {s}\n- iteration: {d}", .{
         @tagName(state.global_status),
         actorName(state.current_actor),
         state.agent_loop.iteration,
     });
     defer allocator.free(status_text);
-    try writeCliMissionSection(writer, styled, "status", status_text, interactive_color_blue, false);
+    try writeCliMissionSection(allocator, writer, styled, "status", status_text, interactive_color_blue, false);
     return try buffer.toOwnedSlice(allocator);
 }
 
@@ -992,11 +1001,11 @@ fn activeMissionAsk(state: AppState) []const u8 {
     return state.mission.initial_prompt;
 }
 
-fn writeCliMissionAskContext(writer: anytype, styled: bool, state: AppState) !void {
+fn writeCliMissionAskContext(allocator: std.mem.Allocator, writer: anytype, styled: bool, state: AppState) !void {
     const ask = activeMissionAsk(state);
-    try writeCliMissionSection(writer, styled, "ask", ask, interactive_color_prompt, true);
+    try writeCliMissionSection(allocator, writer, styled, "ask", ask, interactive_color_prompt, true);
     if (state.mission.initial_prompt.len > 0 and ask.len > 0 and !eql(state.mission.initial_prompt, ask)) {
-        try writeCliMissionSection(writer, styled, "session seed", state.mission.initial_prompt, interactive_color_muted, false);
+        try writeCliMissionSection(allocator, writer, styled, "session seed", state.mission.initial_prompt, interactive_color_muted, false);
     }
 }
 
@@ -1009,6 +1018,7 @@ fn writeCliMissionStatus(writer: anytype, styled: bool, status: []const u8, colo
 }
 
 fn writeCliMissionSection(
+    allocator: std.mem.Allocator,
     writer: anytype,
     styled: bool,
     label: []const u8,
@@ -1017,13 +1027,356 @@ fn writeCliMissionSection(
     italic: bool,
 ) !void {
     if (body.len == 0) return;
+    const rendered = try renderCliMarkdownLiteSection(allocator, body, cliMissionSectionColumns(), cli_section_indent);
+    defer allocator.free(rendered);
     if (styled) {
-        try writer.print("\n\n{s}{s}{s}\n  {s}", .{ interactive_color_muted, label, interactive_reset, color });
+        try writer.print("\n\n{s}{s}{s}\n{s}", .{ interactive_color_muted, label, interactive_reset, color });
         if (italic) try writer.writeAll(interactive_style_italic);
-        try writer.print("{s}{s}", .{ body, interactive_reset });
+        try writer.print("{s}{s}", .{ rendered, interactive_reset });
     } else {
-        try writer.print("\n\n{s}\n  {s}", .{ label, body });
+        try writer.print("\n\n{s}\n{s}", .{ label, rendered });
     }
+}
+
+const WrapPrefix = struct {
+    indent: usize,
+    marker: []const u8 = "",
+};
+
+const MarkdownListItem = struct {
+    leading_spaces: usize,
+    marker: []const u8,
+    text: []const u8,
+};
+
+const MarkdownFlowText = struct {
+    text: []const u8,
+    next_index: usize,
+};
+
+fn cliMissionSectionColumns() usize {
+    const columns = cliTerminalColumns(std.posix.STDOUT_FILENO);
+    const available = columns -| cli_section_right_gutter;
+    return if (available >= cli_section_min_columns) available else cli_section_min_columns;
+}
+
+fn renderCliMarkdownLiteSection(
+    allocator: std.mem.Allocator,
+    body: []const u8,
+    wrap_columns: usize,
+    base_indent: usize,
+) ![]const u8 {
+    var lines: std.ArrayList([]const u8) = .empty;
+    defer lines.deinit(allocator);
+
+    var splitter = std.mem.splitScalar(u8, body, '\n');
+    while (splitter.next()) |line| {
+        try lines.append(allocator, line);
+    }
+
+    var rendered: std.ArrayList(u8) = .empty;
+    errdefer rendered.deinit(allocator);
+    var started = false;
+    var index: usize = 0;
+    while (index < lines.items.len) {
+        const line = lines.items[index];
+        const trimmed = trimAscii(line);
+
+        if (trimmed.len == 0) {
+            try appendRenderedLine(&rendered, allocator, &started, .{ .indent = 0 }, "");
+            index += 1;
+            continue;
+        }
+
+        if (isMarkdownFenceLine(trimmed)) {
+            try appendRenderedFenceBlock(&rendered, allocator, &started, lines.items, &index, base_indent);
+            continue;
+        }
+
+        if (parseMarkdownHeading(trimmed)) |marker| {
+            try appendWrappedText(
+                &rendered,
+                allocator,
+                &started,
+                trimAscii(trimmed[marker.len..]),
+                wrap_columns,
+                .{ .indent = base_indent, .marker = marker },
+                .{ .indent = base_indent + marker.len },
+            );
+            index += 1;
+            continue;
+        }
+
+        if (parseMarkdownListItem(line)) |item| {
+            const flow = try collectMarkdownFlowText(allocator, lines.items, index + 1, item.text);
+            defer allocator.free(flow.text);
+            try appendWrappedText(
+                &rendered,
+                allocator,
+                &started,
+                flow.text,
+                wrap_columns,
+                .{ .indent = base_indent + item.leading_spaces, .marker = item.marker },
+                .{ .indent = base_indent + item.leading_spaces + item.marker.len },
+            );
+            index = flow.next_index;
+            continue;
+        }
+
+        const flow = try collectMarkdownFlowText(allocator, lines.items, index + 1, line);
+        defer allocator.free(flow.text);
+        try appendWrappedText(
+            &rendered,
+            allocator,
+            &started,
+            flow.text,
+            wrap_columns,
+            .{ .indent = base_indent },
+            .{ .indent = base_indent },
+        );
+        index = flow.next_index;
+    }
+
+    return try rendered.toOwnedSlice(allocator);
+}
+
+fn appendRenderedFenceBlock(
+    buffer: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    started: *bool,
+    lines: []const []const u8,
+    index: *usize,
+    base_indent: usize,
+) !void {
+    var first_line = true;
+    while (index.* < lines.len) : (index.* += 1) {
+        const line = lines[index.*];
+        try appendRenderedLine(buffer, allocator, started, .{ .indent = base_indent }, line);
+        if (!first_line and isMarkdownFenceLine(trimAscii(line))) break;
+        first_line = false;
+    }
+    if (index.* < lines.len) index.* += 1;
+}
+
+fn appendWrappedText(
+    buffer: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    started: *bool,
+    text: []const u8,
+    wrap_columns: usize,
+    first_prefix: WrapPrefix,
+    rest_prefix: WrapPrefix,
+) !void {
+    var remaining = trimAscii(text);
+    if (remaining.len == 0) {
+        try appendRenderedLine(buffer, allocator, started, first_prefix, "");
+        return;
+    }
+
+    var prefix = first_prefix;
+    while (remaining.len > 0) {
+        const budget = wrapBudget(wrap_columns, prefix);
+        const end = wrappedLineEnd(remaining, budget);
+        const line = std.mem.trimRight(u8, remaining[0..end], " \t");
+        try appendRenderedLine(buffer, allocator, started, prefix, line);
+        remaining = trimAsciiLeft(remaining[end..]);
+        prefix = rest_prefix;
+    }
+}
+
+fn appendRenderedLine(
+    buffer: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    started: *bool,
+    prefix: WrapPrefix,
+    text: []const u8,
+) !void {
+    if (started.*) {
+        try buffer.append(allocator, '\n');
+    } else {
+        started.* = true;
+    }
+    try appendSpaces(buffer, allocator, prefix.indent);
+    if (prefix.marker.len > 0) try buffer.appendSlice(allocator, prefix.marker);
+    if (text.len > 0) try buffer.appendSlice(allocator, text);
+}
+
+fn appendSpaces(buffer: *std.ArrayList(u8), allocator: std.mem.Allocator, count: usize) !void {
+    var remaining = count;
+    while (remaining > 0) : (remaining -= 1) {
+        try buffer.append(allocator, ' ');
+    }
+}
+
+fn collectMarkdownFlowText(
+    allocator: std.mem.Allocator,
+    lines: []const []const u8,
+    start_index: usize,
+    initial_line: []const u8,
+) !MarkdownFlowText {
+    var joined: std.ArrayList(u8) = .empty;
+    errdefer joined.deinit(allocator);
+
+    const first = trimAscii(initial_line);
+    if (first.len > 0) try joined.appendSlice(allocator, first);
+
+    var index = start_index;
+    while (index < lines.len) : (index += 1) {
+        const line = lines[index];
+        const trimmed = trimAscii(line);
+        if (trimmed.len == 0) break;
+        if (isMarkdownFenceLine(trimmed)) break;
+        if (parseMarkdownHeading(trimmed) != null) break;
+        if (parseMarkdownListItem(line) != null) break;
+
+        if (joined.items.len > 0) try joined.append(allocator, ' ');
+        try joined.appendSlice(allocator, trimmed);
+    }
+
+    return .{
+        .text = try joined.toOwnedSlice(allocator),
+        .next_index = index,
+    };
+}
+
+fn parseMarkdownHeading(trimmed: []const u8) ?[]const u8 {
+    if (trimmed.len < 3 or trimmed[0] != '#') return null;
+
+    var index: usize = 0;
+    while (index < trimmed.len and trimmed[index] == '#') : (index += 1) {}
+    if (index == 0 or index >= trimmed.len or trimmed[index] != ' ') return null;
+    return trimmed[0 .. index + 1];
+}
+
+fn parseMarkdownListItem(line: []const u8) ?MarkdownListItem {
+    const leading_spaces = countLeadingSpaces(line);
+    if (leading_spaces >= line.len) return null;
+
+    if (parseOrderedMarkdownListItem(line, leading_spaces)) |ordered| return ordered;
+
+    if (leading_spaces + 1 >= line.len) return null;
+    const marker_char = line[leading_spaces];
+    if (marker_char != '-' and marker_char != '*' and marker_char != '+') return null;
+    if (line[leading_spaces + 1] != ' ') return null;
+    return .{
+        .leading_spaces = leading_spaces,
+        .marker = line[leading_spaces .. leading_spaces + 2],
+        .text = line[leading_spaces + 2 ..],
+    };
+}
+
+fn parseOrderedMarkdownListItem(line: []const u8, leading_spaces: usize) ?MarkdownListItem {
+    var cursor = leading_spaces;
+    while (cursor < line.len and std.ascii.isDigit(line[cursor])) : (cursor += 1) {}
+    if (cursor == leading_spaces or cursor + 1 >= line.len) return null;
+    if (line[cursor] != '.' or line[cursor + 1] != ' ') return null;
+    return .{
+        .leading_spaces = leading_spaces,
+        .marker = line[leading_spaces .. cursor + 2],
+        .text = line[cursor + 2 ..],
+    };
+}
+
+fn countLeadingSpaces(line: []const u8) usize {
+    var count: usize = 0;
+    while (count < line.len and line[count] == ' ') : (count += 1) {}
+    return count;
+}
+
+fn isMarkdownFenceLine(trimmed: []const u8) bool {
+    return std.mem.startsWith(u8, trimmed, "```");
+}
+
+fn wrapBudget(wrap_columns: usize, prefix: WrapPrefix) usize {
+    const prefix_len = prefix.indent + prefix.marker.len;
+    return if (wrap_columns > prefix_len) wrap_columns - prefix_len else 1;
+}
+
+fn wrappedLineEnd(text: []const u8, budget: usize) usize {
+    if (text.len <= budget) return text.len;
+
+    var last_break: ?usize = null;
+    var index: usize = 0;
+    while (index < text.len and index < budget) : (index += 1) {
+        if (std.ascii.isWhitespace(text[index])) last_break = index;
+    }
+    if (last_break) |break_at| {
+        var end = break_at;
+        while (end > 0 and std.ascii.isWhitespace(text[end - 1])) : (end -= 1) {}
+        if (end > 0) return end;
+    }
+
+    var cursor = budget;
+    while (cursor < text.len and !std.ascii.isWhitespace(text[cursor])) : (cursor += 1) {}
+    return cursor;
+}
+
+fn trimAsciiLeft(text: []const u8) []const u8 {
+    var start: usize = 0;
+    while (start < text.len and std.ascii.isWhitespace(text[start])) : (start += 1) {}
+    return text[start..];
+}
+
+fn writeCliMissionThinkingSummarySection(
+    allocator: std.mem.Allocator,
+    writer: anytype,
+    styled: bool,
+    state: AppState,
+) !void {
+    const body = try cliThinkingSummaryBody(allocator, state);
+    defer allocator.free(body);
+    if (body.len == 0) return;
+    try writeCliMissionSection(allocator, writer, styled, "thinking summary", body, interactive_color_ivory, false);
+}
+
+fn cliThinkingSummaryBody(allocator: std.mem.Allocator, state: AppState) ![]const u8 {
+    var visible_indexes: std.ArrayList(usize) = .empty;
+    defer visible_indexes.deinit(allocator);
+
+    for (state.agent_loop.intermediate_results, 0..) |entry, index| {
+        if (!thinkingSummaryEntryVisible(entry.kind, entry.summary)) continue;
+        try visible_indexes.append(allocator, index);
+    }
+
+    if (visible_indexes.items.len == 0) return try allocator.dupe(u8, "");
+
+    const visible_count = @min(visible_indexes.items.len, cli_thinking_summary_visible_limit);
+    const start_index = visible_indexes.items.len - visible_count;
+    const omitted_count = visible_indexes.items.len - visible_count;
+
+    var buffer: std.ArrayList(u8) = .empty;
+    errdefer buffer.deinit(allocator);
+    const writer = buffer.writer(allocator);
+
+    if (omitted_count > 0) {
+        try writer.print("Earlier summaries omitted: {d}", .{omitted_count});
+    }
+
+    for (visible_indexes.items[start_index..]) |entry_index| {
+        const entry = state.agent_loop.intermediate_results[entry_index];
+        if (buffer.items.len > 0) try writer.writeAll("\n\n");
+        try writer.print("#### {s} {s}", .{ actorName(entry.actor), thinkingSummaryKindLabel(entry.kind) });
+        if (entry.lane != .command) try writer.print(" ({s})", .{laneName(entry.lane)});
+        try writer.print("\n{s}", .{entry.summary});
+    }
+
+    return try buffer.toOwnedSlice(allocator);
+}
+
+fn thinkingSummaryEntryVisible(kind: []const u8, summary: []const u8) bool {
+    if (summary.len == 0) return false;
+    return eql(kind, "decision_summary") or
+        eql(kind, "specialist_summary") or
+        eql(kind, "runtime_tool_result") or
+        eql(kind, "invocation_result");
+}
+
+fn thinkingSummaryKindLabel(kind: []const u8) []const u8 {
+    if (eql(kind, "decision_summary")) return "decision";
+    if (eql(kind, "specialist_summary")) return "summary";
+    if (eql(kind, "runtime_tool_result")) return "runtime tool";
+    if (eql(kind, "invocation_result")) return "result";
+    return kind;
 }
 
 fn resolveOpenTuiFrontendRoot(allocator: std.mem.Allocator) ![]const u8 {
@@ -1885,12 +2238,47 @@ test "visibleSpinnerPreview fits the terminal budget" {
     try testing.expect(std.mem.endsWith(u8, preview, clipped));
 }
 
+test "renderCliMarkdownLiteSection wraps prose without splitting words" {
+    const testing = std.testing;
+    const rendered = try renderCliMarkdownLiteSection(testing.allocator, "Prose wraps on word boundaries cleanly.", 24, 2);
+    defer testing.allocator.free(rendered);
+
+    try testing.expectEqualStrings("  Prose wraps on word\n  boundaries cleanly.", rendered);
+}
+
+test "renderCliMarkdownLiteSection preserves headings lists blank lines and fenced code" {
+    const testing = std.testing;
+    const rendered = try renderCliMarkdownLiteSection(
+        testing.allocator,
+        "# Heading\nParagraph text wraps clearly.\n\n- Bullet item wraps across lines cleanly\n1. Ordered item also wraps cleanly\n```sh\nzig test src/runtime_ui.zig\necho done\n```",
+        24,
+        2,
+    );
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.indexOf(u8, rendered, "  # Heading") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "  Paragraph text wraps") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "\n\n  - Bullet item wraps") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "\n    across lines") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "\n  1. Ordered item") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "\n  ```sh\n  zig test src/runtime_ui.zig\n  echo done\n  ```") != null);
+}
+
 test "renderCliMissionOutcome labels follow-up questions as awaiting your command" {
     const testing = std.testing;
     const allocator = testing.allocator;
     var state = AppState{};
     state.mission.initial_prompt = "audit the project";
     state.mission.current_goal = "what gaps do you see?";
+    state.agent_loop.intermediate_results = &.{
+        .{
+            .iteration = 1,
+            .actor = .decanus,
+            .lane = .command,
+            .kind = "decision_summary",
+            .summary = "action: ask_user",
+        },
+    };
     state.runtime_session.status = .blocked;
     state.runtime_session.last_failure.code = "USER_INPUT_REQUIRED";
     state.runtime_session.last_failure.cause = "Which phase should decanus inspect first?";
@@ -1901,6 +2289,10 @@ test "renderCliMissionOutcome labels follow-up questions as awaiting your comman
     try testing.expect(std.mem.indexOf(u8, rendered, "awaiting your command") != null);
     try testing.expect(std.mem.indexOf(u8, rendered, "\n\nask\n  what gaps do you see?") != null);
     try testing.expect(std.mem.indexOf(u8, rendered, "\n\nsession seed\n  audit the project") != null);
+    const thinking_index = std.mem.indexOf(u8, rendered, "\n\nthinking summary\n") orelse return error.TestUnexpectedResult;
+    const question_index = std.mem.indexOf(u8, rendered, "\n\nquestion\n") orelse return error.TestUnexpectedResult;
+    try testing.expect(thinking_index < question_index);
+    try testing.expect(std.mem.indexOf(u8, rendered, "#### decanus decision") != null);
     try testing.expect(std.mem.indexOf(u8, rendered, "question") != null);
     try testing.expect(std.mem.indexOf(u8, rendered, "Which phase should decanus inspect first?") != null);
 }
@@ -1913,13 +2305,29 @@ test "renderCliMissionOutcome foregrounds the active ask after a follow-up" {
     state.mission.initial_prompt = "what does this project do?";
     state.mission.current_goal = "what gaps do you see?";
     state.mission.final_response = "Here are the main gaps.";
+    state.agent_loop.intermediate_results = &.{
+        .{ .iteration = 1, .actor = .decanus, .lane = .command, .kind = "decision_summary", .summary = "action: tool_request" },
+        .{ .iteration = 1, .actor = .decanus, .lane = .command, .kind = "runtime_tool_result", .summary = "read_file .contubernium/project.md" },
+        .{ .iteration = 1, .actor = .faber, .lane = .backend, .kind = "specialist_summary", .summary = "action: complete" },
+        .{ .iteration = 1, .actor = .faber, .lane = .backend, .kind = "invocation_result", .summary = "implemented runtime changes" },
+        .{ .iteration = 2, .actor = .decanus, .lane = .command, .kind = "decision_summary", .summary = "action: finish" },
+        .{ .iteration = 2, .actor = .decanus, .lane = .command, .kind = "runtime_tool_result", .summary = "search_text mission formatting" },
+        .{ .iteration = 2, .actor = .artifex, .lane = .frontend, .kind = "specialist_summary", .summary = "action: complete" },
+        .{ .iteration = 2, .actor = .artifex, .lane = .frontend, .kind = "invocation_result", .summary = "updated OpenTUI transcript" },
+    };
 
     const rendered = try renderCliMissionOutcome(allocator, state);
     defer allocator.free(rendered);
 
-    try testing.expect(std.mem.indexOf(u8, rendered, "\n\nask\n  what gaps do you see?") != null);
+    const ask_index = std.mem.indexOf(u8, rendered, "\n\nask\n  what gaps do you see?") orelse return error.TestUnexpectedResult;
+    const thinking_index = std.mem.indexOf(u8, rendered, "\n\nthinking summary\n") orelse return error.TestUnexpectedResult;
+    const response_index = std.mem.indexOf(u8, rendered, "\n\nresponse\n  Here are the main gaps.") orelse return error.TestUnexpectedResult;
+    try testing.expect(ask_index < thinking_index);
+    try testing.expect(thinking_index < response_index);
     try testing.expect(std.mem.indexOf(u8, rendered, "\n\nsession seed\n  what does this project do?") != null);
-    try testing.expect(std.mem.indexOf(u8, rendered, "\n\nresponse\n  Here are the main gaps.") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "Earlier summaries omitted: 2") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "#### faber result (backend)") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "#### artifex result (frontend)") != null);
 }
 
 test "renderInlineUserReplyPrompt highlights the pending question" {

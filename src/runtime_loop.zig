@@ -585,6 +585,7 @@ pub fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state
         .summary = decision_summary,
         .output = prettyPrintJson(allocator, decision_raw_text) catch decision_raw_text,
     });
+    try stateManager(state).appendIntermediateResult(allocator, "decision_summary", .decanus, .command, decision_summary);
     emitStreamFinalize(hooks, "decanus", decision_summary, .summary);
 
     stateManager(state).setCurrentGoal(decision.current_goal);
@@ -912,6 +913,7 @@ pub fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, st
         .summary = result_summary,
         .output = prettyPrintJson(allocator, response.raw_text) catch response.raw_text,
     });
+    try stateManager(state).appendIntermediateResult(allocator, "specialist_summary", actor, lane, result_summary);
     emitStreamFinalize(hooks, actorName(actor), result_summary, .summary);
 
     if (result.tool_requests.len > 0 or eql(result.action, "tool_request")) {
