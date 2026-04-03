@@ -781,6 +781,20 @@ test "executeToolRequests blocks policy-denied commands with structured failure 
     try testing.expect(std.mem.indexOf(u8, outcome.summary, "blocked: run_command blocked by policy") != null);
 }
 
+test "commandIsBlocked matches blocked commands at shell segment boundaries" {
+    const testing = std.testing;
+    const patterns = [_][]const u8{
+        "rm -rf",
+        "git reset --hard",
+    };
+
+    try testing.expect(try commandIsBlocked(testing.allocator, patterns[0..], "git reset --hard"));
+    try testing.expect(try commandIsBlocked(testing.allocator, patterns[0..], "echo ready && git reset --hard HEAD~1"));
+    try testing.expect(try commandIsBlocked(testing.allocator, patterns[0..], "FOO=1 sudo git reset --hard"));
+    try testing.expect(!try commandIsBlocked(testing.allocator, patterns[0..], "echo \"git reset --hard\""));
+    try testing.expect(!try commandIsBlocked(testing.allocator, patterns[0..], "printf '%s' 'rm -rf'"));
+}
+
 test "executeToolRequests converts malformed read_file requests into structured failures" {
     const testing = std.testing;
     var state = AppState{};
@@ -1562,8 +1576,8 @@ test "buildSpecialistUserPrompt surfaces the subordinate tool loop contract" {
             .dependencies = &.{"src/runtime_core.zig"},
         },
         .scope = .{
-            .allowed_actions = &.{"execute_assigned_scope", "request_runtime_tools", "return_structured_result"},
-            .restricted_actions = &.{"chain_other_specialists", "expand_scope", "finalize_mission"},
+            .allowed_actions = &.{ "execute_assigned_scope", "request_runtime_tools", "return_structured_result" },
+            .restricted_actions = &.{ "chain_other_specialists", "expand_scope", "finalize_mission" },
         },
         .memory = .{
             .mission = "formalize specialist subordinate execution",
@@ -1675,6 +1689,66 @@ test "searchText truncates root-search hits to the configured limit" {
 
     try testing.expect(std.mem.indexOf(u8, output, "first.md") != null or std.mem.indexOf(u8, output, "second.md") != null or std.mem.indexOf(u8, output, "third.md") != null);
     try testing.expect(std.mem.indexOf(u8, output, "...[truncated]...") != null);
+}
+
+test "searchText treats leading dash patterns as literal data" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    defer original_cwd.close();
+    try tmp.dir.setAsCwd();
+    defer original_cwd.setAsCwd() catch {};
+
+    var file = try tmp.dir.createFile("flags.md", .{ .truncate = true });
+    defer file.close();
+    try file.writeAll("-n means literal data here\n");
+
+    const output = try searchText(testing.allocator, "-n", ".", 20, 5000);
+    defer testing.allocator.free(output);
+
+    try testing.expect(std.mem.indexOf(u8, output, "flags.md") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "-n means literal data here") != null);
+}
+
+test "executeToolRequests blocks symlink escapes for guarded workspace tools" {
+    const testing = std.testing;
+    var workspace = std.testing.tmpDir(.{});
+    defer workspace.cleanup();
+    var external = std.testing.tmpDir(.{});
+    defer external.cleanup();
+
+    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    defer original_cwd.close();
+    try workspace.dir.setAsCwd();
+    defer original_cwd.setAsCwd() catch {};
+
+    try external.dir.writeFile(.{
+        .sub_path = "secret.txt",
+        .data = "classified\n",
+    });
+
+    const external_root = try external.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(external_root);
+    try workspace.dir.symLink(external_root, "escape", .{ .is_directory = true });
+
+    const requests = [_]ToolRequest{
+        .{ .tool = "list_files", .path = "escape" },
+        .{ .tool = "read_file", .path = "escape/secret.txt" },
+        .{ .tool = "search_text", .pattern = "classified", .path = "escape" },
+        .{ .tool = "write_file", .path = "escape/new.txt", .content = "blocked" },
+    };
+
+    for (requests) |request| {
+        var state = AppState{};
+        const outcome = try executeToolRequests(testing.allocator, AppConfig{}, &state, .decanus, .command, &.{request}, .{});
+        defer testing.allocator.free(outcome.summary);
+
+        try testing.expect(outcome.blocked);
+        try testing.expectEqualStrings("TOOL_PATH_UNSAFE", state.runtime_session.last_failure.code);
+        try testing.expectEqualStrings(request.tool, state.runtime_session.last_failure.context.tool);
+    }
 }
 
 test "buildDecanusUserPrompt keeps greeting-only mission intake in follow-up mode" {

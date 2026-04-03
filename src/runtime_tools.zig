@@ -283,7 +283,7 @@ pub fn executeToolRequests(
             .input = request_summary,
         });
 
-        const validated = switch (validateToolRequest(config, state, actor, lane, request)) {
+        const validated = switch (validateToolRequest(allocator, config, state, actor, lane, request)) {
             .ok => |value| value,
             .blocked => |failure| {
                 const blocked_summary = try std.fmt.allocPrint(allocator, "blocked: {s}", .{failure.cause});
@@ -594,6 +594,7 @@ fn searchTextWithGrep(
     if (isWorkspaceRootSearch(path)) {
         try appendRootSearchGrepArgs(&args, allocator);
     }
+    try args.append(allocator, "--");
     try args.append(allocator, pattern);
     try args.append(allocator, path);
 
@@ -614,6 +615,7 @@ pub fn searchText(allocator: std.mem.Allocator, pattern: []const u8, path: []con
     if (isWorkspaceRootSearch(search_path)) {
         try appendRootSearchRgArgs(&rg_args, allocator);
     }
+    try rg_args.append(allocator, "--");
     try rg_args.append(allocator, pattern);
     try rg_args.append(allocator, search_path);
 
@@ -783,16 +785,56 @@ pub fn toolTimeoutMs(spec: RuntimeToolSpec, policy: PolicyConfig) ?usize {
     };
 }
 
-pub fn pathIsSafeForWorkspace(path: []const u8) bool {
+fn pathIsLexicallySafeForWorkspace(path: []const u8) bool {
     const trimmed = trimAscii(path);
     if (trimmed.len == 0) return true;
     if (std.fs.path.isAbsolute(trimmed)) return false;
 
-    var parts = std.mem.splitScalar(u8, trimmed, '/');
-    while (parts.next()) |part| {
-        if (eql(part, "..")) return false;
+    var components = std.fs.path.componentIterator(trimmed) catch return false;
+    while (components.next()) |component| {
+        if (eql(component.name, "..")) return false;
     }
     return true;
+}
+
+const WorkspaceBoundaryStatus = enum {
+    safe,
+    unsafe,
+    unresolved,
+};
+
+fn resolvedPathIsWithinWorkspaceRoot(workspace_root: []const u8, resolved_path: []const u8) bool {
+    if (eql(workspace_root, resolved_path)) return true;
+    if (!std.mem.startsWith(u8, resolved_path, workspace_root)) return false;
+    return resolved_path.len > workspace_root.len and std.fs.path.isSep(resolved_path[workspace_root.len]);
+}
+
+fn workspaceBoundaryStatus(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+) !WorkspaceBoundaryStatus {
+    const trimmed = if (trimAscii(path).len > 0) trimAscii(path) else ".";
+    if (!pathIsLexicallySafeForWorkspace(trimmed)) return .unsafe;
+
+    const workspace_root = std.fs.cwd().realpathAlloc(allocator, ".") catch return .unresolved;
+    defer allocator.free(workspace_root);
+
+    var current = trimmed;
+    while (true) {
+        const resolved = std.fs.cwd().realpathAlloc(allocator, current) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => null,
+            error.AccessDenied => return .unresolved,
+            error.SymLinkLoop => return .unsafe,
+            else => return .unresolved,
+        };
+        if (resolved) |owned_resolved| {
+            defer allocator.free(owned_resolved);
+            return if (resolvedPathIsWithinWorkspaceRoot(workspace_root, owned_resolved)) .safe else .unsafe;
+        }
+
+        if (eql(current, ".") or current.len == 0) return .safe;
+        current = std.fs.path.dirname(current) orelse ".";
+    }
 }
 
 pub fn toolRequestContextSpec(request: ToolRequest, spec: RuntimeToolSpec) RuntimeFailureContextSpec {
@@ -830,6 +872,7 @@ pub fn validatedToolContextSpec(request: ValidatedToolRequest) RuntimeFailureCon
 }
 
 pub fn validateToolRequest(
+    allocator: std.mem.Allocator,
     config: AppConfig,
     state: *AppState,
     actor: Actor,
@@ -846,7 +889,8 @@ pub fn validateToolRequest(
     switch (spec.kind) {
         .list_files => {
             const path = if (trimAscii(request.path).len > 0) trimAscii(request.path) else ".";
-            if (!pathIsSafeForWorkspace(path)) {
+            const boundary_status = workspaceBoundaryStatus(allocator, path) catch .unresolved;
+            if (boundary_status == .unsafe) {
                 return .{
                     .blocked = buildRuntimeFailure(state, actor, lane, "TOOL_PATH_UNSAFE", "tool path escapes workspace policy", .{
                         .tool = spec.name,
@@ -871,7 +915,8 @@ pub fn validateToolRequest(
                     .blocked = buildRuntimeFailure(state, actor, lane, "MISSING_PATH", "read_file requires a path", toolRequestContextSpec(request, spec)),
                 };
             }
-            if (!pathIsSafeForWorkspace(path)) {
+            const boundary_status = workspaceBoundaryStatus(allocator, path) catch .unresolved;
+            if (boundary_status == .unsafe) {
                 return .{
                     .blocked = buildRuntimeFailure(state, actor, lane, "TOOL_PATH_UNSAFE", "tool path escapes workspace policy", .{
                         .tool = spec.name,
@@ -897,7 +942,8 @@ pub fn validateToolRequest(
                 };
             }
             const path = if (trimAscii(request.path).len > 0) trimAscii(request.path) else ".";
-            if (!pathIsSafeForWorkspace(path)) {
+            const boundary_status = workspaceBoundaryStatus(allocator, path) catch .unresolved;
+            if (boundary_status == .unsafe) {
                 return .{
                     .blocked = buildRuntimeFailure(state, actor, lane, "TOOL_PATH_UNSAFE", "tool path escapes workspace policy", .{
                         .tool = spec.name,
@@ -923,7 +969,7 @@ pub fn validateToolRequest(
                     .blocked = buildRuntimeFailure(state, actor, lane, "MISSING_COMMAND", "run_command requires a command", toolRequestContextSpec(request, spec)),
                 };
             }
-            if (commandIsBlocked(config.policy.blocked_command_patterns, command)) {
+            if (commandIsBlocked(allocator, config.policy.blocked_command_patterns, command) catch false) {
                 return .{
                     .blocked = buildRuntimeFailure(state, actor, lane, "TOOL_POLICY_BLOCKED", "run_command blocked by policy", .{
                         .tool = spec.name,
@@ -948,7 +994,8 @@ pub fn validateToolRequest(
                     .blocked = buildRuntimeFailure(state, actor, lane, "MISSING_PATH", "write_file requires a path", toolRequestContextSpec(request, spec)),
                 };
             }
-            if (!pathIsSafeForWorkspace(path)) {
+            const boundary_status = workspaceBoundaryStatus(allocator, path) catch .unresolved;
+            if (boundary_status == .unsafe) {
                 return .{
                     .blocked = buildRuntimeFailure(state, actor, lane, "TOOL_PATH_UNSAFE", "tool path escapes workspace policy", .{
                         .tool = spec.name,

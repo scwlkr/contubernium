@@ -32,6 +32,8 @@ Shared rules:
 - `session-bypass` is an operator-consented approval mode for guarded runtime tools: it is active-session-only, off by default, reversible, and surfaced in session state and durable logs.
 - `Timeout behavior` is either `None` or `Policy default` (`policy.tool_timeout_ms`).
 - Success responses return human-readable `summary` text to the active turn.
+- Workspace path inputs are validated against the resolved workspace root; symlinked targets or ancestors that resolve outside the workspace are rejected before execution.
+- Blocked shell command patterns are evaluated against shell-command segments and their leading command tokens rather than by raw substring search.
 
 ## list_files
 

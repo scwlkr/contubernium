@@ -2924,9 +2924,158 @@ pub fn pathIsSafeForWrite(path: []const u8) bool {
     return pathIsSafeForWorkspace(path);
 }
 
-pub fn commandIsBlocked(patterns: []const []const u8, command: []const u8) bool {
-    for (patterns) |pattern| {
-        if (std.mem.indexOf(u8, command, pattern) != null) return true;
+const blocked_command_wrappers = [_][]const u8{
+    "builtin",
+    "command",
+    "env",
+    "noglob",
+    "sudo",
+};
+
+const ShellSegment = struct {
+    text: []const u8,
+    next_index: usize,
+};
+
+fn isShellWhitespace(byte: u8) bool {
+    return byte == ' ' or byte == '\t' or byte == '\r' or byte == '\n';
+}
+
+fn shellSeparatorLength(command: []const u8, index: usize) usize {
+    if (index >= command.len) return 0;
+    return switch (command[index]) {
+        ';', '\n' => 1,
+        '&' => if (index + 1 < command.len and command[index + 1] == '&') 2 else 1,
+        '|' => if (index + 1 < command.len and command[index + 1] == '|') 2 else 1,
+        else => 0,
+    };
+}
+
+fn nextShellSegment(command: []const u8, start_index: usize) ?ShellSegment {
+    var index = start_index;
+    while (index < command.len) {
+        const separator_len = shellSeparatorLength(command, index);
+        if (separator_len > 0) {
+            index += separator_len;
+            continue;
+        }
+        if (isShellWhitespace(command[index])) {
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    if (index >= command.len) return null;
+
+    const segment_start = index;
+    var in_single_quotes = false;
+    var in_double_quotes = false;
+    var escaped = false;
+    while (index < command.len) : (index += 1) {
+        const byte = command[index];
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (byte == '\\' and !in_single_quotes) {
+            escaped = true;
+            continue;
+        }
+        if (byte == '\'' and !in_double_quotes) {
+            in_single_quotes = !in_single_quotes;
+            continue;
+        }
+        if (byte == '"' and !in_single_quotes) {
+            in_double_quotes = !in_double_quotes;
+            continue;
+        }
+        if (!in_single_quotes and !in_double_quotes) {
+            const separator_len = shellSeparatorLength(command, index);
+            if (separator_len > 0) {
+                return .{
+                    .text = trimAscii(command[segment_start..index]),
+                    .next_index = index + separator_len,
+                };
+            }
+        }
+    }
+
+    return .{
+        .text = trimAscii(command[segment_start..]),
+        .next_index = command.len,
+    };
+}
+
+fn isBlockedCommandWrapper(token: []const u8) bool {
+    return containsString(blocked_command_wrappers[0..], token);
+}
+
+fn isEnvironmentAssignmentToken(token: []const u8) bool {
+    const equals_index = std.mem.indexOfScalar(u8, token, '=') orelse return false;
+    if (equals_index == 0) return false;
+
+    const name = token[0..equals_index];
+    const first = name[0];
+    if (!std.ascii.isAlphabetic(first) and first != '_') return false;
+    for (name[1..]) |byte| {
+        if (!std.ascii.isAlphanumeric(byte) and byte != '_') return false;
+    }
+    return true;
+}
+
+fn nextPatternToken(iterator: anytype) ?[]const u8 {
+    const token = iterator.next() orelse return null;
+    return token[0..token.len];
+}
+
+fn nextCommandToken(iterator: anytype) ?[]const u8 {
+    while (iterator.next()) |raw_token| {
+        const token = raw_token[0..raw_token.len];
+        if (token.len == 0) continue;
+        if (isEnvironmentAssignmentToken(token)) continue;
+        if (isBlockedCommandWrapper(token)) continue;
+        return token;
+    }
+    return null;
+}
+
+fn shellSegmentMatchesBlockedPattern(
+    allocator: std.mem.Allocator,
+    segment: []const u8,
+    pattern: []const u8,
+) !bool {
+    const ShellArgIterator = std.process.ArgIteratorGeneral(.{ .single_quotes = true });
+
+    var pattern_iterator = try ShellArgIterator.init(allocator, pattern);
+    defer pattern_iterator.deinit();
+    var command_iterator = try ShellArgIterator.init(allocator, segment);
+    defer command_iterator.deinit();
+
+    var expected = nextPatternToken(&pattern_iterator) orelse return false;
+    var actual = nextCommandToken(&command_iterator) orelse return false;
+
+    while (true) {
+        if (!eql(actual, expected)) return false;
+        expected = nextPatternToken(&pattern_iterator) orelse return true;
+        actual = nextCommandToken(&command_iterator) orelse return false;
+    }
+}
+
+pub fn commandIsBlocked(
+    allocator: std.mem.Allocator,
+    patterns: []const []const u8,
+    command: []const u8,
+) !bool {
+    var next_index: usize = 0;
+    while (nextShellSegment(command, next_index)) |segment| {
+        next_index = segment.next_index;
+        if (segment.text.len == 0) continue;
+
+        for (patterns) |pattern| {
+            const trimmed_pattern = trimAscii(pattern);
+            if (trimmed_pattern.len == 0) continue;
+            if (try shellSegmentMatchesBlockedPattern(allocator, segment.text, trimmed_pattern)) return true;
+        }
     }
     return false;
 }
