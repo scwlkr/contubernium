@@ -931,9 +931,9 @@ fn renderCliMissionOutcome(allocator: std.mem.Allocator, state: AppState) ![]con
     }
 
     if (pendingUserReplyQuestion(state).len > 0) {
-        try writeCliMissionStatus(writer, styled, "awaiting reply", interactive_color_gold);
+        try writeCliMissionStatus(writer, styled, "awaiting your command", interactive_color_gold);
         try writeCliMissionSection(writer, styled, "prompt", state.mission.initial_prompt, interactive_color_prompt, true);
-        try writeCliMissionSection(writer, styled, "question", pendingUserReplyQuestion(state), interactive_color_gold, false);
+        try writeCliMissionSection(writer, styled, "question", pendingUserReplyQuestion(state), interactive_color_blue, false);
         return try buffer.toOwnedSlice(allocator);
     }
 
@@ -1071,10 +1071,44 @@ fn inlineUserPromptSupported() bool {
     return std.posix.isatty(std.posix.STDIN_FILENO) and std.posix.isatty(std.posix.STDOUT_FILENO);
 }
 
+fn renderInlineUserReplyPrompt(
+    allocator: std.mem.Allocator,
+    question: []const u8,
+    styled: bool,
+) ![]const u8 {
+    var buffer: std.ArrayList(u8) = .empty;
+    errdefer buffer.deinit(allocator);
+    const writer = buffer.writer(allocator);
+
+    if (styled) {
+        try writer.print(
+            "\n{s}awaiting your command{s}\n{s}question{s}\n  {s}{s}{s}\n{s}reply > {s}",
+            .{
+                interactive_color_gold,
+                interactive_reset,
+                interactive_color_muted,
+                interactive_reset,
+                interactive_color_blue,
+                question,
+                interactive_reset,
+                interactive_color_muted,
+                interactive_reset,
+            },
+        );
+    } else {
+        try writer.print("\nawaiting your command\nquestion\n  {s}\nreply > ", .{question});
+    }
+
+    return try buffer.toOwnedSlice(allocator);
+}
+
 fn promptInlineUserReply(allocator: std.mem.Allocator, question: []const u8) !?[]const u8 {
     if (question.len == 0) return null;
 
-    try stdoutPrint("\nfollow-up\n  {s}\nreply > ", .{question});
+    const prompt = try renderInlineUserReplyPrompt(allocator, question, cliStylesEnabled(std.posix.STDOUT_FILENO));
+    defer allocator.free(prompt);
+
+    try stdoutPrint("{s}", .{prompt});
     const input = try std.fs.File.stdin().deprecatedReader().readUntilDelimiterOrEofAlloc(allocator, '\n', 4096);
     const text = input orelse return null;
     defer allocator.free(text);
@@ -1792,4 +1826,34 @@ test "visibleSpinnerPreview fits the terminal budget" {
     try testing.expect(clipped.len <= cli_spinner_visible_preview_cap);
     try testing.expect(clipped.len <= 48 - ("III".len + 1 + cli_spinner_label.len + 1 + "explorator".len) - 1);
     try testing.expect(std.mem.endsWith(u8, preview, clipped));
+}
+
+test "renderCliMissionOutcome labels follow-up questions as awaiting your command" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var state = AppState{};
+    state.mission.initial_prompt = "audit the project";
+    state.runtime_session.status = .blocked;
+    state.runtime_session.last_failure.code = "USER_INPUT_REQUIRED";
+    state.runtime_session.last_failure.cause = "Which phase should decanus inspect first?";
+
+    const rendered = try renderCliMissionOutcome(allocator, state);
+    defer allocator.free(rendered);
+
+    try testing.expect(std.mem.indexOf(u8, rendered, "awaiting your command") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "question") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "Which phase should decanus inspect first?") != null);
+}
+
+test "renderInlineUserReplyPrompt highlights the pending question" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const rendered = try renderInlineUserReplyPrompt(allocator, "Which phase needs attention?", true);
+    defer allocator.free(rendered);
+
+    try testing.expect(std.mem.indexOf(u8, rendered, "awaiting your command") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, interactive_color_blue) != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "Which phase needs attention?") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "reply >") != null);
 }

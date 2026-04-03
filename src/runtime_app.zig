@@ -1328,9 +1328,54 @@ test "buildDecanusUserPrompt includes project context and memory layers" {
     try testing.expect(std.mem.indexOf(u8, prompt, "Valid fallback lane values: backend, frontend, systems, qa, research, brand, docs") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Helper specialists are explicit-only.") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Mission handling rules") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "If the prompt is only a greeting, presence check, or other conversational request") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "If the prompt is only a greeting, presence check, or other conversational opener") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Assigned specialist tasks") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "none assigned") != null);
+}
+
+test "buildDecanusUserPrompt keeps greeting-only mission intake in follow-up mode" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+    var state = AppState{};
+    state.mission.initial_prompt = "hello";
+    state.mission.current_goal = "open the mission conversation";
+
+    const prompt = try buildDecanusUserPrompt(allocator, AppConfig{}, &state, .{
+        .architecture = .{
+            .kind = "architecture",
+            .path = ".contubernium/ARCHITECTURE.md",
+            .content = "System structure lives here.",
+            .source_chars = 26,
+        },
+        .plan = .{
+            .kind = "plan",
+            .path = ".contubernium/PLAN.md",
+            .content = "Current execution order lives here.",
+            .source_chars = 35,
+        },
+        .project_context = .{
+            .kind = "project_context",
+            .path = ".contubernium/PROJECT_CONTEXT.md",
+            .content = "Goals and constraints live here.",
+            .source_chars = 32,
+        },
+        .project = .{
+            .kind = "project",
+            .path = ".contubernium/project.md",
+            .content = "Architecture decisions live here.",
+            .source_chars = 32,
+        },
+        .global = .{
+            .kind = "global",
+            .path = ".contubernium/global.md",
+            .content = "Reusable strategies live here.",
+            .source_chars = 30,
+        },
+    });
+
+    try testing.expect(std.mem.indexOf(u8, prompt, "return `action: \"ask_user\"`") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "keep the mission alive by leaving `final_response` empty") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "`Hello! What can I help with?`") != null);
 }
 
 test "buildPromptWithContextBudget blocks when a required memory layer is missing" {
