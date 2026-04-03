@@ -1479,12 +1479,15 @@ test "buildDecanusUserPrompt includes project context and memory layers" {
         },
     });
 
-    try testing.expect(std.mem.indexOf(u8, prompt, "Architecture file: .contubernium/ARCHITECTURE.md") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Memory ledger") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "- architecture: path=.contubernium/ARCHITECTURE.md") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "System structure lives here.") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "Project memory file: .contubernium/project.md") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "- project: path=.contubernium/project.md") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Architecture decisions live here.") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "Global memory file: .contubernium/global.md") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "- global: path=.contubernium/global.md") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Reusable strategies live here.") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Current execution order lives here.") == null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "selected=no") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Core specialists (lane-default routing):") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "faber -> lane=backend") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Helper specialists (explicit invocation only):") != null);
@@ -1494,7 +1497,7 @@ test "buildDecanusUserPrompt includes project context and memory layers" {
     try testing.expect(std.mem.indexOf(u8, prompt, "Active ask:") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Session seed (initial prompt):") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Mission handling rules") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "Background evidence") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Selected evidence excerpts") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Treat the latest non-empty operator reply as the active ask by default.") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "If the prompt is only a greeting, presence check, or other conversational opener") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "If the operator asks what the project does, what problem it solves, or requests a plain-language summary") != null);
@@ -1560,7 +1563,7 @@ test "buildDecanusUserPrompt foregrounds the latest operator turn ahead of backg
     });
 
     const active_ask_index = std.mem.indexOf(u8, prompt, "Active ask:\nwhat gaps do you see?") orelse return error.TestUnexpectedResult;
-    const architecture_index = std.mem.indexOf(u8, prompt, "Architecture file: .contubernium/ARCHITECTURE.md") orelse return error.TestUnexpectedResult;
+    const architecture_index = std.mem.indexOf(u8, prompt, "- architecture: path=.contubernium/ARCHITECTURE.md") orelse return error.TestUnexpectedResult;
     try testing.expect(active_ask_index < architecture_index);
     try testing.expect(std.mem.indexOf(u8, prompt, "Latest operator reply:\nwhat gaps do you see?") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Session seed (initial prompt):\nwhat does this project do?") != null);
@@ -1640,6 +1643,13 @@ test "buildSpecialistUserPrompt surfaces the subordinate tool loop contract" {
         },
     }, "backend");
 
+    try testing.expect(std.mem.indexOf(u8, prompt, "Project Evidence") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Memory ledger") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Architecture note.") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Plan note.") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Context note.") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Project note.") == null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Global note.") == null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Subordinate tool loop") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Status: result_available") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Completed cycles: 1") != null);
@@ -1647,6 +1657,65 @@ test "buildSpecialistUserPrompt surfaces the subordinate tool loop contract" {
     try testing.expect(std.mem.indexOf(u8, prompt, "Last result summary: read_file src/runtime_core.zig") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Return to: decanus") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Scope.restricted_actions: chain_other_specialists, expand_scope, finalize_mission") != null);
+}
+
+test "buildDecanusUserPrompt keeps prompt weight on selected evidence only" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+    var state = AppState{};
+    state.mission.initial_prompt = "summarize the project";
+    state.mission.current_goal = "reduce prompt weight";
+
+    const architecture_text =
+        "ARCHITECTURE:\nThis architecture excerpt should stay visible because decanus needs structural evidence.";
+    const plan_text =
+        "PLAN:\nThis plan excerpt should stay out of the selected evidence block for the default decanus profile.";
+    const project_context_text =
+        "PROJECT_CONTEXT:\nThis project context excerpt should stay visible because it defines the active mission frame.";
+    const project_text =
+        "PROJECT:\nThis project memory excerpt should stay visible because it holds durable project knowledge.";
+    const global_text =
+        "GLOBAL:\nThis global memory excerpt should stay visible because it carries constitutional operating guidance.";
+
+    const prompt = try buildDecanusUserPrompt(allocator, AppConfig{}, &state, .{
+        .architecture = .{
+            .kind = "architecture",
+            .path = ".contubernium/ARCHITECTURE.md",
+            .content = architecture_text,
+            .source_chars = architecture_text.len,
+        },
+        .plan = .{
+            .kind = "plan",
+            .path = ".contubernium/PLAN.md",
+            .content = plan_text,
+            .source_chars = plan_text.len,
+        },
+        .project_context = .{
+            .kind = "project_context",
+            .path = ".contubernium/PROJECT_CONTEXT.md",
+            .content = project_context_text,
+            .source_chars = project_context_text.len,
+        },
+        .project = .{
+            .kind = "project",
+            .path = ".contubernium/project.md",
+            .content = project_text,
+            .source_chars = project_text.len,
+        },
+        .global = .{
+            .kind = "global",
+            .path = ".contubernium/global.md",
+            .content = global_text,
+            .source_chars = global_text.len,
+        },
+    });
+
+    try testing.expect(std.mem.indexOf(u8, prompt, project_context_text) != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, project_text) != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, architecture_text) != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, global_text) != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, plan_text) == null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "- plan: path=.contubernium/PLAN.md") != null);
 }
 
 test "searchText includes hidden project context while pruning runtime noise" {

@@ -362,20 +362,415 @@ pub fn decanusMissionHandlingGuidanceText() []const u8 {
         "- The task summary only reflects specialist work that has been explicitly assigned during this mission.\n";
 }
 
-pub fn buildDecanusUserPrompt(
+const PromptMemoryKind = enum {
+    architecture,
+    plan,
+    project_context,
+    project,
+    global,
+};
+
+const PromptEvidenceProfile = struct {
+    ordered_kinds: []const PromptMemoryKind,
+    max_layers: usize,
+    excerpt_chars: usize,
+};
+
+const PromptEvidenceSelection = struct {
+    kinds: [5]PromptMemoryKind = undefined,
+    len: usize = 0,
+
+    fn append(self: *PromptEvidenceSelection, kind: PromptMemoryKind) void {
+        self.kinds[self.len] = kind;
+        self.len += 1;
+    }
+
+    fn items(self: *const PromptEvidenceSelection) []const PromptMemoryKind {
+        return self.kinds[0..self.len];
+    }
+};
+
+fn maybeFreePromptText(allocator: std.mem.Allocator, text: []const u8, sentinel: []const u8) void {
+    if (!eql(text, sentinel)) allocator.free(text);
+}
+
+const DecanusPromptStaticFragments = struct {
+    constraints: []const u8,
+    success_criteria: []const u8,
+    task_summary: []const u8,
+    routing: []const u8,
+    memory_ledger: []const u8,
+    selected_memory: []const u8,
+    last_decision: []const u8,
+    last_tool_result: []const u8,
+
+    pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        maybeFreePromptText(allocator, self.constraints, "");
+        maybeFreePromptText(allocator, self.success_criteria, "");
+        maybeFreePromptText(allocator, self.task_summary, "none assigned");
+        allocator.free(self.routing);
+        allocator.free(self.memory_ledger);
+        allocator.free(self.selected_memory);
+        allocator.free(self.last_decision);
+        allocator.free(self.last_tool_result);
+    }
+};
+
+const SpecialistPromptStaticFragments = struct {
+    context_files: []const u8,
+    context_constraints: []const u8,
+    context_dependencies: []const u8,
+    allowed_actions: []const u8,
+    restricted_actions: []const u8,
+    relevant_memory: []const u8,
+    memory_ledger: []const u8,
+    selected_memory: []const u8,
+    last_tool_result: []const u8,
+
+    pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        maybeFreePromptText(allocator, self.context_files, "");
+        maybeFreePromptText(allocator, self.context_constraints, "");
+        maybeFreePromptText(allocator, self.context_dependencies, "");
+        maybeFreePromptText(allocator, self.allowed_actions, "");
+        maybeFreePromptText(allocator, self.restricted_actions, "");
+        maybeFreePromptText(allocator, self.relevant_memory, "");
+        allocator.free(self.memory_ledger);
+        allocator.free(self.selected_memory);
+        allocator.free(self.last_tool_result);
+    }
+};
+
+const PromptStaticFragments = union(enum) {
+    decanus: DecanusPromptStaticFragments,
+    specialist: SpecialistPromptStaticFragments,
+
+    pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        switch (self) {
+            .decanus => |fragments| fragments.deinit(allocator),
+            .specialist => |fragments| fragments.deinit(allocator),
+        }
+    }
+};
+
+const decanus_memory_order = [_]PromptMemoryKind{
+    .project_context,
+    .project,
+    .architecture,
+    .global,
+    .plan,
+};
+
+const backend_memory_order = [_]PromptMemoryKind{
+    .architecture,
+    .plan,
+    .project_context,
+    .project,
+    .global,
+};
+
+const frontend_memory_order = [_]PromptMemoryKind{
+    .project_context,
+    .project,
+    .architecture,
+    .plan,
+    .global,
+};
+
+const systems_memory_order = [_]PromptMemoryKind{
+    .architecture,
+    .plan,
+    .project,
+    .project_context,
+    .global,
+};
+
+const qa_memory_order = [_]PromptMemoryKind{
+    .architecture,
+    .plan,
+    .project_context,
+    .project,
+    .global,
+};
+
+const research_memory_order = [_]PromptMemoryKind{
+    .project_context,
+    .architecture,
+    .plan,
+    .global,
+    .project,
+};
+
+const brand_memory_order = [_]PromptMemoryKind{
+    .project_context,
+    .project,
+    .global,
+    .plan,
+    .architecture,
+};
+
+const docs_memory_order = [_]PromptMemoryKind{
+    .project_context,
+    .project,
+    .plan,
+    .architecture,
+    .global,
+};
+
+const media_memory_order = [_]PromptMemoryKind{
+    .project_context,
+    .project,
+    .global,
+    .plan,
+    .architecture,
+};
+
+const bulk_ops_memory_order = [_]PromptMemoryKind{
+    .plan,
+    .project,
+    .project_context,
+    .architecture,
+    .global,
+};
+
+fn promptEvidenceProfile(mode: PromptMode, lane: Lane) PromptEvidenceProfile {
+    return switch (mode) {
+        .decanus => .{
+            .ordered_kinds = &decanus_memory_order,
+            .max_layers = 4,
+            .excerpt_chars = 720,
+        },
+        .specialist => switch (lane) {
+            .backend => .{
+                .ordered_kinds = &backend_memory_order,
+                .max_layers = 3,
+                .excerpt_chars = 680,
+            },
+            .frontend => .{
+                .ordered_kinds = &frontend_memory_order,
+                .max_layers = 3,
+                .excerpt_chars = 680,
+            },
+            .systems => .{
+                .ordered_kinds = &systems_memory_order,
+                .max_layers = 3,
+                .excerpt_chars = 680,
+            },
+            .qa => .{
+                .ordered_kinds = &qa_memory_order,
+                .max_layers = 3,
+                .excerpt_chars = 640,
+            },
+            .research => .{
+                .ordered_kinds = &research_memory_order,
+                .max_layers = 3,
+                .excerpt_chars = 680,
+            },
+            .brand => .{
+                .ordered_kinds = &brand_memory_order,
+                .max_layers = 3,
+                .excerpt_chars = 680,
+            },
+            .docs => .{
+                .ordered_kinds = &docs_memory_order,
+                .max_layers = 3,
+                .excerpt_chars = 680,
+            },
+            .media => .{
+                .ordered_kinds = &media_memory_order,
+                .max_layers = 3,
+                .excerpt_chars = 680,
+            },
+            .bulk_ops => .{
+                .ordered_kinds = &bulk_ops_memory_order,
+                .max_layers = 3,
+                .excerpt_chars = 680,
+            },
+            .command => .{
+                .ordered_kinds = &decanus_memory_order,
+                .max_layers = 3,
+                .excerpt_chars = 680,
+            },
+        },
+    };
+}
+
+fn memoryKindLabel(kind: PromptMemoryKind) []const u8 {
+    return switch (kind) {
+        .architecture => "architecture",
+        .plan => "plan",
+        .project_context => "project_context",
+        .project => "project",
+        .global => "global",
+    };
+}
+
+fn memoryTitle(kind: PromptMemoryKind) []const u8 {
+    return switch (kind) {
+        .architecture => "Architecture",
+        .plan => "Plan",
+        .project_context => "Project context",
+        .project => "Project memory",
+        .global => "Global memory",
+    };
+}
+
+fn memoryLayerForKind(memory: RuntimeMemorySnapshot, kind: PromptMemoryKind) RuntimeMemoryLayer {
+    return switch (kind) {
+        .architecture => memory.architecture,
+        .plan => memory.plan,
+        .project_context => memory.project_context,
+        .project => memory.project,
+        .global => memory.global,
+    };
+}
+
+fn selectedMemoryKinds(memory: RuntimeMemorySnapshot, profile: PromptEvidenceProfile) PromptEvidenceSelection {
+    var selection = PromptEvidenceSelection{};
+    for (profile.ordered_kinds) |kind| {
+        if (selection.len >= profile.max_layers) break;
+        const layer = memoryLayerForKind(memory, kind);
+        if (layer.content.len == 0) continue;
+        selection.append(kind);
+    }
+    return selection;
+}
+
+fn selectionContains(selection: PromptEvidenceSelection, kind: PromptMemoryKind) bool {
+    for (selection.items()) |selected| {
+        if (selected == kind) return true;
+    }
+    return false;
+}
+
+fn buildMemoryLedger(
+    allocator: std.mem.Allocator,
+    memory: RuntimeMemorySnapshot,
+    selection: PromptEvidenceSelection,
+) ![]const u8 {
+    var buffer: std.ArrayList(u8) = .empty;
+    errdefer buffer.deinit(allocator);
+    const writer = buffer.writer(allocator);
+
+    inline for ([_]PromptMemoryKind{ .architecture, .plan, .project_context, .project, .global }) |kind| {
+        const layer = memoryLayerForKind(memory, kind);
+        try writer.print(
+            "- {s}: path={s} status={s} source_chars={d} prompt_chars={d} selected={s}\n",
+            .{
+                memoryKindLabel(kind),
+                layer.path,
+                runtimeMemoryStatusLabel(layer),
+                layer.source_chars,
+                layer.content.len,
+                if (selectionContains(selection, kind)) "yes" else "no",
+            },
+        );
+    }
+
+    return try buffer.toOwnedSlice(allocator);
+}
+
+fn buildSelectedMemoryExcerpts(
+    allocator: std.mem.Allocator,
+    memory: RuntimeMemorySnapshot,
+    selection: PromptEvidenceSelection,
+    excerpt_chars: usize,
+) ![]const u8 {
+    if (selection.len == 0) return try allocator.dupe(u8, "none captured");
+
+    var buffer: std.ArrayList(u8) = .empty;
+    errdefer buffer.deinit(allocator);
+    const writer = buffer.writer(allocator);
+
+    for (selection.items()) |kind| {
+        const layer = memoryLayerForKind(memory, kind);
+        const excerpt = try truncateText(allocator, runtimeMemoryPromptText(layer), excerpt_chars);
+        defer if (excerpt.ptr != layer.content.ptr) allocator.free(excerpt);
+
+        try writer.print(
+            "{s}: path={s} status={s} source_chars={d}\n{s}\n\n",
+            .{
+                memoryTitle(kind),
+                layer.path,
+                runtimeMemoryStatusLabel(layer),
+                layer.source_chars,
+                excerpt,
+            },
+        );
+    }
+
+    return try buffer.toOwnedSlice(allocator);
+}
+
+fn compactPromptField(
+    allocator: std.mem.Allocator,
+    value: []const u8,
+    max_lines: usize,
+    max_chars: usize,
+    fallback: []const u8,
+) ![]const u8 {
+    const source = if (trimAscii(value).len > 0) value else fallback;
+    return try compactTextForUi(allocator, source, max_lines, max_chars);
+}
+
+fn buildDecanusPromptStaticFragments(
     allocator: std.mem.Allocator,
     config: AppConfig,
     state: *const AppState,
     memory: RuntimeMemorySnapshot,
+) !DecanusPromptStaticFragments {
+    const profile = promptEvidenceProfile(.decanus, .command);
+    const selection = selectedMemoryKinds(memory, profile);
+    const tool_result_limit = if (config.context.max_tool_result_chars < 420) config.context.max_tool_result_chars else 420;
+
+    return .{
+        .constraints = try joinStrings(allocator, state.mission.constraints, ", "),
+        .success_criteria = try joinStrings(allocator, state.mission.success_criteria, ", "),
+        .task_summary = try taskSummaryText(allocator, state.tasks),
+        .routing = try specialistRoutingGuideText(allocator),
+        .memory_ledger = try buildMemoryLedger(allocator, memory, selection),
+        .selected_memory = try buildSelectedMemoryExcerpts(allocator, memory, selection, profile.excerpt_chars),
+        .last_decision = try compactPromptField(allocator, state.agent_loop.last_decision, 4, 320, "none"),
+        .last_tool_result = try compactPromptField(allocator, state.agent_loop.last_tool_result, 5, tool_result_limit, "none"),
+    };
+}
+
+fn buildSpecialistPromptStaticFragments(
+    allocator: std.mem.Allocator,
+    config: AppConfig,
+    state: *const AppState,
+    memory: RuntimeMemorySnapshot,
+    lane: []const u8,
+) !SpecialistPromptStaticFragments {
+    const lane_value = std.meta.stringToEnum(Lane, lane) orelse .docs;
+    const task = taskForLaneConst(state, lane_value);
+    const profile = promptEvidenceProfile(.specialist, lane_value);
+    const selection = selectedMemoryKinds(memory, profile);
+    const tool_result_limit = if (config.context.max_tool_result_chars < 420) config.context.max_tool_result_chars else 420;
+
+    return .{
+        .context_files = try joinStrings(allocator, task.invocation.context.files, ", "),
+        .context_constraints = try joinStrings(allocator, task.invocation.context.constraints, ", "),
+        .context_dependencies = try joinStrings(allocator, task.invocation.context.dependencies, ", "),
+        .allowed_actions = try joinStrings(allocator, task.invocation.scope.allowed_actions, ", "),
+        .restricted_actions = try joinStrings(allocator, task.invocation.scope.restricted_actions, ", "),
+        .relevant_memory = try joinStrings(allocator, task.invocation.memory.relevant, ", "),
+        .memory_ledger = try buildMemoryLedger(allocator, memory, selection),
+        .selected_memory = try buildSelectedMemoryExcerpts(allocator, memory, selection, profile.excerpt_chars),
+        .last_tool_result = try compactPromptField(allocator, state.agent_loop.last_tool_result, 5, tool_result_limit, "none"),
+    };
+}
+
+fn buildDecanusUserPromptFromFragments(
+    allocator: std.mem.Allocator,
+    config: AppConfig,
+    state: *const AppState,
+    fragments: DecanusPromptStaticFragments,
 ) ![]const u8 {
     const history = try recentHistoryText(allocator, state.agent_loop.history, config.context.max_history_events);
-    const task_summary = try taskSummaryText(allocator, state.tasks);
-    const constraints = try joinStrings(allocator, state.mission.constraints, ", ");
-    const success_criteria = try joinStrings(allocator, state.mission.success_criteria, ", ");
+    defer maybeFreePromptText(allocator, history, "none");
+
     const latest_operator_reply = latestOperatorReply(state.agent_loop.history);
     const active_ask = activeMissionAsk(state, latest_operator_reply);
-    const specialist_routing = try specialistRoutingGuideText(allocator);
-    defer allocator.free(specialist_routing);
     var buffer: std.ArrayList(u8) = .empty;
     const writer = buffer.writer(allocator);
 
@@ -404,49 +799,12 @@ pub fn buildDecanusUserPrompt(
         \\----------------------
         \\{s}
         \\
-    ,
-        .{
-            active_ask,
-            if (latest_operator_reply.len > 0) latest_operator_reply else "none",
-            state.mission.current_goal,
-            state.mission.initial_prompt,
-            constraints,
-            success_criteria,
-            decanusMissionHandlingGuidanceText(),
-        },
-    );
-
-    try writer.print(
-        \\Background evidence
-        \\-------------------
-        \\Architecture file: {s}
-        \\Architecture status: {s}
-        \\Architecture source chars: {d}
-        \\Architecture:
+        \\Memory ledger
+        \\-------------
         \\{s}
         \\
-        \\Plan file: {s}
-        \\Plan status: {s}
-        \\Plan source chars: {d}
-        \\Plan:
-        \\{s}
-        \\
-        \\Project context file: {s}
-        \\Project context status: {s}
-        \\Project context source chars: {d}
-        \\Project context:
-        \\{s}
-        \\
-        \\Project memory file: {s}
-        \\Project memory status: {s}
-        \\Project memory source chars: {d}
-        \\Project memory:
-        \\{s}
-        \\
-        \\Global memory file: {s}
-        \\Global memory status: {s}
-        \\Global memory source chars: {d}
-        \\Global memory:
+        \\Selected evidence excerpts
+        \\--------------------------
         \\{s}
         \\
         \\Specialist routing
@@ -474,33 +832,22 @@ pub fn buildDecanusUserPrompt(
         \\
     ,
         .{
-            memory.architecture.path,
-            runtimeMemoryStatusLabel(memory.architecture),
-            memory.architecture.source_chars,
-            runtimeMemoryPromptText(memory.architecture),
-            memory.plan.path,
-            runtimeMemoryStatusLabel(memory.plan),
-            memory.plan.source_chars,
-            runtimeMemoryPromptText(memory.plan),
-            memory.project_context.path,
-            runtimeMemoryStatusLabel(memory.project_context),
-            memory.project_context.source_chars,
-            runtimeMemoryPromptText(memory.project_context),
-            memory.project.path,
-            runtimeMemoryStatusLabel(memory.project),
-            memory.project.source_chars,
-            runtimeMemoryPromptText(memory.project),
-            memory.global.path,
-            runtimeMemoryStatusLabel(memory.global),
-            memory.global.source_chars,
-            runtimeMemoryPromptText(memory.global),
-            specialist_routing,
+            active_ask,
+            if (latest_operator_reply.len > 0) latest_operator_reply else "none",
+            state.mission.current_goal,
+            state.mission.initial_prompt,
+            fragments.constraints,
+            fragments.success_criteria,
+            decanusMissionHandlingGuidanceText(),
+            fragments.memory_ledger,
+            fragments.selected_memory,
+            fragments.routing,
             state.agent_loop.iteration,
             @tagName(state.agent_loop.status),
             maybeActorName(state.agent_loop.active_tool),
-            state.agent_loop.last_decision,
-            state.agent_loop.last_tool_result,
-            task_summary,
+            fragments.last_decision,
+            fragments.last_tool_result,
+            fragments.task_summary,
             history,
         },
     );
@@ -508,83 +855,32 @@ pub fn buildDecanusUserPrompt(
     return try truncateOwnedText(allocator, try buffer.toOwnedSlice(allocator), config.context.max_prompt_chars);
 }
 
-pub fn buildSpecialistUserPrompt(
+fn buildSpecialistUserPromptFromFragments(
     allocator: std.mem.Allocator,
     config: AppConfig,
     state: *const AppState,
-    memory: RuntimeMemorySnapshot,
+    fragments: SpecialistPromptStaticFragments,
     lane: []const u8,
 ) ![]const u8 {
+    const history = try recentHistoryText(allocator, state.agent_loop.history, config.context.max_history_events);
+    defer maybeFreePromptText(allocator, history, "none");
+
     const lane_value = std.meta.stringToEnum(Lane, lane) orelse .docs;
     const task = taskForLaneConst(state, lane_value);
-    const history = try recentHistoryText(allocator, state.agent_loop.history, config.context.max_history_events);
-    const context_files = try joinStrings(allocator, task.invocation.context.files, ", ");
-    const context_constraints = try joinStrings(allocator, task.invocation.context.constraints, ", ");
-    const context_dependencies = try joinStrings(allocator, task.invocation.context.dependencies, ", ");
-    const allowed_actions = try joinStrings(allocator, task.invocation.scope.allowed_actions, ", ");
-    const restricted_actions = try joinStrings(allocator, task.invocation.scope.restricted_actions, ", ");
-    const relevant_memory = try joinStrings(allocator, task.invocation.memory.relevant, ", ");
     var buffer: std.ArrayList(u8) = .empty;
     const writer = buffer.writer(allocator);
 
     try writer.print(
-        \\Project Context
-        \\---------------
-        \\Architecture file: {s}
-        \\Architecture status: {s}
-        \\Architecture source chars: {d}
-        \\Architecture:
+        \\Project Evidence
+        \\----------------
+        \\Memory ledger
+        \\-------------
         \\{s}
         \\
-        \\Plan file: {s}
-        \\Plan status: {s}
-        \\Plan source chars: {d}
-        \\Plan:
+        \\Selected evidence excerpts
+        \\--------------------------
         \\{s}
         \\
-        \\Project context file: {s}
-        \\Project context status: {s}
-        \\Project context source chars: {d}
-        \\Project context:
-        \\{s}
-        \\
-        \\Project memory file: {s}
-        \\Project memory status: {s}
-        \\Project memory source chars: {d}
-        \\Project memory:
-        \\{s}
-        \\
-        \\Global memory file: {s}
-        \\Global memory status: {s}
-        \\Global memory source chars: {d}
-        \\Global memory:
-        \\{s}
-        \\
-    ,
-        .{
-            memory.architecture.path,
-            runtimeMemoryStatusLabel(memory.architecture),
-            memory.architecture.source_chars,
-            runtimeMemoryPromptText(memory.architecture),
-            memory.plan.path,
-            runtimeMemoryStatusLabel(memory.plan),
-            memory.plan.source_chars,
-            runtimeMemoryPromptText(memory.plan),
-            memory.project_context.path,
-            runtimeMemoryStatusLabel(memory.project_context),
-            memory.project_context.source_chars,
-            runtimeMemoryPromptText(memory.project_context),
-            memory.project.path,
-            runtimeMemoryStatusLabel(memory.project),
-            memory.project.source_chars,
-            runtimeMemoryPromptText(memory.project),
-            memory.global.path,
-            runtimeMemoryStatusLabel(memory.global),
-            memory.global.source_chars,
-            runtimeMemoryPromptText(memory.global),
-        },
-    );
-    try writer.print(
         \\Live State
         \\----------
         \\Initial prompt:
@@ -632,6 +928,8 @@ pub fn buildSpecialistUserPrompt(
         \\
     ,
         .{
+            fragments.memory_ledger,
+            fragments.selected_memory,
             state.mission.initial_prompt,
             state.mission.current_goal,
             lane,
@@ -641,25 +939,48 @@ pub fn buildSpecialistUserPrompt(
             task.invocation.objective,
             task.invocation.completion_signal,
             task.invocation.context.project,
-            context_files,
-            context_constraints,
-            context_dependencies,
-            allowed_actions,
-            restricted_actions,
+            fragments.context_files,
+            fragments.context_constraints,
+            fragments.context_dependencies,
+            fragments.allowed_actions,
+            fragments.restricted_actions,
             task.invocation.memory.mission,
             task.invocation.memory.project,
-            relevant_memory,
+            fragments.relevant_memory,
             @tagName(task.invocation.tool_loop.status),
             task.invocation.tool_loop.cycle_count,
             task.invocation.tool_loop.last_request_summary,
             task.invocation.tool_loop.last_result_summary,
             actorName(task.invocation.return_to),
-            state.agent_loop.last_tool_result,
+            fragments.last_tool_result,
             history,
         },
     );
 
     return try truncateOwnedText(allocator, try buffer.toOwnedSlice(allocator), config.context.max_prompt_chars);
+}
+
+pub fn buildDecanusUserPrompt(
+    allocator: std.mem.Allocator,
+    config: AppConfig,
+    state: *const AppState,
+    memory: RuntimeMemorySnapshot,
+) ![]const u8 {
+    const fragments = try buildDecanusPromptStaticFragments(allocator, config, state, memory);
+    defer fragments.deinit(allocator);
+    return try buildDecanusUserPromptFromFragments(allocator, config, state, fragments);
+}
+
+pub fn buildSpecialistUserPrompt(
+    allocator: std.mem.Allocator,
+    config: AppConfig,
+    state: *const AppState,
+    memory: RuntimeMemorySnapshot,
+    lane: []const u8,
+) ![]const u8 {
+    const fragments = try buildSpecialistPromptStaticFragments(allocator, config, state, memory, lane);
+    defer fragments.deinit(allocator);
+    return try buildSpecialistUserPromptFromFragments(allocator, config, state, fragments, lane);
 }
 
 pub fn assembleSystemPrompt(
@@ -1075,11 +1396,21 @@ pub fn buildPromptWithContextBudget(
         );
     }
 
+    var static_fragments = switch (mode) {
+        .decanus => PromptStaticFragments{
+            .decanus = try buildDecanusPromptStaticFragments(allocator, config, state, memory),
+        },
+        .specialist => PromptStaticFragments{
+            .specialist = try buildSpecialistPromptStaticFragments(allocator, config, state, memory, lane),
+        },
+    };
+    defer static_fragments.deinit(allocator);
+
     var attempt: usize = 0;
     while (true) {
-        const user_prompt = switch (mode) {
-            .decanus => try buildDecanusUserPrompt(allocator, config, state, memory),
-            .specialist => try buildSpecialistUserPrompt(allocator, config, state, memory, lane),
+        const user_prompt = switch (static_fragments) {
+            .decanus => |fragments| try buildDecanusUserPromptFromFragments(allocator, config, state, fragments),
+            .specialist => |fragments| try buildSpecialistUserPromptFromFragments(allocator, config, state, fragments, lane),
         };
         const estimate = estimatePromptBudget(config.context, system_prompt, user_prompt);
         applyPromptBudgetEstimate(state, config.context, estimate);
