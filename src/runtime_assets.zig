@@ -2,6 +2,7 @@ const std = @import("std");
 const embedded = @import("embedded_assets.zig");
 const core = @import("runtime_core.zig");
 const model_json = @import("runtime_model_json.zig");
+const persistence = @import("runtime_persistence.zig");
 const provider = @import("runtime_provider.zig");
 const max_file_bytes = core.max_file_bytes;
 const runtime_dir_name = core.runtime_dir_name;
@@ -242,6 +243,7 @@ const looksLikeListFilesCommand = provider.looksLikeListFilesCommand;
 const providerStructuredChatOllamaStreaming = provider.providerStructuredChatOllamaStreaming;
 const processOllamaPendingLines = provider.processOllamaPendingLines;
 const processOllamaPendingLine = provider.processOllamaPendingLine;
+const writeJsonAtomic = persistence.writeJsonAtomic;
 
 const global_memory_version_prefix = "<!-- contubernium:global-memory format_version=";
 const global_memory_version_suffix = " -->";
@@ -408,29 +410,13 @@ pub fn normalizeGlobalMemoryMarkdown(allocator: std.mem.Allocator, data: []const
 }
 
 pub fn saveState(allocator: std.mem.Allocator, path: []const u8, state: AppState) !void {
-    const rendered = try std.fmt.allocPrint(
-        allocator,
-        "{f}",
-        .{std.json.fmt(state, .{ .whitespace = .indent_2 })},
-    );
-    defer allocator.free(rendered);
-    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(rendered);
+    try writeJsonAtomic(allocator, path, state);
 }
 
 pub fn saveConfig(allocator: std.mem.Allocator, path: []const u8, config: AppConfig) !void {
     var normalized = config;
     syncConfigProviderMirrors(&normalized);
-    const rendered = try std.fmt.allocPrint(
-        allocator,
-        "{f}",
-        .{std.json.fmt(normalized, .{ .whitespace = .indent_2 })},
-    );
-    defer allocator.free(rendered);
-    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(rendered);
+    try writeJsonAtomic(allocator, path, normalized);
 }
 
 pub fn loadRuntimeRunLog(allocator: std.mem.Allocator, path: []const u8) !RuntimeRunLog {
@@ -443,15 +429,7 @@ pub fn loadRuntimeRunLog(allocator: std.mem.Allocator, path: []const u8) !Runtim
 }
 
 pub fn saveRuntimeRunLog(allocator: std.mem.Allocator, path: []const u8, log: RuntimeRunLog) !void {
-    const rendered = try std.fmt.allocPrint(
-        allocator,
-        "{f}",
-        .{std.json.fmt(log, .{ .whitespace = .indent_2 })},
-    );
-    defer allocator.free(rendered);
-    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(rendered);
+    try writeJsonAtomic(allocator, path, log);
 }
 
 pub fn loadSessionIndex(allocator: std.mem.Allocator, path: []const u8) !SessionIndex {
@@ -467,18 +445,7 @@ pub fn loadSessionIndex(allocator: std.mem.Allocator, path: []const u8) !Session
 }
 
 pub fn saveSessionIndex(allocator: std.mem.Allocator, path: []const u8, index: SessionIndex) !void {
-    const rendered = try std.fmt.allocPrint(
-        allocator,
-        "{f}",
-        .{std.json.fmt(index, .{ .whitespace = .indent_2 })},
-    );
-    defer allocator.free(rendered);
-    if (std.fs.path.dirname(path)) |dir_name| {
-        try std.fs.cwd().makePath(dir_name);
-    }
-    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(rendered);
+    try writeJsonAtomic(allocator, path, index);
 }
 
 pub fn loadSessionRecord(allocator: std.mem.Allocator, path: []const u8) !SessionRecord {
@@ -491,18 +458,7 @@ pub fn loadSessionRecord(allocator: std.mem.Allocator, path: []const u8) !Sessio
 }
 
 pub fn saveSessionRecord(allocator: std.mem.Allocator, path: []const u8, record: SessionRecord) !void {
-    const rendered = try std.fmt.allocPrint(
-        allocator,
-        "{f}",
-        .{std.json.fmt(record, .{ .whitespace = .indent_2 })},
-    );
-    defer allocator.free(rendered);
-    if (std.fs.path.dirname(path)) |dir_name| {
-        try std.fs.cwd().makePath(dir_name);
-    }
-    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(rendered);
+    try writeJsonAtomic(allocator, path, record);
 }
 
 pub fn loadGlobalSessionIndex(allocator: std.mem.Allocator, path: []const u8) !GlobalSessionIndex {
@@ -518,18 +474,7 @@ pub fn loadGlobalSessionIndex(allocator: std.mem.Allocator, path: []const u8) !G
 }
 
 pub fn saveGlobalSessionIndex(allocator: std.mem.Allocator, path: []const u8, index: GlobalSessionIndex) !void {
-    const rendered = try std.fmt.allocPrint(
-        allocator,
-        "{f}",
-        .{std.json.fmt(index, .{ .whitespace = .indent_2 })},
-    );
-    defer allocator.free(rendered);
-    if (std.fs.path.dirname(path)) |dir_name| {
-        try std.fs.cwd().makePath(dir_name);
-    }
-    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
-    defer file.close();
-    try file.writeAll(rendered);
+    try writeJsonAtomic(allocator, path, index);
 }
 
 pub fn makeSessionId(allocator: std.mem.Allocator) ![]const u8 {
