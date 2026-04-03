@@ -294,6 +294,12 @@ fn latestOperatorReply(history: []const HistoryEntry) []const u8 {
     return "";
 }
 
+fn activeMissionAsk(state: *const AppState, latest_operator_reply: []const u8) []const u8 {
+    if (latest_operator_reply.len > 0) return latest_operator_reply;
+    if (state.mission.current_goal.len > 0) return state.mission.current_goal;
+    return state.mission.initial_prompt;
+}
+
 pub fn specialistRoutingGuideText(allocator: std.mem.Allocator) ![]const u8 {
     var buffer: std.ArrayList(u8) = .empty;
     const writer = buffer.writer(allocator);
@@ -331,14 +337,19 @@ pub fn specialistRoutingGuideText(allocator: std.mem.Allocator) ![]const u8 {
 }
 
 pub fn decanusMissionHandlingGuidanceText() []const u8 {
-    return "- Treat the initial prompt as mission origin, not as a permanent override of newer operator replies.\n" ++
-        "- When the operator provides a follow-up reply, treat that latest reply and the current goal as the controlling input unless it directly conflicts with explicit prior constraints.\n" ++
+    return "- Treat the latest non-empty operator reply as the active ask by default.\n" ++
+        "- Treat the initial prompt as session origin and durable provenance, not as a sticky override of newer operator replies.\n" ++
+        "- Use the current goal as the active interpretation of the latest meaningful operator turn.\n" ++
+        "- Follow-up replies override stale mission framing unless they directly conflict with explicit prior constraints.\n" ++
+        "- Prior plan files, history, and memory layers are background context and evidence, not controlling instructions unless the operator explicitly reaffirms them.\n" ++
+        "- Keep commander orchestration in the background unless you need to surface a real block, required approval, or necessary clarification.\n" ++
+        "- Reserve `action: \"ask_user\"` for real ambiguity, missing required constraints, or approvals that actually require the operator.\n" ++
         "- If the prompt is only a greeting, presence check, or other conversational opener that does not ask for project work yet, return `action: \"ask_user\"`.\n" ++
         "- For that greeting-only opener, keep the mission alive by leaving `final_response` empty and setting `question` to a short direct follow-up such as `Hello! What can I help with?`.\n" ++
         "- If the operator asks what the project does, what problem it solves, or requests a plain-language summary, use the already-loaded architecture, plan, project context, project memory, and global memory as evidence before asking follow-up questions or requesting more tools.\n" ++
         "- When that loaded memory already answers the question, prefer `action: \"finish\"` with a concise summary instead of broad repository searches.\n" ++
         "- If a search is still necessary, target the narrowest path that can answer the question. Do not leave `search_text` at the workspace root when the intent is to inspect project context files.\n" ++
-        "- If the operator asks for a read-only exploratory assessment or explicitly says to choose the scope yourself, pick a reasonable bounded review lens and proceed. Do not bounce harmless prioritization back to the operator.\n" ++
+        "- If the operator asks for a read-only exploratory assessment or explicitly says to choose the scope yourself, pick a reasonable bounded review lens and proceed with a bounded read-only assessment. Do not bounce harmless prioritization back to the operator.\n" ++
         "- Do not invoke a specialist just because routing options exist.\n" ++
         "- Do not invent follow-on implementation work from the routing table or from unassigned task lanes.\n" ++
         "- The task summary only reflects specialist work that has been explicitly assigned during this mission.\n";
@@ -355,14 +366,52 @@ pub fn buildDecanusUserPrompt(
     const constraints = try joinStrings(allocator, state.mission.constraints, ", ");
     const success_criteria = try joinStrings(allocator, state.mission.success_criteria, ", ");
     const latest_operator_reply = latestOperatorReply(state.agent_loop.history);
+    const active_ask = activeMissionAsk(state, latest_operator_reply);
     const specialist_routing = try specialistRoutingGuideText(allocator);
     defer allocator.free(specialist_routing);
     var buffer: std.ArrayList(u8) = .empty;
     const writer = buffer.writer(allocator);
 
     try writer.print(
-        \\Project Context
-        \\---------------
+        \\Live State
+        \\----------
+        \\Active ask:
+        \\{s}
+        \\
+        \\Latest operator reply:
+        \\{s}
+        \\
+        \\Current goal:
+        \\{s}
+        \\
+        \\Session seed (initial prompt):
+        \\{s}
+        \\
+        \\Constraints:
+        \\{s}
+        \\
+        \\Success criteria:
+        \\{s}
+        \\
+        \\Mission handling rules
+        \\----------------------
+        \\{s}
+        \\
+    ,
+        .{
+            active_ask,
+            if (latest_operator_reply.len > 0) latest_operator_reply else "none",
+            state.mission.current_goal,
+            state.mission.initial_prompt,
+            constraints,
+            success_criteria,
+            decanusMissionHandlingGuidanceText(),
+        },
+    );
+
+    try writer.print(
+        \\Background evidence
+        \\-------------------
         \\Architecture file: {s}
         \\Architecture status: {s}
         \\Architecture source chars: {d}
@@ -393,6 +442,29 @@ pub fn buildDecanusUserPrompt(
         \\Global memory:
         \\{s}
         \\
+        \\Specialist routing
+        \\-----------------
+        \\{s}
+        \\Valid fallback lane values: backend, frontend, systems, qa, research, brand, docs
+        \\Helper specialists are explicit-only. Use `agent_call` or `actor` for helpers; helper work records its own lane after the target is resolved.
+        \\When `action` is `invoke_specialist`, prefer a bare agent name in `agent_call`. Use an exact `agent::ACTION` only when it matches a real Contubernium action file.
+        \\
+        \\Iteration: {d}
+        \\Status: {s}
+        \\Active tool: {s}
+        \\Last decision: {s}
+        \\Last tool result: {s}
+        \\
+        \\Assigned specialist tasks
+        \\-------------------------
+        \\{s}
+        \\
+        \\Recent history
+        \\--------------
+        \\{s}
+        \\
+        \\Return a valid DecanusDecision JSON object.
+        \\
     ,
         .{
             memory.architecture.path,
@@ -415,62 +487,7 @@ pub fn buildDecanusUserPrompt(
             runtimeMemoryStatusLabel(memory.global),
             memory.global.source_chars,
             runtimeMemoryPromptText(memory.global),
-        },
-    );
-    try writer.print(
-        \\Live State
-        \\----------
-        \\Initial prompt:
-        \\{s}
-        \\
-        \\Current goal:
-        \\{s}
-        \\
-        \\Latest operator reply:
-        \\{s}
-        \\
-        \\Constraints:
-        \\{s}
-        \\
-        \\Success criteria:
-        \\{s}
-        \\
-        \\Specialist routing
-        \\-----------------
-        \\{s}
-        \\Valid fallback lane values: backend, frontend, systems, qa, research, brand, docs
-        \\Helper specialists are explicit-only. Use `agent_call` or `actor` for helpers; helper work records its own lane after the target is resolved.
-        \\When `action` is `invoke_specialist`, prefer a bare agent name in `agent_call`. Use an exact `agent::ACTION` only when it matches a real Contubernium action file.
-        \\
-        \\Mission handling rules
-        \\----------------------
-        \\{s}
-        \\
-        \\Iteration: {d}
-        \\Status: {s}
-        \\Active tool: {s}
-        \\Last decision: {s}
-        \\Last tool result: {s}
-        \\
-        \\Assigned specialist tasks
-        \\-------------------------
-        \\{s}
-        \\
-        \\Recent history
-        \\--------------
-        \\{s}
-        \\
-        \\Return a valid DecanusDecision JSON object.
-        \\
-    ,
-        .{
-            state.mission.initial_prompt,
-            state.mission.current_goal,
-            if (latest_operator_reply.len > 0) latest_operator_reply else "none",
-            constraints,
-            success_criteria,
             specialist_routing,
-            decanusMissionHandlingGuidanceText(),
             state.agent_loop.iteration,
             @tagName(state.agent_loop.status),
             maybeActorName(state.agent_loop.active_tool),

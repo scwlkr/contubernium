@@ -623,6 +623,7 @@ test "assembleSystemPrompt distinguishes decanus action files from JSON action v
 
     try testing.expect(std.mem.indexOf(u8, prompt, "The JSON `action` field must be one of: `finish`, `invoke_specialist`, `tool_request`, `ask_user`, or `blocked`.") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Do not use action file names such as `EVALUATE_LOOP`, `INVOKE_SPECIALIST`, or `FINISH_MISSION`") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "treat the latest non-empty operator reply as the active ask by default") != null);
 }
 
 test "taskSummaryText hides unassigned default lanes" {
@@ -947,9 +948,21 @@ test "resetStateForMission resets canonical phase 3 state surfaces" {
     var state = AppState{};
     state.current_actor = .artifex;
     state.global_status = .waiting_on_tool;
+    state.mission.current_goal = "stale follow-up";
     state.mission.final_response = "stale response";
     state.agent_loop.iteration = 9;
     state.agent_loop.last_tool_result = "stale";
+    state.agent_loop.history = &.{
+        .{
+            .iteration = 7,
+            .type = "operator_reply",
+            .actor = "operator",
+            .lane = "",
+            .summary = "stale reply",
+            .artifacts = &.{},
+            .timestamp = "7",
+        },
+    };
     state.agent_loop.intermediate_results = &.{
         .{
             .iteration = 1,
@@ -971,6 +984,7 @@ test "resetStateForMission resets canonical phase 3 state surfaces" {
     try testing.expectEqualStrings("", state.mission.final_response);
     try testing.expectEqual(LoopStatus.awaiting_initial_prompt, state.agent_loop.status);
     try testing.expectEqual(@as(usize, 0), state.agent_loop.iteration);
+    try testing.expectEqual(@as(usize, 0), state.agent_loop.history.len);
     try testing.expectEqual(@as(usize, 0), state.agent_loop.intermediate_results.len);
     try testing.expectEqual(RuntimeStatus.idle, state.runtime_session.status);
     try testing.expectEqual(TaskStatus.pending, state.tasks.backend.status);
@@ -1078,6 +1092,27 @@ test "resumeAfterOperatorReply clears stale completion state" {
     try testing.expectEqual(@as(usize, 1), state.agent_loop.history.len);
     try testing.expectEqualStrings("operator_reply", state.agent_loop.history[0].type);
     try testing.expectEqualStrings("what else does it do?", state.agent_loop.history[0].summary);
+}
+
+test "resumeAfterOperatorReply ignores empty replies" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+    var state = AppState{};
+    state.global_status = .complete;
+    state.mission.initial_prompt = "what does this project do?";
+    state.mission.current_goal = "what gaps do you see?";
+    state.mission.final_response = "previous answer";
+    state.runtime_session.status = .complete;
+    state.agent_loop.status = .complete;
+
+    try resumeAfterOperatorReply(allocator, &state, "   \n\t ");
+
+    try testing.expectEqual(GlobalStatus.complete, state.global_status);
+    try testing.expectEqual(LoopStatus.complete, state.agent_loop.status);
+    try testing.expectEqual(RuntimeStatus.complete, state.runtime_session.status);
+    try testing.expectEqualStrings("what gaps do you see?", state.mission.current_goal);
+    try testing.expectEqualStrings("previous answer", state.mission.final_response);
+    try testing.expectEqual(@as(usize, 0), state.agent_loop.history.len);
 }
 
 test "runtime tool result records an explicit loop result step" {
@@ -1350,11 +1385,73 @@ test "buildDecanusUserPrompt includes project context and memory layers" {
     try testing.expect(std.mem.indexOf(u8, prompt, "praeco -> lane=media") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Valid fallback lane values: backend, frontend, systems, qa, research, brand, docs") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Helper specialists are explicit-only.") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Active ask:") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Session seed (initial prompt):") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Mission handling rules") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Background evidence") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Treat the latest non-empty operator reply as the active ask by default.") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "If the prompt is only a greeting, presence check, or other conversational opener") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "If the operator asks what the project does, what problem it solves, or requests a plain-language summary") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Assigned specialist tasks") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "none assigned") != null);
+}
+
+test "buildDecanusUserPrompt foregrounds the latest operator turn ahead of background evidence" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+    var state = AppState{};
+    state.mission.initial_prompt = "what does this project do?";
+    state.mission.current_goal = "what gaps do you see?";
+    state.agent_loop.history = &.{
+        .{
+            .iteration = 2,
+            .type = "operator_reply",
+            .actor = "operator",
+            .lane = "",
+            .summary = "what gaps do you see?",
+            .artifacts = &.{},
+            .timestamp = "2",
+        },
+    };
+
+    const prompt = try buildDecanusUserPrompt(allocator, AppConfig{}, &state, .{
+        .architecture = .{
+            .kind = "architecture",
+            .path = ".contubernium/ARCHITECTURE.md",
+            .content = "System structure lives here.",
+            .source_chars = 26,
+        },
+        .plan = .{
+            .kind = "plan",
+            .path = ".contubernium/PLAN.md",
+            .content = "Current execution order lives here.",
+            .source_chars = 35,
+        },
+        .project_context = .{
+            .kind = "project_context",
+            .path = ".contubernium/PROJECT_CONTEXT.md",
+            .content = "Goals and constraints live here.",
+            .source_chars = 32,
+        },
+        .project = .{
+            .kind = "project",
+            .path = ".contubernium/project.md",
+            .content = "Architecture decisions live here.",
+            .source_chars = 32,
+        },
+        .global = .{
+            .kind = "global",
+            .path = ".contubernium/global.md",
+            .content = "Reusable strategies live here.",
+            .source_chars = 30,
+        },
+    });
+
+    const active_ask_index = std.mem.indexOf(u8, prompt, "Active ask:\nwhat gaps do you see?") orelse return error.TestUnexpectedResult;
+    const architecture_index = std.mem.indexOf(u8, prompt, "Architecture file: .contubernium/ARCHITECTURE.md") orelse return error.TestUnexpectedResult;
+    try testing.expect(active_ask_index < architecture_index);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Latest operator reply:\nwhat gaps do you see?") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Session seed (initial prompt):\nwhat does this project do?") != null);
 }
 
 test "searchText includes hidden project context while pruning runtime noise" {
@@ -1469,7 +1566,8 @@ test "buildDecanusUserPrompt keeps greeting-only mission intake in follow-up mod
     try testing.expect(std.mem.indexOf(u8, prompt, "`Hello! What can I help with?`") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Latest operator reply:") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "you decide what to inspect") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "Treat the initial prompt as mission origin") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Treat the initial prompt as session origin and durable provenance") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Treat the latest non-empty operator reply as the active ask by default.") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "If the operator asks for a read-only exploratory assessment or explicitly says to choose the scope yourself") != null);
 }
 

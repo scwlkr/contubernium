@@ -1,7 +1,7 @@
 {
   "action": "finish | tool_request | ask_user | blocked",
   "reasoning": "short explanation",
-  "current_goal": "current mission focus",
+  "current_goal": "active interpretation of the latest meaningful operator turn",
   "final_response": "required when action is finish",
   "question": "required when action is ask_user",
   "blocked_reason": "required when action is blocked",

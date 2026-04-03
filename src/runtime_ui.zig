@@ -939,27 +939,27 @@ fn renderCliMissionOutcome(allocator: std.mem.Allocator, state: AppState) ![]con
 
     if (state.mission.final_response.len > 0 and state.global_status == .complete) {
         try writeCliMissionStatus(writer, styled, "complete", interactive_color_success);
-        try writeCliMissionSection(writer, styled, "prompt", state.mission.initial_prompt, interactive_color_prompt, true);
+        try writeCliMissionAskContext(writer, styled, state);
         try writeCliMissionSection(writer, styled, "response", state.mission.final_response, interactive_color_blue, false);
         return try buffer.toOwnedSlice(allocator);
     }
 
     if (pendingUserReplyQuestion(state).len > 0) {
         try writeCliMissionStatus(writer, styled, "awaiting your command", interactive_color_gold);
-        try writeCliMissionSection(writer, styled, "prompt", state.mission.initial_prompt, interactive_color_prompt, true);
+        try writeCliMissionAskContext(writer, styled, state);
         try writeCliMissionSection(writer, styled, "question", pendingUserReplyQuestion(state), interactive_color_blue, false);
         return try buffer.toOwnedSlice(allocator);
     }
 
     if (state.runtime_session.last_error.len > 0 and state.runtime_session.status == .blocked) {
         try writeCliMissionStatus(writer, styled, "blocked", interactive_color_danger);
-        try writeCliMissionSection(writer, styled, "prompt", state.mission.initial_prompt, interactive_color_prompt, true);
+        try writeCliMissionAskContext(writer, styled, state);
         try writeCliMissionSection(writer, styled, "error", state.runtime_session.last_error, interactive_color_danger, false);
         return try buffer.toOwnedSlice(allocator);
     }
 
     try writeCliMissionStatus(writer, styled, "in progress", interactive_color_gold);
-    try writeCliMissionSection(writer, styled, "prompt", state.mission.initial_prompt, interactive_color_prompt, true);
+    try writeCliMissionAskContext(writer, styled, state);
     if (state.agent_loop.active_tool) |active_tool| {
         const status_text = try std.fmt.allocPrint(allocator, "current actor: {s}\nactive tool: {s}\niteration: {d}", .{
             actorName(state.current_actor),
@@ -985,6 +985,19 @@ fn printCliMissionOutcome(allocator: std.mem.Allocator, state: AppState) !void {
     const rendered = try renderCliMissionOutcome(allocator, state);
     defer allocator.free(rendered);
     try stdoutPrint("{s}\n", .{rendered});
+}
+
+fn activeMissionAsk(state: AppState) []const u8 {
+    if (state.mission.current_goal.len > 0) return state.mission.current_goal;
+    return state.mission.initial_prompt;
+}
+
+fn writeCliMissionAskContext(writer: anytype, styled: bool, state: AppState) !void {
+    const ask = activeMissionAsk(state);
+    try writeCliMissionSection(writer, styled, "ask", ask, interactive_color_prompt, true);
+    if (state.mission.initial_prompt.len > 0 and ask.len > 0 and !eql(state.mission.initial_prompt, ask)) {
+        try writeCliMissionSection(writer, styled, "session seed", state.mission.initial_prompt, interactive_color_muted, false);
+    }
 }
 
 fn writeCliMissionStatus(writer: anytype, styled: bool, status: []const u8, color: []const u8) !void {
@@ -1877,6 +1890,7 @@ test "renderCliMissionOutcome labels follow-up questions as awaiting your comman
     const allocator = testing.allocator;
     var state = AppState{};
     state.mission.initial_prompt = "audit the project";
+    state.mission.current_goal = "what gaps do you see?";
     state.runtime_session.status = .blocked;
     state.runtime_session.last_failure.code = "USER_INPUT_REQUIRED";
     state.runtime_session.last_failure.cause = "Which phase should decanus inspect first?";
@@ -1885,8 +1899,27 @@ test "renderCliMissionOutcome labels follow-up questions as awaiting your comman
     defer allocator.free(rendered);
 
     try testing.expect(std.mem.indexOf(u8, rendered, "awaiting your command") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "\n\nask\n  what gaps do you see?") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "\n\nsession seed\n  audit the project") != null);
     try testing.expect(std.mem.indexOf(u8, rendered, "question") != null);
     try testing.expect(std.mem.indexOf(u8, rendered, "Which phase should decanus inspect first?") != null);
+}
+
+test "renderCliMissionOutcome foregrounds the active ask after a follow-up" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    var state = AppState{};
+    state.global_status = .complete;
+    state.mission.initial_prompt = "what does this project do?";
+    state.mission.current_goal = "what gaps do you see?";
+    state.mission.final_response = "Here are the main gaps.";
+
+    const rendered = try renderCliMissionOutcome(allocator, state);
+    defer allocator.free(rendered);
+
+    try testing.expect(std.mem.indexOf(u8, rendered, "\n\nask\n  what gaps do you see?") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "\n\nsession seed\n  what does this project do?") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "\n\nresponse\n  Here are the main gaps.") != null);
 }
 
 test "renderInlineUserReplyPrompt highlights the pending question" {
