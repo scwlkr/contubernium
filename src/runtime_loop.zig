@@ -586,7 +586,7 @@ pub fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state
         .output = prettyPrintJson(allocator, decision_raw_text) catch decision_raw_text,
     });
     try stateManager(state).appendIntermediateResult(allocator, "decision_summary", .decanus, .command, decision_summary);
-    emitStreamFinalize(hooks, "decanus", decision_summary, .summary);
+    emitStreamFinalize(hooks, "decanus", "decision", decision_summary, .summary);
 
     stateManager(state).setCurrentGoal(decision.current_goal);
     stateManager(state).setLastDecision(if (normalized_action.len > 0) normalized_action else decision.action);
@@ -603,6 +603,7 @@ pub fn executeDecanusTurn(allocator: std.mem.Allocator, config: AppConfig, state
         );
         const tool_result = try executeToolRequests(allocator, config, state, .decanus, .command, decision.tool_requests, hooks);
         try stateManager(state).recordRuntimeToolResultStep(allocator, .decanus, .command, tool_result.summary);
+        emitStreamFinalize(hooks, "decanus", "runtime tool", tool_result.summary, .summary);
         if (tool_result.blocked) {
             stateManager(state).markBlocked(.decanus, .command, tool_result.summary);
             try logRuntimeEvent(allocator, config, state, .{
@@ -914,7 +915,7 @@ pub fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, st
         .output = prettyPrintJson(allocator, response.raw_text) catch response.raw_text,
     });
     try stateManager(state).appendIntermediateResult(allocator, "specialist_summary", actor, lane, result_summary);
-    emitStreamFinalize(hooks, actorName(actor), result_summary, .summary);
+    emitStreamFinalize(hooks, actorName(actor), "summary", result_summary, .summary);
 
     if (result.tool_requests.len > 0 or eql(result.action, "tool_request")) {
         emitLog(
@@ -927,6 +928,7 @@ pub fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, st
         );
         const tool_result = try executeToolRequests(allocator, config, state, actor, lane, result.tool_requests, hooks);
         try stateManager(state).recordRuntimeToolResultStep(allocator, actor, lane, tool_result.summary);
+        emitStreamFinalize(hooks, actorName(actor), "runtime tool", tool_result.summary, .summary);
         if (tool_result.blocked) {
             task.invocation.status = .blocked;
             stateManager(state).markBlocked(actor, lane, tool_result.summary);
@@ -979,6 +981,7 @@ pub fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, st
             .output = invocation_result.summary,
             .include_snapshot = true,
         });
+        emitStreamFinalize(hooks, actorName(actor), "result", invocation_result.summary, .summary);
         emitLog(hooks, .success, actorName(actor), "Lane Complete", invocation_result.summary, .plain);
         emitStateSnapshot(hooks, config, state.*);
         return .advanced;
@@ -990,6 +993,7 @@ pub fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, st
             .detail = "specialist requested user input",
         });
         try stateManager(state).finalizeInvocationWithHistory(allocator, lane, actor, invocation_result, result.description);
+        emitStreamFinalize(hooks, actorName(actor), "result", invocation_result.summary, .summary);
         recordRuntimeFailure(state, failure);
         stateManager(state).markBlocked(actor, lane, result.question);
         try appendHistory(allocator, state, .{
@@ -1022,6 +1026,7 @@ pub fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, st
         .detail = "specialist returned a blocked state",
     });
     try stateManager(state).finalizeInvocationWithHistory(allocator, lane, actor, invocation_result, result.description);
+    emitStreamFinalize(hooks, actorName(actor), "result", invocation_result.summary, .summary);
     recordRuntimeFailure(state, blocked_failure);
     stateManager(state).markBlocked(actor, lane, state.runtime_session.last_error);
     try logRuntimeEvent(allocator, config, state, .{
@@ -1202,7 +1207,7 @@ pub fn structuredChatWithRepair(
                 .error_text = failure.cause,
                 .failure = failure,
             });
-            emitStreamFinalize(hooks, actor, response.raw_text, .json);
+            emitStreamFinalize(hooks, actor, "report", response.raw_text, .json);
             const next_attempt = attempt + 1;
             if (!used_escalation and shouldEscalateAfterRepair(config, next_attempt)) {
                 if (owned_repair_prompt) |prompt| {

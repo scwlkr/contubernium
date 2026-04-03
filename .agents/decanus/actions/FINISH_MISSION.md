@@ -22,6 +22,7 @@ Use `FINISH_MISSION` when:
 - all required work is done
 - the requested deliverable has been produced
 - the operator explicitly wants a stopping-point response now
+- the operator explicitly asked for a read-only exploratory response and the current evidence supports a useful synthesis now
 - the system needs operator input or approval and no safe progress remains
 - a final blocked condition has been made explicit and cannot be reduced further inside the loop
 

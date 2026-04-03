@@ -2376,10 +2376,11 @@ pub fn emitStreamChunk(hooks: RuntimeHooks, actor: []const u8, text: []const u8)
     });
 }
 
-pub fn emitStreamFinalize(hooks: RuntimeHooks, actor: []const u8, text: []const u8, highlight: HighlightKind) void {
+pub fn emitStreamFinalize(hooks: RuntimeHooks, actor: []const u8, title: []const u8, text: []const u8, highlight: HighlightKind) void {
     hooks.emit(.{
         .kind = .stream_finalize,
         .actor = actor,
+        .title = title,
         .text = text,
         .highlight = highlight,
     });

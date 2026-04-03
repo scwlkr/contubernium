@@ -275,6 +275,9 @@ const resolveGlobalSessionIndexPath = assets_mod.resolveGlobalSessionIndexPath;
 const initializeRuntimeRunLog = assets_mod.initializeRuntimeRunLog;
 const appendRuntimeRunLogEvent = assets_mod.appendRuntimeRunLogEvent;
 const logRuntimeEvent = assets_mod.logRuntimeEvent;
+
+extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern fn unsetenv(name: [*:0]const u8) c_int;
 const providerListModels = provider_mod.providerListModels;
 const providerStructuredChat = provider_mod.providerStructuredChat;
 const MessagePayload = provider_mod.MessagePayload;
@@ -480,7 +483,7 @@ fn startMockLlamaCppServer(allocator: std.mem.Allocator, port: u16) !MockLlamaCp
         else => return err,
     };
 
-    std.time.sleep(250 * std.time.ns_per_ms);
+    std.Thread.sleep(250 * std.time.ns_per_ms);
     return .{ .child = child };
 }
 
@@ -623,7 +626,6 @@ test "assembleSystemPrompt distinguishes decanus action files from JSON action v
 
     try testing.expect(std.mem.indexOf(u8, prompt, "The JSON `action` field must be one of: `finish`, `invoke_specialist`, `tool_request`, `ask_user`, or `blocked`.") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Do not use action file names such as `EVALUATE_LOOP`, `INVOKE_SPECIALIST`, or `FINISH_MISSION`") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "treat the latest non-empty operator reply as the active ask by default") != null);
 }
 
 test "taskSummaryText hides unassigned default lanes" {
@@ -1422,6 +1424,9 @@ test "buildDecanusUserPrompt includes project context and memory layers" {
     try testing.expect(std.mem.indexOf(u8, prompt, "Treat the latest non-empty operator reply as the active ask by default.") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "If the prompt is only a greeting, presence check, or other conversational opener") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "If the operator asks what the project does, what problem it solves, or requests a plain-language summary") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "If the operator explicitly asks to brainstorm, ideate, or explore what could take the project further") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "technical, philosophical, product, UX, operational, advertising, distribution, or messaging gaps") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Do not bounce open-ended creative exploration back to the operator just because the scope is broad.") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "prefer markdown-lite operator output") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Use fenced code blocks for commands, snippets, or exact terminal text when verbatim formatting helps.") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Keep trivial one-line replies short.") != null);
@@ -1602,6 +1607,7 @@ test "buildDecanusUserPrompt keeps greeting-only mission intake in follow-up mod
     try testing.expect(std.mem.indexOf(u8, prompt, "Treat the initial prompt as session origin and durable provenance") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Treat the latest non-empty operator reply as the active ask by default.") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "If the operator asks for a read-only exploratory assessment or explicitly says to choose the scope yourself") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Exploratory answers still keep commander-first control") != null);
 }
 
 test "buildPromptWithContextBudget blocks when a required memory layer is missing" {
@@ -2301,25 +2307,25 @@ test "resolveContuberniumHome falls back to USERPROFILE when HOME is unavailable
 
     defer {
         if (original_contubernium_home) |value| {
-            _ = std.c.setenv(contubernium_home_name.ptr, value, 1);
+            _ = setenv(contubernium_home_name.ptr, value, 1);
         } else {
-            _ = std.c.unsetenv(contubernium_home_name.ptr);
+            _ = unsetenv(contubernium_home_name.ptr);
         }
         if (original_home) |value| {
-            _ = std.c.setenv(home_name.ptr, value, 1);
+            _ = setenv(home_name.ptr, value, 1);
         } else {
-            _ = std.c.unsetenv(home_name.ptr);
+            _ = unsetenv(home_name.ptr);
         }
         if (original_userprofile) |value| {
-            _ = std.c.setenv(userprofile_name.ptr, value, 1);
+            _ = setenv(userprofile_name.ptr, value, 1);
         } else {
-            _ = std.c.unsetenv(userprofile_name.ptr);
+            _ = unsetenv(userprofile_name.ptr);
         }
     }
 
-    _ = std.c.unsetenv(contubernium_home_name.ptr);
-    _ = std.c.unsetenv(home_name.ptr);
-    try testing.expectEqual(@as(c_int, 0), std.c.setenv(userprofile_name.ptr, userprofile_value.ptr, 1));
+    _ = unsetenv(contubernium_home_name.ptr);
+    _ = unsetenv(home_name.ptr);
+    try testing.expectEqual(@as(c_int, 0), setenv(userprofile_name.ptr, userprofile_value.ptr, 1));
 
     const resolved = try resolveContuberniumHome(scratch);
     const expected = try std.fs.path.join(scratch, &.{ userprofile_path, ".contubernium" });
@@ -2372,8 +2378,8 @@ test "persistSessionMemory writes durable local and global session indexes" {
     const home_path = try tmp.dir.realpathAlloc(scratch, "home");
     const home_z = try scratch.dupeZ(u8, home_path);
     const env_name = try scratch.dupeZ(u8, "CONTUBERNIUM_HOME");
-    try testing.expectEqual(@as(c_int, 0), std.c.setenv(env_name.ptr, home_z.ptr, 1));
-    defer _ = std.c.unsetenv(env_name.ptr);
+    try testing.expectEqual(@as(c_int, 0), setenv(env_name.ptr, home_z.ptr, 1));
+    defer _ = unsetenv(env_name.ptr);
 
     try scaffoldProject(scratch);
     const config = try loadProjectConfig(scratch);

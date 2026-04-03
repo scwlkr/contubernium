@@ -39,7 +39,7 @@ test("stream_start placeholder is replaced by stream_finalize summary", () => {
       kind: "stream_finalize",
       tone: "agent",
       actor: "decanus",
-      title: "",
+      title: "decision",
       text: "action: finish",
       highlight: "summary",
     },
@@ -47,10 +47,30 @@ test("stream_start placeholder is replaced by stream_finalize summary", () => {
   )
 
   expect(finalized).toHaveLength(1)
-  expect(finalized[0]?.title).toBe("decanus report")
+  expect(finalized[0]?.title).toBe("decision")
   expect(finalized[0]?.text).toBe("action: finish")
   expect(finalized[0]?.highlight).toBe("summary")
   expect(finalized[0]?.streaming).toBe(false)
+})
+
+test("stream_finalize without a placeholder appends a titled summary card", () => {
+  const finalized = applyTimelineEvent(
+    [],
+    {
+      kind: "stream_finalize",
+      tone: "agent",
+      actor: "faber",
+      title: "runtime tool",
+      text: "read_file .contubernium/project.md",
+      highlight: "summary",
+    },
+    3,
+  )
+
+  expect(finalized).toHaveLength(1)
+  expect(finalized[0]?.title).toBe("runtime tool")
+  expect(finalized[0]?.text).toBe("read_file .contubernium/project.md")
+  expect(finalized[0]?.highlight).toBe("summary")
 })
 
 test("raw thinking and content chunks do not append transcript card bodies", () => {

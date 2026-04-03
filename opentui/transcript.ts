@@ -36,6 +36,7 @@ const transcriptVisiblePlaceholder = "..."
 
 export function applyTimelineEvent(current: TranscriptEntry[], event: TranscriptEvent, stamp = Date.now()): TranscriptEntry[] {
   const actorLabel = event.actor || "runtime"
+  const finalizedTitle = event.title || `${actorLabel} report`
 
   if (event.kind === "stream_start") {
     return [
@@ -65,7 +66,7 @@ export function applyTimelineEvent(current: TranscriptEntry[], event: Transcript
       next[resolvedIndex] = {
         ...next[resolvedIndex],
         kind: event.kind,
-        title: `${actorLabel} report`,
+        title: finalizedTitle,
         text: event.text,
         highlight: event.highlight || next[resolvedIndex].highlight,
         streaming: false,
@@ -80,7 +81,7 @@ export function applyTimelineEvent(current: TranscriptEntry[], event: Transcript
         kind: event.kind,
         tone: event.tone || "agent",
         actor: event.actor,
-        title: `${actorLabel} report`,
+        title: finalizedTitle,
         text: event.text,
         highlight: event.highlight || "summary",
       },

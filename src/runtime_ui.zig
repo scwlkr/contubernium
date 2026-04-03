@@ -96,6 +96,11 @@ const cli_section_min_columns: usize = cli_section_indent + 1;
 const cli_thinking_summary_visible_limit: usize = 6;
 const completed_mission_follow_up_question = "What next?";
 
+const InlineUserReply = union(enum) {
+    submit: []const u8,
+    exit,
+};
+
 const InteractiveKey = union(enum) {
     character: u8,
     enter,
@@ -161,6 +166,7 @@ const MissionComposerRoster = struct {
 
 pub const CliSpinnerState = struct {
     mutex: std.Thread.Mutex = .{},
+    allocator: ?std.mem.Allocator = null,
     active: bool = false,
     rendered: bool = false,
     shutdown: bool = false,
@@ -187,6 +193,7 @@ pub const CliSpinner = struct {
         const state = try allocator.create(CliSpinnerState);
         errdefer allocator.destroy(state);
         state.* = .{};
+        state.allocator = allocator;
 
         var spinner = CliSpinner{
             .allocator = allocator,
@@ -820,7 +827,14 @@ fn cliSpinnerEmit(context: ?*anyopaque, event: RuntimeUiEvent) void {
             state.preview_len = 0;
         },
         .thinking_chunk => appendSpinnerPreview(state, event.text),
-        .stream_finalize, .approval_request => {
+        .stream_finalize => {
+            state.active = false;
+            state.preview_len = 0;
+            if (event.highlight == .summary and trimAscii(event.text).len > 0) {
+                cliSpinnerPrintLiveSummary(state, event);
+            }
+        },
+        .approval_request => {
             state.active = false;
             state.preview_len = 0;
         },
@@ -838,46 +852,31 @@ fn cliSpinnerMain(state: *CliSpinnerState) void {
     const frames = [_][]const u8{ "I", "II", "III", "IV", "V", "VI" };
 
     while (true) {
-        var shutdown = false;
-        var active = false;
-        var clear_line = false;
-        var actor_len: usize = 0;
-        var actor_buf: [32]u8 = undefined;
-        var preview_len: usize = 0;
-        var preview_buf: [96]u8 = undefined;
-        var frame: []const u8 = "";
-
         state.mutex.lock();
-        shutdown = state.shutdown;
-        active = state.active;
-        clear_line = state.rendered and !state.active;
-        if (active) {
-            frame = frames[state.phase % frames.len];
-            state.phase = (state.phase + 1) % frames.len;
-            state.rendered = true;
-            actor_len = state.actor_len;
-            @memcpy(actor_buf[0..actor_len], state.actor_buf[0..actor_len]);
-            preview_len = state.preview_len;
-            @memcpy(preview_buf[0..preview_len], state.preview_buf[0..preview_len]);
-        } else if (clear_line) {
-            state.rendered = false;
-        }
-        state.mutex.unlock();
-
-        if (shutdown) {
-            cliClearSpinnerLine();
+        if (state.shutdown) {
+            if (state.rendered) {
+                cliClearSpinnerLine();
+                state.rendered = false;
+            }
+            state.mutex.unlock();
             return;
         }
 
-        if (active) {
-            cliRenderSpinnerFrame(frame, actor_buf[0..actor_len], preview_buf[0..preview_len]);
+        if (state.active) {
+            const frame = frames[state.phase % frames.len];
+            state.phase = (state.phase + 1) % frames.len;
+            state.rendered = true;
+            cliRenderSpinnerFrame(frame, state.actor_buf[0..state.actor_len], state.preview_buf[0..state.preview_len]);
+            state.mutex.unlock();
             std.Thread.sleep(120 * std.time.ns_per_ms);
             continue;
         }
 
-        if (clear_line) {
+        if (state.rendered) {
             cliClearSpinnerLine();
+            state.rendered = false;
         }
+        state.mutex.unlock();
         std.Thread.sleep(60 * std.time.ns_per_ms);
     }
 }
@@ -907,6 +906,42 @@ fn cliRenderSpinnerFrame(frame: []const u8, actor: []const u8, preview: []const 
 
 fn cliClearSpinnerLine() void {
     stderrPrint("{s}", .{interactive_clear_line}) catch {};
+}
+
+fn renderCliLiveThinkingSummary(
+    allocator: std.mem.Allocator,
+    event: RuntimeUiEvent,
+    styled: bool,
+) ![]const u8 {
+    const actor = if (event.actor.len > 0) event.actor else "runtime";
+    const title = if (event.title.len > 0) event.title else "summary";
+    const body = try std.fmt.allocPrint(allocator, "#### {s} {s}\n{s}", .{ actor, title, event.text });
+    defer allocator.free(body);
+    const rendered = try renderCliMarkdownLiteSection(allocator, body, cliMissionSectionColumns(), cli_section_indent);
+    defer allocator.free(rendered);
+
+    if (styled) {
+        return try std.fmt.allocPrint(
+            allocator,
+            "\n{s}thinking summary{s}\n{s}{s}{s}\n",
+            .{ interactive_color_muted, interactive_reset, interactive_color_ivory, rendered, interactive_reset },
+        );
+    }
+
+    return try std.fmt.allocPrint(allocator, "\nthinking summary\n{s}\n", .{rendered});
+}
+
+fn cliSpinnerPrintLiveSummary(state: *CliSpinnerState, event: RuntimeUiEvent) void {
+    const allocator = state.allocator orelse return;
+    const rendered = renderCliLiveThinkingSummary(allocator, event, cliStylesEnabled(std.posix.STDERR_FILENO)) catch return;
+    defer allocator.free(rendered);
+
+    if (state.rendered) {
+        cliClearSpinnerLine();
+        state.rendered = false;
+    }
+
+    stderrPrint("{s}", .{rendered}) catch {};
 }
 
 fn envFlagEnabled(name: [:0]const u8) bool {
@@ -1492,7 +1527,12 @@ fn renderInlineUserReplyPrompt(
     return try buffer.toOwnedSlice(allocator);
 }
 
-fn promptInlineUserReply(allocator: std.mem.Allocator, question: []const u8) !?[]const u8 {
+fn parseInlineUserReplyCommand(text: []const u8) ?InlineUserReply {
+    if (eql(text, "/exit") or eql(text, "/quit")) return .exit;
+    return null;
+}
+
+fn promptInlineUserReply(allocator: std.mem.Allocator, question: []const u8) !?InlineUserReply {
     if (question.len == 0) return null;
 
     const prompt = try renderInlineUserReplyPrompt(allocator, question, cliStylesEnabled(std.posix.STDOUT_FILENO));
@@ -1504,7 +1544,8 @@ fn promptInlineUserReply(allocator: std.mem.Allocator, question: []const u8) !?[
     defer allocator.free(text);
     const trimmed = trimAscii(text);
     if (trimmed.len == 0) return null;
-    return try allocator.dupe(u8, trimmed);
+    if (parseInlineUserReplyCommand(trimmed)) |command| return command;
+    return .{ .submit = try allocator.dupe(u8, trimmed) };
 }
 
 fn applyInlineUserReply(
@@ -1542,8 +1583,13 @@ fn runLoopWithInlineUserReplies(
         if (pending_question.len > 0) {
             if (!inlineUserPromptSupported()) return;
             const reply = try promptInlineUserReply(allocator, pending_question) orelse return;
-            defer allocator.free(reply);
-            try applyInlineUserReply(allocator, config, state, command_label, reply, hooks);
+            switch (reply) {
+                .submit => |text| {
+                    defer allocator.free(text);
+                    try applyInlineUserReply(allocator, config, state, command_label, text, hooks);
+                },
+                .exit => return,
+            }
         }
 
         try runLoop(allocator, config, state, hooks);
@@ -1561,10 +1607,14 @@ fn continueCompletedMissionConversation(
     while (completedMissionFollowUpAvailable(state.*)) {
         if (!inlineUserPromptSupported()) return;
         const reply = try promptInlineUserReply(allocator, completed_mission_follow_up_question) orelse return;
-        defer allocator.free(reply);
+        const text = switch (reply) {
+            .submit => |value| value,
+            .exit => return,
+        };
+        defer allocator.free(text);
 
-        try applyInlineUserReply(allocator, config, state, command_label, reply, hooks);
-        try startRunFromState(allocator, config, state, command_label, "operator supplied mission follow-up", reply, true, hooks);
+        try applyInlineUserReply(allocator, config, state, command_label, text, hooks);
+        try startRunFromState(allocator, config, state, command_label, "operator supplied mission follow-up", text, true, hooks);
         try runLoopWithInlineUserReplies(allocator, config, state, command_label, hooks);
         try finishRunState(allocator, config, state, command_label, hooks);
         try printCliMissionOutcome(allocator, state.*);
@@ -2341,6 +2391,42 @@ test "renderInlineUserReplyPrompt highlights the pending question" {
     try testing.expect(std.mem.indexOf(u8, rendered, interactive_color_blue) != null);
     try testing.expect(std.mem.indexOf(u8, rendered, "Which phase needs attention?") != null);
     try testing.expect(std.mem.indexOf(u8, rendered, "reply >") != null);
+}
+
+test "renderCliLiveThinkingSummary formats titled summary entries" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const rendered = try renderCliLiveThinkingSummary(allocator, .{
+        .kind = .stream_finalize,
+        .actor = "decanus",
+        .title = "decision",
+        .text = "action: tool_request",
+        .highlight = .summary,
+    }, false);
+    defer allocator.free(rendered);
+
+    try testing.expect(std.mem.indexOf(u8, rendered, "thinking summary") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "#### decanus decision") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "action: tool_request") != null);
+}
+
+test "parseInlineUserReplyCommand recognizes exit commands" {
+    const testing = std.testing;
+
+    const exit_command = parseInlineUserReplyCommand("/exit") orelse return error.TestUnexpectedResult;
+    switch (exit_command) {
+        .exit => {},
+        else => return error.TestUnexpectedResult,
+    }
+
+    const quit_command = parseInlineUserReplyCommand("/quit") orelse return error.TestUnexpectedResult;
+    switch (quit_command) {
+        .exit => {},
+        else => return error.TestUnexpectedResult,
+    }
+
+    try testing.expect(parseInlineUserReplyCommand("brainstorm more") == null);
 }
 
 test "completedMissionFollowUpAvailable detects completed conversational state" {

@@ -109,6 +109,7 @@ Good next moves:
 - request one command
 - ask one clarifying question
 - invoke one specialist on one bounded objective
+- produce one evidence-backed exploratory synthesis when the operator explicitly asked for brainstorming or assessment
 
 Bad next moves:
 
@@ -157,10 +158,14 @@ Before returning, confirm:
 - approval is required
 - key constraints are missing and unsafe to infer
 
+Do not choose `ask_user` merely because the operator invited open-ended, read-only exploration.
+
 ### Choose `finish` when:
 
 - the mission objective is satisfied by actual evidence
 - or the mission should end with an explicit final response now
+
+This can include an exploratory or strategic synthesis when the operator explicitly asked for ideas or a creative assessment and the current evidence is already enough to answer usefully.
 
 ### Choose `blocked` when:
 

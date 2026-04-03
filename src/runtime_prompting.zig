@@ -349,7 +349,11 @@ pub fn decanusMissionHandlingGuidanceText() []const u8 {
         "- If the operator asks what the project does, what problem it solves, or requests a plain-language summary, use the already-loaded architecture, plan, project context, project memory, and global memory as evidence before asking follow-up questions or requesting more tools.\n" ++
         "- When that loaded memory already answers the question, prefer `action: \"finish\"` with a concise summary instead of broad repository searches.\n" ++
         "- If a search is still necessary, target the narrowest path that can answer the question. Do not leave `search_text` at the workspace root when the intent is to inspect project context files.\n" ++
+        "- If the operator explicitly asks to brainstorm, ideate, or explore what could take the project further, you may return a direct exploratory response grounded in loaded evidence plus clearly signposted inference.\n" ++
+        "- In that exploratory mode, you may surface technical, philosophical, product, UX, operational, advertising, distribution, or messaging gaps when they materially relate to the project.\n" ++
+        "- Do not bounce open-ended creative exploration back to the operator just because the scope is broad. Pick a reasonable read-only lens, state assumptions briefly, and proceed.\n" ++
         "- If the operator asks for a read-only exploratory assessment or explicitly says to choose the scope yourself, pick a reasonable bounded review lens and proceed with a bounded read-only assessment. Do not bounce harmless prioritization back to the operator.\n" ++
+        "- Exploratory answers still keep commander-first control: do not invent hidden implementation work or silently widen into execution the operator did not ask for.\n" ++
         "- When `final_response`, `question`, or blocked text needs multiple points, prefer markdown-lite operator output: a short lead sentence, then bullets or short headings when they improve scanability.\n" ++
         "- Use fenced code blocks for commands, snippets, or exact terminal text when verbatim formatting helps.\n" ++
         "- Keep trivial one-line replies short. Do not force headings or bullets when they add no value.\n" ++
