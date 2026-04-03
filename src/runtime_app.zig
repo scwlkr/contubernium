@@ -1057,6 +1057,27 @@ test "resumeAfterOperatorReply clears the blocked state and records operator his
     try testing.expectEqualStrings("keep this conversational", state.agent_loop.history[0].summary);
 }
 
+test "resumeAfterOperatorReply clears stale completion state" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+    var state = AppState{};
+    state.current_actor = .decanus;
+    state.global_status = .complete;
+    state.agent_loop.status = .complete;
+    state.runtime_session.status = .complete;
+    state.mission.final_response = "previous answer";
+
+    try resumeAfterOperatorReply(allocator, &state, "what else does it do?");
+
+    try testing.expectEqual(GlobalStatus.planning, state.global_status);
+    try testing.expectEqual(LoopStatus.thinking, state.agent_loop.status);
+    try testing.expectEqual(RuntimeStatus.ready, state.runtime_session.status);
+    try testing.expectEqualStrings("", state.mission.final_response);
+    try testing.expectEqual(@as(usize, 1), state.agent_loop.history.len);
+    try testing.expectEqualStrings("operator_reply", state.agent_loop.history[0].type);
+    try testing.expectEqualStrings("what else does it do?", state.agent_loop.history[0].summary);
+}
+
 test "runtime tool result records an explicit loop result step" {
     const testing = std.testing;
     const allocator = std.heap.page_allocator;

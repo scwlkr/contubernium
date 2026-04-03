@@ -89,6 +89,7 @@ const interactive_clear_line = "\r\x1b[2K";
 const cli_spinner_label = "testudo advancing";
 const cli_spinner_fallback_columns: usize = 80;
 const cli_spinner_visible_preview_cap: usize = 40;
+const completed_mission_follow_up_question = "What next?";
 
 const InteractiveKey = union(enum) {
     character: u8,
@@ -322,8 +323,9 @@ pub fn cmdMissionStart(allocator: std.mem.Allocator, prompt_args: []const []cons
     defer spinner.deinit();
     try runMissionInternal(allocator, mission_prompt, spinner.hooks());
     const config = try loadProjectConfig(allocator);
-    const state = try loadState(allocator, config.paths.state_file);
-    try stdoutPrint("{s}\n", .{try renderCliMissionOutcome(allocator, state)});
+    var state = try loadState(allocator, config.paths.state_file);
+    try printCliMissionOutcome(allocator, state);
+    try continueCompletedMissionConversation(allocator, config, &state, "mission", spinner.hooks());
 }
 
 pub fn cmdMissionStep(allocator: std.mem.Allocator) !void {
@@ -342,12 +344,20 @@ pub fn cmdMissionContinue(allocator: std.mem.Allocator) !void {
     const config = try loadProjectConfig(allocator);
     var state = try loadState(allocator, config.paths.state_file);
     if (state.mission.initial_prompt.len == 0) return error.MissionNotInitialized;
+    if (completedMissionFollowUpAvailable(state)) {
+        try printCliMissionOutcome(allocator, state);
+        var spinner = try CliSpinner.init(allocator);
+        defer spinner.deinit();
+        try continueCompletedMissionConversation(allocator, config, &state, "mission_continue", spinner.hooks());
+        return;
+    }
     var spinner = try CliSpinner.init(allocator);
     defer spinner.deinit();
     try startRunFromState(allocator, config, &state, "mission_continue", "active session resume requested", "", true, spinner.hooks());
     try runLoopWithInlineUserReplies(allocator, config, &state, "mission_continue", spinner.hooks());
     try finishRunState(allocator, config, &state, "mission_continue", spinner.hooks());
-    try stdoutPrint("{s}\n", .{try renderCliMissionOutcome(allocator, state)});
+    try printCliMissionOutcome(allocator, state);
+    try continueCompletedMissionConversation(allocator, config, &state, "mission_continue", spinner.hooks());
 }
 
 pub fn cmdSessionsList(allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -397,7 +407,10 @@ pub fn cmdSessionsResume(allocator: std.mem.Allocator, args: []const []const u8)
     if (state.global_status == .complete or state.runtime_session.status == .complete) {
         try persistSessionMemory(allocator, config, &state, "sessions_resume");
         try saveState(allocator, config.paths.state_file, state);
-        try stdoutPrint("{s}\n", .{try renderCliMissionOutcome(allocator, state)});
+        try printCliMissionOutcome(allocator, state);
+        var spinner = try CliSpinner.init(allocator);
+        defer spinner.deinit();
+        try continueCompletedMissionConversation(allocator, config, &state, "sessions_resume", spinner.hooks());
         return;
     }
 
@@ -406,7 +419,8 @@ pub fn cmdSessionsResume(allocator: std.mem.Allocator, args: []const []const u8)
     try startRunFromState(allocator, config, &state, "sessions_resume", "stored session resume requested", "", true, spinner.hooks());
     try runLoopWithInlineUserReplies(allocator, config, &state, "sessions_resume", spinner.hooks());
     try finishRunState(allocator, config, &state, "sessions_resume", spinner.hooks());
-    try stdoutPrint("{s}\n", .{try renderCliMissionOutcome(allocator, state)});
+    try printCliMissionOutcome(allocator, state);
+    try continueCompletedMissionConversation(allocator, config, &state, "sessions_resume", spinner.hooks());
 }
 
 pub fn cmdSessionsApprovals(allocator: std.mem.Allocator, enabled: bool) !void {
@@ -967,6 +981,12 @@ fn renderCliMissionOutcome(allocator: std.mem.Allocator, state: AppState) ![]con
     return try buffer.toOwnedSlice(allocator);
 }
 
+fn printCliMissionOutcome(allocator: std.mem.Allocator, state: AppState) !void {
+    const rendered = try renderCliMissionOutcome(allocator, state);
+    defer allocator.free(rendered);
+    try stdoutPrint("{s}\n", .{rendered});
+}
+
 fn writeCliMissionStatus(writer: anytype, styled: bool, status: []const u8, color: []const u8) !void {
     if (styled) {
         try writer.print("{s}{s}{s}", .{ color, status, interactive_reset });
@@ -1067,6 +1087,10 @@ fn pendingUserReplyQuestion(state: AppState) []const u8 {
     return state.runtime_session.last_error;
 }
 
+fn completedMissionFollowUpAvailable(state: AppState) bool {
+    return state.global_status == .complete and state.mission.final_response.len > 0;
+}
+
 fn inlineUserPromptSupported() bool {
     return std.posix.isatty(std.posix.STDIN_FILENO) and std.posix.isatty(std.posix.STDOUT_FILENO);
 }
@@ -1158,6 +1182,26 @@ fn runLoopWithInlineUserReplies(
 
         try runLoop(allocator, config, state, hooks);
         if (pendingUserReplyQuestion(state.*).len == 0) return;
+    }
+}
+
+fn continueCompletedMissionConversation(
+    allocator: std.mem.Allocator,
+    config: core.AppConfig,
+    state: *AppState,
+    command_label: []const u8,
+    hooks: RuntimeHooks,
+) !void {
+    while (completedMissionFollowUpAvailable(state.*)) {
+        if (!inlineUserPromptSupported()) return;
+        const reply = try promptInlineUserReply(allocator, completed_mission_follow_up_question) orelse return;
+        defer allocator.free(reply);
+
+        try applyInlineUserReply(allocator, config, state, command_label, reply, hooks);
+        try startRunFromState(allocator, config, state, command_label, "operator supplied mission follow-up", reply, true, hooks);
+        try runLoopWithInlineUserReplies(allocator, config, state, command_label, hooks);
+        try finishRunState(allocator, config, state, command_label, hooks);
+        try printCliMissionOutcome(allocator, state.*);
     }
 }
 
@@ -1856,4 +1900,15 @@ test "renderInlineUserReplyPrompt highlights the pending question" {
     try testing.expect(std.mem.indexOf(u8, rendered, interactive_color_blue) != null);
     try testing.expect(std.mem.indexOf(u8, rendered, "Which phase needs attention?") != null);
     try testing.expect(std.mem.indexOf(u8, rendered, "reply >") != null);
+}
+
+test "completedMissionFollowUpAvailable detects completed conversational state" {
+    const testing = std.testing;
+    var state = AppState{};
+
+    try testing.expect(!completedMissionFollowUpAvailable(state));
+
+    state.global_status = .complete;
+    state.mission.final_response = "done";
+    try testing.expect(completedMissionFollowUpAvailable(state));
 }

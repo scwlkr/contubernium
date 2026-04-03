@@ -939,6 +939,7 @@ pub const StateManager = struct {
         self.clearFailure();
         self.state.current_actor = .decanus;
         self.state.global_status = .planning;
+        self.state.mission.final_response = "";
         self.state.agent_loop.status = .thinking;
         self.state.agent_loop.active_tool = null;
         self.state.runtime_session.status = .ready;
