@@ -72,9 +72,12 @@ Current shipped behavior:
 Current shipped behavior:
 
 - `.contubernium/config.json` uses a `model_policy` object with `primary`, `escalation`, and `fallback` routes
+- `model_policy` may also carry a `registry` of local model entries with capability tags and size/context metadata
 - the default strategy is `smallest-capable`
-- the runtime starts from `model_policy.primary`, can escalate when prompt pressure or repair retries cross the configured thresholds, and can fail over to `model_policy.fallback` when the active provider/model fails
+- the runtime starts from the smallest capable registry model when `model_policy.registry` is populated, otherwise from `model_policy.primary`
+- the runtime can escalate to the next larger capable registry model when prompt pressure or repair retries cross the configured thresholds, and can fail over to `model_policy.fallback` or another registry entry when the active provider/model fails
 - `openrouter` is a first-class provider type built on the OpenAI-compatible transport path
+- `llama.cpp` is a first-class local provider type built on the OpenAI-compatible transport path exposed by the llama.cpp server
 - older configs that still carry top-level `provider` and `fallback_provider` fields are still read, but new scaffolds write `model_policy`
 
 Local-only mode:
@@ -82,6 +85,13 @@ Local-only mode:
 - keep `model_policy.primary.type = "ollama-native"`
 - leave `model_policy.fallback.enabled = false`
 - optionally point `model_policy.escalation` at a larger local Ollama model
+
+Local llama.cpp mode:
+
+- set `model_policy.primary.type = "llama.cpp"`
+- point `base_url` at the local llama.cpp server root, for example `http://127.0.0.1:8080`
+- add Gemma routes to `model_policy.registry` with capability tags such as `structured-output`, `analysis`, `tool-use`, `orchestration`, and `coding`
+- keep fallback local. If fallback shares the same llama.cpp daemon, it protects against model-level failures but not daemon outage. Use a second local endpoint when daemon-level fallback matters.
 
 Cloud-enabled mode:
 
@@ -187,6 +197,8 @@ If behavior changes and no row changes here, the feature is not documented compl
 | Model policy config | Project config uses `model_policy` routes and mirrors them onto legacy provider fields for compatibility. | `src/runtime_app.zig` test: `loadConfig mirrors model_policy routes into legacy provider fields` |
 | Model policy log metadata | Each run log stores primary route metadata, escalation metadata, and fallback metadata. | `src/runtime_app.zig` test: `initializeRuntimeRunLog stores model policy metadata` |
 | Active routed provider visibility | Status snapshots show the currently active provider/model when the runtime switches routes. | `src/runtime_app.zig` test: `snapshotFromState prefers the active routed provider over the primary config` |
+| llama.cpp provider transport | Local llama.cpp servers are addressable as a first-class provider type through the OpenAI-compatible transport path. | `src/runtime_app.zig` tests: `providerUsesOpenAICompatibleTransport recognizes llama.cpp`; `structuredChatWithRepair resolves llama.cpp registry route for smoke response` |
+| Capability-based local model resolver | Registry-backed local routes pick the smallest capable model for the active actor and choose alternate local routes for fallback. | `src/runtime_app.zig` tests: `initialModelRouteForActor resolves the smallest capable registry model per actor`; `fallbackRouteForActor selects an alternate registry model when explicit fallback is absent` |
 | Context compression | Older history can be condensed into a retained digest when context pressure rises. | `src/runtime_app.zig` test: `condenseHistoryForContext replaces older entries with a retained digest` |
 | Prompt assembly | Commander prompts include project context and loaded memory layers. | `src/runtime_app.zig` test: `buildDecanusUserPrompt includes project context and memory layers` |
 | Inline mission follow-up | TTY mission resumes prompt for operator clarification inline and keep the same mission state alive after `USER_INPUT_REQUIRED`. | `src/runtime_app.zig` test: `resumeAfterOperatorReply clears the blocked state and records operator history` |

@@ -77,6 +77,19 @@ pub const ProviderConfig = struct {
     app_name: []const u8 = "",
 };
 
+pub const ModelRegistryEntry = struct {
+    enabled: bool = true,
+    id: []const u8 = "",
+    provider: ProviderConfig = .{
+        .type = "llama.cpp",
+        .base_url = "http://127.0.0.1:8080",
+        .model = "",
+    },
+    capabilities: []const []const u8 = &.{},
+    size_score: usize = 0,
+    context_window_tokens: usize = 0,
+};
+
 pub const ModelEscalationConfig = struct {
     enabled: bool = false,
     provider: ProviderConfig = .{
@@ -103,6 +116,7 @@ pub const ModelPolicyConfig = struct {
         .api_key_env = "OPENROUTER_API_KEY",
         .app_name = "Contubernium",
     },
+    registry: []const ModelRegistryEntry = &.{},
 };
 
 pub const ResolvedModelPolicy = struct {
@@ -117,6 +131,7 @@ pub const ResolvedModelPolicy = struct {
         .api_key_env = "OPENROUTER_API_KEY",
         .app_name = "Contubernium",
     },
+    registry: []const ModelRegistryEntry = &.{},
 };
 
 pub const ActiveModelRoute = struct {
@@ -1533,7 +1548,7 @@ pub fn resolvedApprovalMode(base_mode: []const u8, approval_bypass_enabled: bool
 }
 
 pub fn providerUsesOpenAICompatibleTransport(provider: ProviderConfig) bool {
-    return eql(provider.type, "openai-compatible") or eql(provider.type, "openrouter");
+    return eql(provider.type, "openai-compatible") or eql(provider.type, "openrouter") or eql(provider.type, "llama.cpp");
 }
 
 pub fn resolveModelPolicy(config: AppConfig) ResolvedModelPolicy {
@@ -1543,6 +1558,7 @@ pub fn resolveModelPolicy(config: AppConfig) ResolvedModelPolicy {
             .primary = config.model_policy.primary,
             .escalation = config.model_policy.escalation,
             .fallback = config.model_policy.fallback,
+            .registry = config.model_policy.registry,
         };
     }
 
@@ -1551,7 +1567,302 @@ pub fn resolveModelPolicy(config: AppConfig) ResolvedModelPolicy {
         .primary = config.provider,
         .escalation = .{},
         .fallback = config.fallback_provider,
+        .registry = &.{},
     };
+}
+
+const decanus_model_capabilities = [_][]const u8{
+    "structured-output",
+    "analysis",
+    "tool-use",
+    "orchestration",
+};
+
+const coding_model_capabilities = [_][]const u8{
+    "structured-output",
+    "analysis",
+    "coding",
+};
+
+const analysis_model_capabilities = [_][]const u8{
+    "structured-output",
+    "analysis",
+};
+
+fn providerIsUsable(provider: ProviderConfig) bool {
+    return provider.enabled and trimAscii(provider.model).len > 0;
+}
+
+fn providerConfigEqual(a: ProviderConfig, b: ProviderConfig) bool {
+    return eql(a.type, b.type) and eql(a.base_url, b.base_url) and eql(a.model, b.model);
+}
+
+fn registryEntrySortScore(entry: ModelRegistryEntry, index: usize) usize {
+    return if (entry.size_score > 0) entry.size_score else index + 1;
+}
+
+fn requiredContextTokensForBudget(budget: ContextBudgetState) usize {
+    if (budget.estimated_prompt_tokens == 0) return 0;
+    return budget.estimated_prompt_tokens + budget.response_reserve_tokens;
+}
+
+fn requiredCapabilitiesForActor(actor: Actor) []const []const u8 {
+    return switch (actor) {
+        .decanus => decanus_model_capabilities[0..],
+        .faber, .artifex, .architectus, .tesserarius, .mulus => coding_model_capabilities[0..],
+        .explorator, .signifer, .praeco, .calo => analysis_model_capabilities[0..],
+    };
+}
+
+fn registryEntryHasCapability(entry: ModelRegistryEntry, capability: []const u8) bool {
+    for (entry.capabilities) |candidate| {
+        if (eql(candidate, capability)) return true;
+    }
+    return false;
+}
+
+fn registryEntrySupportsActor(
+    entry: ModelRegistryEntry,
+    actor: Actor,
+    required_context_tokens: usize,
+) bool {
+    if (!entry.enabled) return false;
+    if (!providerIsUsable(entry.provider)) return false;
+
+    if (required_context_tokens > 0 and entry.context_window_tokens > 0 and entry.context_window_tokens < required_context_tokens) {
+        return false;
+    }
+
+    for (requiredCapabilitiesForActor(actor)) |capability| {
+        if (!registryEntryHasCapability(entry, capability)) return false;
+    }
+
+    return true;
+}
+
+fn registryScoreForProvider(registry: []const ModelRegistryEntry, provider: ProviderConfig) ?usize {
+    for (registry, 0..) |entry, index| {
+        if (!entry.enabled) continue;
+        if (!providerConfigEqual(entry.provider, provider)) continue;
+        return registryEntrySortScore(entry, index);
+    }
+    return null;
+}
+
+fn primaryRegistryRouteForActor(
+    config: AppConfig,
+    actor: Actor,
+    budget: ContextBudgetState,
+    reason: []const u8,
+    role: []const u8,
+) ?ActiveModelRoute {
+    const model_policy = resolveModelPolicy(config);
+    if (!eql(model_policy.strategy, "smallest-capable")) return null;
+    if (model_policy.registry.len == 0) return null;
+
+    const required_context_tokens = requiredContextTokensForBudget(budget);
+    var best_index: ?usize = null;
+    var best_score: usize = 0;
+    for (model_policy.registry, 0..) |entry, index| {
+        if (!registryEntrySupportsActor(entry, actor, required_context_tokens)) continue;
+        const score = registryEntrySortScore(entry, index);
+        if (best_index == null or score < best_score) {
+            best_index = index;
+            best_score = score;
+        }
+    }
+
+    if (best_index) |index| {
+        return .{
+            .role = role,
+            .reason = reason,
+            .provider = model_policy.registry[index].provider,
+        };
+    }
+    return null;
+}
+
+fn largerRegistryRouteForActor(
+    config: AppConfig,
+    actor: Actor,
+    budget: ContextBudgetState,
+    current_provider: ProviderConfig,
+    reason: []const u8,
+    role: []const u8,
+) ?ActiveModelRoute {
+    const model_policy = resolveModelPolicy(config);
+    if (!eql(model_policy.strategy, "smallest-capable")) return null;
+    if (model_policy.registry.len == 0) return null;
+
+    const required_context_tokens = requiredContextTokensForBudget(budget);
+    const current_score = registryScoreForProvider(model_policy.registry, current_provider) orelse 0;
+    var best_index: ?usize = null;
+    var best_score: usize = 0;
+    for (model_policy.registry, 0..) |entry, index| {
+        if (!registryEntrySupportsActor(entry, actor, required_context_tokens)) continue;
+        if (providerConfigEqual(entry.provider, current_provider)) continue;
+        const score = registryEntrySortScore(entry, index);
+        if (score <= current_score) continue;
+        if (best_index == null or score < best_score) {
+            best_index = index;
+            best_score = score;
+        }
+    }
+
+    if (best_index) |index| {
+        return .{
+            .role = role,
+            .reason = reason,
+            .provider = model_policy.registry[index].provider,
+        };
+    }
+    return null;
+}
+
+fn alternateRegistryRouteForActor(
+    config: AppConfig,
+    actor: Actor,
+    budget: ContextBudgetState,
+    current_provider: ProviderConfig,
+    reason: []const u8,
+    role: []const u8,
+) ?ActiveModelRoute {
+    const model_policy = resolveModelPolicy(config);
+    if (!eql(model_policy.strategy, "smallest-capable")) return null;
+    if (model_policy.registry.len == 0) return null;
+
+    const required_context_tokens = requiredContextTokensForBudget(budget);
+    const current_score = registryScoreForProvider(model_policy.registry, current_provider);
+    var best_larger_index: ?usize = null;
+    var best_larger_score: usize = 0;
+    var best_any_index: ?usize = null;
+    var best_any_score: usize = 0;
+
+    for (model_policy.registry, 0..) |entry, index| {
+        if (!registryEntrySupportsActor(entry, actor, required_context_tokens)) continue;
+        if (providerConfigEqual(entry.provider, current_provider)) continue;
+        const score = registryEntrySortScore(entry, index);
+
+        if (best_any_index == null or score < best_any_score) {
+            best_any_index = index;
+            best_any_score = score;
+        }
+
+        if (current_score) |active_score| {
+            if (score <= active_score) continue;
+        }
+        if (best_larger_index == null or score < best_larger_score) {
+            best_larger_index = index;
+            best_larger_score = score;
+        }
+    }
+
+    const selected_index = best_larger_index orelse best_any_index orelse return null;
+    return .{
+        .role = role,
+        .reason = reason,
+        .provider = model_policy.registry[selected_index].provider,
+    };
+}
+
+pub fn initialEscalationReason(config: AppConfig, budget: ContextBudgetState) []const u8 {
+    const model_policy = resolveModelPolicy(config);
+    if (!model_policy.escalation.enabled) return "";
+    if (!model_policy.escalation.on_context_pressure) return "";
+    if (!providerIsUsable(model_policy.escalation.provider)) return "";
+
+    if (model_policy.escalation.prompt_token_threshold > 0 and budget.estimated_prompt_tokens >= model_policy.escalation.prompt_token_threshold) {
+        return "prompt_budget_threshold";
+    }
+    if (model_policy.escalation.context_percent_threshold > 0 and budget.used_percent >= model_policy.escalation.context_percent_threshold) {
+        return "context_pressure_threshold";
+    }
+    return "";
+}
+
+pub fn initialModelRouteForActor(config: AppConfig, state: *AppState, actor: Actor) ActiveModelRoute {
+    const model_policy = resolveModelPolicy(config);
+    const budget = resolvedContextBudget(config.context, state.runtime_session.context_budget);
+    const primary_reason = if (eql(model_policy.strategy, "smallest-capable")) "smallest_capable_default" else "configured_primary";
+
+    if (primaryRegistryRouteForActor(config, actor, budget, primary_reason, "primary")) |primary_route| {
+        const escalation_reason = initialEscalationReason(config, budget);
+        if (escalation_reason.len > 0) {
+            if (largerRegistryRouteForActor(config, actor, budget, primary_route.provider, escalation_reason, "escalation")) |route| {
+                return route;
+            }
+            if (providerIsUsable(model_policy.escalation.provider)) {
+                return .{
+                    .role = "escalation",
+                    .reason = escalation_reason,
+                    .provider = model_policy.escalation.provider,
+                };
+            }
+        }
+        return primary_route;
+    }
+
+    const escalation_reason = initialEscalationReason(config, budget);
+    if (escalation_reason.len > 0 and providerIsUsable(model_policy.escalation.provider)) {
+        return .{
+            .role = "escalation",
+            .reason = escalation_reason,
+            .provider = model_policy.escalation.provider,
+        };
+    }
+
+    return .{
+        .role = "primary",
+        .reason = primary_reason,
+        .provider = model_policy.primary,
+    };
+}
+
+pub fn escalationRouteForActor(
+    config: AppConfig,
+    actor: Actor,
+    budget: ContextBudgetState,
+    current_provider: ProviderConfig,
+    reason: []const u8,
+) ?ActiveModelRoute {
+    if (largerRegistryRouteForActor(config, actor, resolvedContextBudget(config.context, budget), current_provider, reason, "escalation")) |route| {
+        return route;
+    }
+
+    const model_policy = resolveModelPolicy(config);
+    if (!providerIsUsable(model_policy.escalation.provider)) return null;
+    if (providerConfigEqual(model_policy.escalation.provider, current_provider)) return null;
+    return .{
+        .role = "escalation",
+        .reason = reason,
+        .provider = model_policy.escalation.provider,
+    };
+}
+
+pub fn fallbackRouteForActor(
+    config: AppConfig,
+    actor: Actor,
+    budget: ContextBudgetState,
+    current_provider: ProviderConfig,
+    reason: []const u8,
+) ?ActiveModelRoute {
+    const model_policy = resolveModelPolicy(config);
+    if (providerIsUsable(model_policy.fallback) and !providerConfigEqual(model_policy.fallback, current_provider)) {
+        return .{
+            .role = "fallback",
+            .reason = reason,
+            .provider = model_policy.fallback,
+        };
+    }
+
+    return alternateRegistryRouteForActor(
+        config,
+        actor,
+        resolvedContextBudget(config.context, budget),
+        current_provider,
+        reason,
+        "fallback",
+    );
 }
 
 pub fn syncConfigProviderMirrors(config: *AppConfig) void {

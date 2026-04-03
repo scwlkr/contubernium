@@ -287,6 +287,32 @@ fn providerListModelsOpenAICompatible(allocator: std.mem.Allocator, provider: Pr
     return try models.toOwnedSlice(allocator);
 }
 
+fn providerListModelsLlamaCpp(allocator: std.mem.Allocator, provider: ProviderConfig) ![][]const u8 {
+    var models = providerListModelsOpenAICompatible(allocator, provider) catch |err| switch (err) {
+        error.BackendUnavailable => blk: {
+            const configured_model = trimAscii(provider.model);
+            if (configured_model.len == 0) return err;
+            var configured: std.ArrayList([]const u8) = .empty;
+            try configured.append(allocator, configured_model);
+            break :blk try configured.toOwnedSlice(allocator);
+        },
+        else => return err,
+    };
+
+    const configured_model = trimAscii(provider.model);
+    if (configured_model.len == 0 or containsString(models, configured_model)) return models;
+
+    var collected: std.ArrayList([]const u8) = .empty;
+    errdefer collected.deinit(allocator);
+    for (models) |model| {
+        try collected.append(allocator, model);
+    }
+    try collected.append(allocator, configured_model);
+    allocator.free(models);
+    models = try collected.toOwnedSlice(allocator);
+    return models;
+}
+
 fn providerStructuredChatOpenAICompatible(
     allocator: std.mem.Allocator,
     provider: ProviderConfig,
@@ -358,6 +384,10 @@ pub fn providerListModels(allocator: std.mem.Allocator, provider: ProviderConfig
         return try models.toOwnedSlice(allocator);
     }
 
+    if (eql(provider.type, "llama.cpp")) {
+        return try providerListModelsLlamaCpp(allocator, provider);
+    }
+
     if (providerUsesOpenAICompatibleTransport(provider)) {
         return try providerListModelsOpenAICompatible(allocator, provider);
     }
@@ -393,6 +423,10 @@ pub fn providerStructuredChat(
         }
 
         return try providerStructuredChatOllamaNonStreaming(allocator, provider, body, url, started);
+    }
+
+    if (eql(provider.type, "llama.cpp")) {
+        return try providerStructuredChatOpenAICompatible(allocator, provider, system_prompt, user_prompt, started);
     }
 
     if (providerUsesOpenAICompatibleTransport(provider)) {

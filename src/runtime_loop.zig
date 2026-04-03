@@ -123,6 +123,9 @@ const usablePromptTokenWindow = core.usablePromptTokenWindow;
 const ensureLoopBudget = core.ensureLoopBudget;
 const resolvedContextBudget = core.resolvedContextBudget;
 const resolveModelPolicy = core.resolveModelPolicy;
+const initialModelRouteForActor = core.initialModelRouteForActor;
+const escalationRouteForActor = core.escalationRouteForActor;
+const fallbackRouteForActor = core.fallbackRouteForActor;
 const buildStateSnapshot = core.buildStateSnapshot;
 const snapshotFromState = core.snapshotFromState;
 const compactTextForUi = core.compactTextForUi;
@@ -1038,63 +1041,6 @@ fn resolvedRouteMaxRetries(provider: ProviderConfig, fallback: usize) usize {
     return if (provider.max_retries > 0) provider.max_retries else fallback;
 }
 
-fn escalationRouteForReason(config: AppConfig, reason: []const u8) ?ActiveModelRoute {
-    const model_policy = resolveModelPolicy(config);
-    if (!model_policy.escalation.enabled) return null;
-    if (!model_policy.escalation.provider.enabled) return null;
-    if (trimAscii(model_policy.escalation.provider.model).len == 0) return null;
-    return .{
-        .role = "escalation",
-        .reason = reason,
-        .provider = model_policy.escalation.provider,
-    };
-}
-
-fn fallbackRouteForReason(config: AppConfig, reason: []const u8) ?ActiveModelRoute {
-    const model_policy = resolveModelPolicy(config);
-    if (!model_policy.fallback.enabled) return null;
-    if (trimAscii(model_policy.fallback.model).len == 0) return null;
-    return .{
-        .role = "fallback",
-        .reason = reason,
-        .provider = model_policy.fallback,
-    };
-}
-
-fn initialEscalationReason(config: AppConfig, budget: ContextBudgetState) []const u8 {
-    const model_policy = resolveModelPolicy(config);
-    if (!model_policy.escalation.enabled) return "";
-    if (!model_policy.escalation.on_context_pressure) return "";
-    if (!model_policy.escalation.provider.enabled) return "";
-    if (trimAscii(model_policy.escalation.provider.model).len == 0) return "";
-
-    if (model_policy.escalation.prompt_token_threshold > 0 and budget.estimated_prompt_tokens >= model_policy.escalation.prompt_token_threshold) {
-        return "prompt_budget_threshold";
-    }
-    if (model_policy.escalation.context_percent_threshold > 0 and budget.used_percent >= model_policy.escalation.context_percent_threshold) {
-        return "context_pressure_threshold";
-    }
-    return "";
-}
-
-fn initialModelRoute(config: AppConfig, state: *AppState) ActiveModelRoute {
-    const model_policy = resolveModelPolicy(config);
-    const escalation_reason = initialEscalationReason(config, state.runtime_session.context_budget);
-    if (escalation_reason.len > 0) {
-        return .{
-            .role = "escalation",
-            .reason = escalation_reason,
-            .provider = model_policy.escalation.provider,
-        };
-    }
-
-    return .{
-        .role = "primary",
-        .reason = if (eql(model_policy.strategy, "smallest-capable")) "smallest_capable_default" else "configured_primary",
-        .provider = model_policy.primary,
-    };
-}
-
 fn shouldEscalateAfterRepair(config: AppConfig, next_attempt: usize) bool {
     const model_policy = resolveModelPolicy(config);
     return model_policy.escalation.enabled and
@@ -1169,7 +1115,7 @@ pub fn structuredChatWithRepair(
     }
     const resolved_actor = parseActor(actor) orelse .decanus;
     const resolved_lane = laneForActor(resolved_actor);
-    var active_route = initialModelRoute(config, state);
+    var active_route = initialModelRouteForActor(config, state, resolved_actor);
     var logged_route = false;
     var used_escalation = eql(active_route.role, "escalation");
     var used_fallback = eql(active_route.role, "fallback");
@@ -1205,7 +1151,7 @@ pub fn structuredChatWithRepair(
                 .error_text = @errorName(err),
             });
             if (!used_fallback) {
-                if (fallbackRouteForReason(config, fallbackReasonForError(err))) |fallback_route| {
+                if (fallbackRouteForActor(config, resolved_actor, state.runtime_session.context_budget, active_route.provider, fallbackReasonForError(err))) |fallback_route| {
                     active_route = fallback_route;
                     used_fallback = true;
                     logged_route = false;
@@ -1267,7 +1213,7 @@ pub fn structuredChatWithRepair(
                     .{user_prompt},
                 );
                 repair_user_prompt = owned_repair_prompt.?;
-                if (escalationRouteForReason(config, "repair_retry_threshold")) |escalation_route| {
+                if (escalationRouteForActor(config, resolved_actor, state.runtime_session.context_budget, active_route.provider, "repair_retry_threshold")) |escalation_route| {
                     active_route = escalation_route;
                     used_escalation = true;
                     logged_route = false;
@@ -1288,7 +1234,7 @@ pub fn structuredChatWithRepair(
                         .{user_prompt},
                     );
                     repair_user_prompt = owned_repair_prompt.?;
-                    if (fallbackRouteForReason(config, "invalid_model_output")) |fallback_route| {
+                    if (fallbackRouteForActor(config, resolved_actor, state.runtime_session.context_budget, active_route.provider, "invalid_model_output")) |fallback_route| {
                         active_route = fallback_route;
                         used_fallback = true;
                         logged_route = false;

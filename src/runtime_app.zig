@@ -133,6 +133,9 @@ const OpenAIToolFunction = core.OpenAIToolFunction;
 const usablePromptTokenWindow = core.usablePromptTokenWindow;
 const ensureLoopBudget = core.ensureLoopBudget;
 const resolvedContextBudget = core.resolvedContextBudget;
+const providerUsesOpenAICompatibleTransport = core.providerUsesOpenAICompatibleTransport;
+const initialModelRouteForActor = core.initialModelRouteForActor;
+const fallbackRouteForActor = core.fallbackRouteForActor;
 const buildStateSnapshot = core.buildStateSnapshot;
 const snapshotFromState = core.snapshotFromState;
 const compactTextForUi = core.compactTextForUi;
@@ -402,6 +405,83 @@ fn cmdModelsList(allocator: std.mem.Allocator) !void {
     for (models) |model| {
         try stdoutPrint("{s}\n", .{model});
     }
+}
+
+const MockLlamaCppServer = struct {
+    child: std.process.Child,
+
+    fn deinit(self: *MockLlamaCppServer) void {
+        _ = self.child.kill() catch {};
+        _ = self.child.wait() catch {};
+    }
+};
+
+fn startMockLlamaCppServer(allocator: std.mem.Allocator, port: u16) !MockLlamaCppServer {
+    const script = try std.fmt.allocPrint(
+        allocator,
+        \\import json
+        \\from http.server import BaseHTTPRequestHandler, HTTPServer
+        \\
+        \\class Handler(BaseHTTPRequestHandler):
+        \\    def do_GET(self):
+        \\        if self.path != "/v1/models":
+        \\            self.send_error(404)
+        \\            return
+        \\        payload = json.dumps({{
+        \\            "data": [
+        \\                {{"id": "gemma-4-4b-it"}},
+        \\                {{"id": "gemma-4-12b-it"}}
+        \\            ]
+        \\        }}).encode()
+        \\        self.send_response(200)
+        \\        self.send_header("Content-Type", "application/json")
+        \\        self.send_header("Content-Length", str(len(payload)))
+        \\        self.end_headers()
+        \\        self.wfile.write(payload)
+        \\
+        \\    def do_POST(self):
+        \\        if self.path != "/v1/chat/completions":
+        \\            self.send_error(404)
+        \\            return
+        \\        length = int(self.headers.get("Content-Length", "0"))
+        \\        self.rfile.read(length)
+        \\        payload = json.dumps({{
+        \\            "choices": [
+        \\                {{
+        \\                    "message": {{
+        \\                        "content": "{{\\"status\\":\\"ok\\"}}"
+        \\                    }}
+        \\                }}
+        \\            ]
+        \\        }}).encode()
+        \\        self.send_response(200)
+        \\        self.send_header("Content-Type", "application/json")
+        \\        self.send_header("Content-Length", str(len(payload)))
+        \\        self.end_headers()
+        \\        self.wfile.write(payload)
+        \\
+        \\    def log_message(self, format, *args):
+        \\        pass
+        \\
+        \\class Server(HTTPServer):
+        \\    allow_reuse_address = True
+        \\
+        \\Server(("127.0.0.1", {d}), Handler).serve_forever()
+    ,
+        .{port},
+    );
+    defer allocator.free(script);
+
+    var child = std.process.Child.init(&.{ "python3", "-c", script }, allocator);
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+    child.spawn() catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    std.time.sleep(250 * std.time.ns_per_ms);
+    return .{ .child = child };
 }
 
 test "toolRequestDisplay prefers command and path fields" {
@@ -1509,6 +1589,179 @@ test "loadConfig mirrors model_policy routes into legacy provider fields" {
     try testing.expectEqualStrings("openai/gpt-5.2-mini", loaded.fallback_provider.model);
 }
 
+test "providerUsesOpenAICompatibleTransport recognizes llama.cpp" {
+    const testing = std.testing;
+    try testing.expect(providerUsesOpenAICompatibleTransport(.{
+        .type = "llama.cpp",
+        .base_url = "http://127.0.0.1:8080",
+        .model = "gemma-4-4b-it",
+    }));
+}
+
+test "initialModelRouteForActor resolves the smallest capable registry model per actor" {
+    const testing = std.testing;
+
+    const registry = [_]core.ModelRegistryEntry{
+        .{
+            .id = "gemma-4-4b-it",
+            .provider = .{
+                .type = "llama.cpp",
+                .base_url = "http://127.0.0.1:8080",
+                .model = "gemma-4-4b-it",
+            },
+            .capabilities = &.{ "structured-output", "analysis", "tool-use", "orchestration" },
+            .size_score = 4,
+            .context_window_tokens = 32768,
+        },
+        .{
+            .id = "gemma-4-12b-it",
+            .provider = .{
+                .type = "llama.cpp",
+                .base_url = "http://127.0.0.1:8080",
+                .model = "gemma-4-12b-it",
+            },
+            .capabilities = &.{ "structured-output", "analysis", "tool-use", "orchestration", "coding" },
+            .size_score = 12,
+            .context_window_tokens = 65536,
+        },
+    };
+
+    const config = AppConfig{
+        .model_policy = .{
+            .enabled = true,
+            .strategy = "smallest-capable",
+            .primary = registry[0].provider,
+            .registry = registry[0..],
+        },
+    };
+
+    var state = AppState{};
+    const decanus_route = initialModelRouteForActor(config, &state, .decanus);
+    try testing.expectEqualStrings("llama.cpp", decanus_route.provider.type);
+    try testing.expectEqualStrings("gemma-4-4b-it", decanus_route.provider.model);
+
+    const faber_route = initialModelRouteForActor(config, &state, .faber);
+    try testing.expectEqualStrings("llama.cpp", faber_route.provider.type);
+    try testing.expectEqualStrings("gemma-4-12b-it", faber_route.provider.model);
+}
+
+test "fallbackRouteForActor selects an alternate registry model when explicit fallback is absent" {
+    const testing = std.testing;
+
+    const registry = [_]core.ModelRegistryEntry{
+        .{
+            .id = "gemma-4-4b-it",
+            .provider = .{
+                .type = "llama.cpp",
+                .base_url = "http://127.0.0.1:8080",
+                .model = "gemma-4-4b-it",
+            },
+            .capabilities = &.{ "structured-output", "analysis", "tool-use", "orchestration" },
+            .size_score = 4,
+            .context_window_tokens = 32768,
+        },
+        .{
+            .id = "gemma-4-12b-it",
+            .provider = .{
+                .type = "llama.cpp",
+                .base_url = "http://127.0.0.1:8080",
+                .model = "gemma-4-12b-it",
+            },
+            .capabilities = &.{ "structured-output", "analysis", "tool-use", "orchestration" },
+            .size_score = 12,
+            .context_window_tokens = 65536,
+        },
+    };
+
+    const config = AppConfig{
+        .model_policy = .{
+            .enabled = true,
+            .strategy = "smallest-capable",
+            .primary = registry[0].provider,
+            .registry = registry[0..],
+        },
+    };
+
+    const route = fallbackRouteForActor(
+        config,
+        .decanus,
+        .{},
+        registry[0].provider,
+        "provider_transport_failed",
+    ) orelse return error.TestUnexpectedResult;
+
+    try testing.expectEqualStrings("fallback", route.role);
+    try testing.expectEqualStrings("gemma-4-12b-it", route.provider.model);
+}
+
+test "structuredChatWithRepair resolves llama.cpp registry route for smoke response" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const port = @as(u16, 18000 + @as(u16, @intCast(@mod(std.time.milliTimestamp(), 1000))));
+    var server = try startMockLlamaCppServer(scratch, port);
+    defer server.deinit();
+
+    const base_url = try std.fmt.allocPrint(scratch, "http://127.0.0.1:{d}", .{port});
+    const registry = [_]core.ModelRegistryEntry{
+        .{
+            .id = "gemma-4-4b-it",
+            .provider = .{
+                .type = "llama.cpp",
+                .base_url = base_url,
+                .model = "gemma-4-4b-it",
+            },
+            .capabilities = &.{ "structured-output", "analysis", "tool-use", "orchestration" },
+            .size_score = 4,
+            .context_window_tokens = 32768,
+        },
+        .{
+            .id = "gemma-4-12b-it",
+            .provider = .{
+                .type = "llama.cpp",
+                .base_url = base_url,
+                .model = "gemma-4-12b-it",
+            },
+            .capabilities = &.{ "structured-output", "analysis", "tool-use", "orchestration", "coding" },
+            .size_score = 12,
+            .context_window_tokens = 65536,
+        },
+    };
+
+    const config = AppConfig{
+        .model_policy = .{
+            .enabled = true,
+            .strategy = "smallest-capable",
+            .primary = registry[0].provider,
+            .registry = registry[0..],
+        },
+    };
+
+    const models = try providerListModels(scratch, registry[0].provider);
+    try testing.expect(containsString(models, "gemma-4-4b-it"));
+    try testing.expect(containsString(models, "gemma-4-12b-it"));
+
+    var state = AppState{};
+    const response = try structuredChatWithRepair(
+        scratch,
+        config,
+        "Return valid JSON only.",
+        "Return exactly {\"status\":\"ok\"}.",
+        "faber",
+        1,
+        SmokeResponse,
+        &state,
+        .{},
+    );
+
+    try testing.expectEqualStrings("ok", response.value.status);
+    try testing.expectEqualStrings("llama.cpp", state.runtime_session.provider);
+    try testing.expectEqualStrings("gemma-4-12b-it", state.runtime_session.model);
+    try testing.expectEqualStrings("primary", state.runtime_session.last_model_role);
+}
+
 test "initializeRuntimeRunLog stores model policy metadata" {
     const testing = std.testing;
     var tmp = std.testing.tmpDir(.{});
@@ -1742,8 +1995,7 @@ test "loadGlobalSessionIndex rejects unsupported future format versions" {
 
 test "normalizeGlobalMemoryMarkdown adds a version marker and strips it for prompt use" {
     const testing = std.testing;
-    const normalized = try normalizeGlobalMemoryMarkdown(
-        testing.allocator,
+    const normalized = try normalizeGlobalMemoryMarkdown(testing.allocator,
         \\# Global Memory
         \\
         \\Keep the rules concise.
