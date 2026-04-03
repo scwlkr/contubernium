@@ -1050,6 +1050,7 @@ test "resumeAfterOperatorReply clears the blocked state and records operator his
     try testing.expect(state.agent_loop.active_tool == null);
     try testing.expectEqualStrings("", state.runtime_session.last_error);
     try testing.expectEqualStrings("", state.runtime_session.last_failure.code);
+    try testing.expectEqualStrings("keep this conversational", state.mission.current_goal);
     try testing.expectEqual(@as(usize, 1), state.agent_loop.history.len);
     try testing.expectEqualStrings("operator_reply", state.agent_loop.history[0].type);
     try testing.expectEqualStrings("operator", state.agent_loop.history[0].actor);
@@ -1072,6 +1073,7 @@ test "resumeAfterOperatorReply clears stale completion state" {
     try testing.expectEqual(GlobalStatus.planning, state.global_status);
     try testing.expectEqual(LoopStatus.thinking, state.agent_loop.status);
     try testing.expectEqual(RuntimeStatus.ready, state.runtime_session.status);
+    try testing.expectEqualStrings("what else does it do?", state.mission.current_goal);
     try testing.expectEqualStrings("", state.mission.final_response);
     try testing.expectEqual(@as(usize, 1), state.agent_loop.history.len);
     try testing.expectEqualStrings("operator_reply", state.agent_loop.history[0].type);
@@ -1417,6 +1419,17 @@ test "buildDecanusUserPrompt keeps greeting-only mission intake in follow-up mod
     var state = AppState{};
     state.mission.initial_prompt = "hello";
     state.mission.current_goal = "open the mission conversation";
+    state.agent_loop.history = &.{
+        .{
+            .iteration = 1,
+            .type = "operator_reply",
+            .actor = "operator",
+            .lane = "",
+            .summary = "you decide what to inspect",
+            .artifacts = &.{},
+            .timestamp = "1",
+        },
+    };
 
     const prompt = try buildDecanusUserPrompt(allocator, AppConfig{}, &state, .{
         .architecture = .{
@@ -1454,6 +1467,10 @@ test "buildDecanusUserPrompt keeps greeting-only mission intake in follow-up mod
     try testing.expect(std.mem.indexOf(u8, prompt, "return `action: \"ask_user\"`") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "keep the mission alive by leaving `final_response` empty") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "`Hello! What can I help with?`") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Latest operator reply:") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "you decide what to inspect") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Treat the initial prompt as mission origin") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "If the operator asks for a read-only exploratory assessment or explicitly says to choose the scope yourself") != null);
 }
 
 test "buildPromptWithContextBudget blocks when a required memory layer is missing" {

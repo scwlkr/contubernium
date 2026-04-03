@@ -284,6 +284,16 @@ pub fn summarizeRuntimeMemorySnapshot(allocator: std.mem.Allocator, memory: Runt
     );
 }
 
+fn latestOperatorReply(history: []const HistoryEntry) []const u8 {
+    var index = history.len;
+    while (index > 0) {
+        index -= 1;
+        const entry = history[index];
+        if (eql(entry.type, "operator_reply") and entry.summary.len > 0) return entry.summary;
+    }
+    return "";
+}
+
 pub fn specialistRoutingGuideText(allocator: std.mem.Allocator) ![]const u8 {
     var buffer: std.ArrayList(u8) = .empty;
     const writer = buffer.writer(allocator);
@@ -321,12 +331,14 @@ pub fn specialistRoutingGuideText(allocator: std.mem.Allocator) ![]const u8 {
 }
 
 pub fn decanusMissionHandlingGuidanceText() []const u8 {
-    return "- Treat the initial prompt as the source of mission intent.\n" ++
+    return "- Treat the initial prompt as mission origin, not as a permanent override of newer operator replies.\n" ++
+        "- When the operator provides a follow-up reply, treat that latest reply and the current goal as the controlling input unless it directly conflicts with explicit prior constraints.\n" ++
         "- If the prompt is only a greeting, presence check, or other conversational opener that does not ask for project work yet, return `action: \"ask_user\"`.\n" ++
         "- For that greeting-only opener, keep the mission alive by leaving `final_response` empty and setting `question` to a short direct follow-up such as `Hello! What can I help with?`.\n" ++
         "- If the operator asks what the project does, what problem it solves, or requests a plain-language summary, use the already-loaded architecture, plan, project context, project memory, and global memory as evidence before asking follow-up questions or requesting more tools.\n" ++
         "- When that loaded memory already answers the question, prefer `action: \"finish\"` with a concise summary instead of broad repository searches.\n" ++
         "- If a search is still necessary, target the narrowest path that can answer the question. Do not leave `search_text` at the workspace root when the intent is to inspect project context files.\n" ++
+        "- If the operator asks for a read-only exploratory assessment or explicitly says to choose the scope yourself, pick a reasonable bounded review lens and proceed. Do not bounce harmless prioritization back to the operator.\n" ++
         "- Do not invoke a specialist just because routing options exist.\n" ++
         "- Do not invent follow-on implementation work from the routing table or from unassigned task lanes.\n" ++
         "- The task summary only reflects specialist work that has been explicitly assigned during this mission.\n";
@@ -342,6 +354,7 @@ pub fn buildDecanusUserPrompt(
     const task_summary = try taskSummaryText(allocator, state.tasks);
     const constraints = try joinStrings(allocator, state.mission.constraints, ", ");
     const success_criteria = try joinStrings(allocator, state.mission.success_criteria, ", ");
+    const latest_operator_reply = latestOperatorReply(state.agent_loop.history);
     const specialist_routing = try specialistRoutingGuideText(allocator);
     defer allocator.free(specialist_routing);
     var buffer: std.ArrayList(u8) = .empty;
@@ -413,6 +426,9 @@ pub fn buildDecanusUserPrompt(
         \\Current goal:
         \\{s}
         \\
+        \\Latest operator reply:
+        \\{s}
+        \\
         \\Constraints:
         \\{s}
         \\
@@ -450,6 +466,7 @@ pub fn buildDecanusUserPrompt(
         .{
             state.mission.initial_prompt,
             state.mission.current_goal,
+            if (latest_operator_reply.len > 0) latest_operator_reply else "none",
             constraints,
             success_criteria,
             specialist_routing,

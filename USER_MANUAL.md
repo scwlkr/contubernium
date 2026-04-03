@@ -120,6 +120,8 @@ Current guarantees:
 - plain-language project-summary questions such as `what does this project do?` are answered from the already-loaded project and global memory when that context is sufficient, instead of forcing extra clarification or a broad repository scan
 - when a TTY mission run completes successfully, `contubernium mission`, `contubernium mission start`, `contubernium mission continue`, and `contubernium sessions resume` keep the same session alive and offer an inline `reply >` follow-up prompt instead of dropping immediately back to the shell
 - when a TTY mission run blocks on `USER_INPUT_REQUIRED`, `contubernium mission`, `contubernium mission start`, `contubernium mission continue`, and `contubernium sessions resume` show an `awaiting your command` follow-up block with a highlighted question and inline `reply >` prompt instead of dropping immediately back to the shell
+- a non-empty inline follow-up reply becomes the active current goal for the next Decanus turn, so the next prompt is anchored to the latest operator input instead of stale mission framing
+- read-only exploratory follow-ups can be scoped by `decanus` without forcing the operator to choose harmless prioritization details first
 - pressing `Enter` on an empty inline reply leaves the mission blocked so it can be resumed later
 - the plain CLI spinner shows a short rolling thinking preview for streaming `ollama-native` model runs while the model is active, clips the preview to the current terminal width, and keeps it on a single status line
 
