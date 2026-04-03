@@ -38,12 +38,14 @@ pub const RuntimeStatus = protocol.RuntimeStatus;
 pub const TaskStatus = protocol.TaskStatus;
 pub const InvocationStatus = protocol.InvocationStatus;
 pub const InvocationResultStatus = protocol.InvocationResultStatus;
+pub const SubordinateToolLoopStatus = protocol.SubordinateToolLoopStatus;
 pub const ApprovalStatus = protocol.ApprovalStatus;
 pub const ApprovalKind = protocol.ApprovalKind;
 pub const LoopStepKind = protocol.LoopStepKind;
 pub const Mission = protocol.Mission;
 pub const Invocation = protocol.Invocation;
 pub const InvocationResult = protocol.InvocationResult;
+pub const SubordinateToolLoop = protocol.SubordinateToolLoop;
 pub const ApprovalRequest = protocol.ApprovalRequest;
 pub const LoopStep = protocol.LoopStep;
 pub const StateSnapshot = protocol.StateSnapshot;
@@ -668,6 +670,20 @@ pub const StateManager = struct {
         setLoopStep(self.state, .execute, actor, lane, objective);
     }
 
+    pub fn beginSubordinateToolLoop(self: StateManager, lane: Lane, request_summary: []const u8) void {
+        const task = taskForLane(self.state, lane);
+        task.invocation.tool_loop.status = .requested;
+        task.invocation.tool_loop.cycle_count += 1;
+        task.invocation.tool_loop.last_request_summary = request_summary;
+        task.invocation.tool_loop.last_result_summary = "";
+    }
+
+    pub fn markSubordinateToolLoopBlocked(self: StateManager, lane: Lane, result_summary: []const u8) void {
+        const task = taskForLane(self.state, lane);
+        task.invocation.tool_loop.status = .blocked;
+        task.invocation.tool_loop.last_result_summary = result_summary;
+    }
+
     pub fn markBlocked(self: StateManager, actor: Actor, lane: Lane, summary: []const u8) void {
         self.state.global_status = .waiting_on_tool;
         self.state.agent_loop.status = .blocked;
@@ -731,7 +747,10 @@ pub const StateManager = struct {
         } else {
             self.state.global_status = .waiting_on_tool;
             self.state.agent_loop.status = .running_tool;
-            taskForLane(self.state, lane).invocation.status = .running;
+            const task = taskForLane(self.state, lane);
+            task.invocation.status = .running;
+            task.invocation.tool_loop.status = .result_available;
+            task.invocation.tool_loop.last_result_summary = summary;
         }
         setLoopStep(self.state, .result, actor, lane, summary);
         try self.appendIntermediateResult(allocator, "runtime_tool_result", actor, lane, summary);
@@ -837,6 +856,7 @@ pub const StateManager = struct {
                 .project = self.state.agent_loop.last_tool_result,
                 .relevant = dependencies,
             },
+            .tool_loop = .{},
             .return_to = .decanus,
         };
         self.state.current_actor = actor;
@@ -882,6 +902,12 @@ pub const StateManager = struct {
         task.artifacts = result.changes;
         task.invocation.result = result;
         task.invocation.status = protocol.invocationStatusForResult(result.status);
+        if (task.invocation.tool_loop.cycle_count > 0) {
+            task.invocation.tool_loop.status = .returned;
+            if (task.invocation.tool_loop.last_result_summary.len == 0) {
+                task.invocation.tool_loop.last_result_summary = result.summary;
+            }
+        }
         self.state.current_actor = .decanus;
         self.state.global_status = if (result.status == .blocked) .waiting_on_tool else .planning;
         self.state.agent_loop.status = if (result.status == .blocked) .blocked else .thinking;
@@ -2774,6 +2800,10 @@ pub fn taskLaneHasAssignedWork(task: TaskLane) bool {
         task.invocation.action_name.len > 0 or
         task.invocation.objective.len > 0 or
         task.invocation.completion_signal.len > 0 or
+        task.invocation.tool_loop.status != .idle or
+        task.invocation.tool_loop.cycle_count > 0 or
+        task.invocation.tool_loop.last_request_summary.len > 0 or
+        task.invocation.tool_loop.last_result_summary.len > 0 or
         task.invocation.result.status != .idle or
         task.invocation.result.summary.len > 0;
 }

@@ -918,12 +918,24 @@ pub fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, st
     emitStreamFinalize(hooks, actorName(actor), "summary", result_summary, .summary);
 
     if (result.tool_requests.len > 0 or eql(result.action, "tool_request")) {
+        const tool_request_summary_owned = summarizeToolRequestsForUi(allocator, result.tool_requests) catch null;
+        const tool_request_summary = tool_request_summary_owned orelse "specialist requested runtime tools";
+        stateManager(state).beginSubordinateToolLoop(lane, tool_request_summary);
+        try logRuntimeEvent(allocator, config, state, .{
+            .actor = actor,
+            .lane = lane,
+            .action = "subordinate_tool_loop_requested",
+            .status = "running",
+            .summary = tool_request_summary,
+            .include_snapshot = true,
+        });
+        emitStateSnapshot(hooks, config, state.*);
         emitLog(
             hooks,
             .tool,
             actorName(actor),
             "Runtime Tool",
-            summarizeToolRequestsForUi(allocator, result.tool_requests) catch "specialist requested runtime tools",
+            tool_request_summary,
             .plain,
         );
         const tool_result = try executeToolRequests(allocator, config, state, actor, lane, result.tool_requests, hooks);
@@ -931,11 +943,12 @@ pub fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, st
         emitStreamFinalize(hooks, actorName(actor), "runtime tool", tool_result.summary, .summary);
         if (tool_result.blocked) {
             task.invocation.status = .blocked;
+            stateManager(state).markSubordinateToolLoopBlocked(lane, tool_result.summary);
             stateManager(state).markBlocked(actor, lane, tool_result.summary);
             try logRuntimeEvent(allocator, config, state, .{
                 .actor = actor,
                 .lane = lane,
-                .action = "turn_blocked",
+                .action = "subordinate_tool_loop_blocked",
                 .status = "blocked",
                 .summary = tool_result.summary,
                 .error_text = state.runtime_session.last_error,
@@ -946,6 +959,15 @@ pub fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, st
             return .blocked;
         }
         task.invocation.status = .running;
+        try logRuntimeEvent(allocator, config, state, .{
+            .actor = actor,
+            .lane = lane,
+            .action = "subordinate_tool_loop_result_available",
+            .status = "success",
+            .summary = tool_result.summary,
+            .include_snapshot = true,
+        });
+        emitStateSnapshot(hooks, config, state.*);
         try logRuntimeEvent(allocator, config, state, .{
             .actor = actor,
             .lane = lane,
@@ -975,8 +997,8 @@ pub fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, st
         try logRuntimeEvent(allocator, config, state, .{
             .actor = actor,
             .lane = lane,
-            .action = "turn_completed",
-            .status = "complete",
+            .action = "invocation_returned",
+            .status = if (invocation_result.status == .partial) "partial" else "complete",
             .summary = invocation_result.summary,
             .output = invocation_result.summary,
             .include_snapshot = true,
@@ -1008,7 +1030,7 @@ pub fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, st
         try logRuntimeEvent(allocator, config, state, .{
             .actor = actor,
             .lane = lane,
-            .action = "turn_blocked",
+            .action = "invocation_returned",
             .status = "blocked",
             .summary = result.question,
             .error_text = result.question,
@@ -1032,7 +1054,7 @@ pub fn executeSpecialistTurn(allocator: std.mem.Allocator, config: AppConfig, st
     try logRuntimeEvent(allocator, config, state, .{
         .actor = actor,
         .lane = lane,
-        .action = "turn_blocked",
+        .action = "invocation_returned",
         .status = "blocked",
         .summary = state.runtime_session.last_error,
         .error_text = state.runtime_session.last_error,

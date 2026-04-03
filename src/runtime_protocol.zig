@@ -144,6 +144,14 @@ pub const InvocationResultStatus = enum {
     blocked,
 };
 
+pub const SubordinateToolLoopStatus = enum {
+    idle,
+    requested,
+    result_available,
+    blocked,
+    returned,
+};
+
 pub const ApprovalStatus = enum {
     idle,
     pending,
@@ -206,6 +214,13 @@ pub const InvocationResult = struct {
     confidence: f32 = 0.0,
 };
 
+pub const SubordinateToolLoop = struct {
+    status: SubordinateToolLoopStatus = .idle,
+    cycle_count: usize = 0,
+    last_request_summary: []const u8 = "",
+    last_result_summary: []const u8 = "",
+};
+
 pub const Invocation = struct {
     status: InvocationStatus = .idle,
     requested_by: Actor = .decanus,
@@ -219,6 +234,7 @@ pub const Invocation = struct {
     context: InvocationContext = .{},
     scope: InvocationScope = .{},
     memory: InvocationMemory = .{},
+    tool_loop: SubordinateToolLoop = .{},
     result: InvocationResult = .{},
     return_to: Actor = .decanus,
 };

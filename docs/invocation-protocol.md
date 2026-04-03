@@ -163,6 +163,13 @@ The Zig runtime maps this protocol to typed structures:
 - `LoopStep`
 - `StateSnapshot`
 
+Active `Invocation` state also carries a bounded subordinate tool-loop record so the runtime can expose:
+
+- the current subordinate loop status
+- the number of subordinate tool cycles already executed
+- the last subordinate tool request summary
+- the last subordinate tool result summary
+
 Supporting enums cover:
 
 - actor identity

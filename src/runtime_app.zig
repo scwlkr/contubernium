@@ -1168,6 +1168,37 @@ test "runtime tool result records an explicit loop result step" {
     try testing.expectEqualStrings("runtime_tool_result", state.agent_loop.history[0].type);
 }
 
+test "specialist runtime tool results keep subordinate loop state explicit" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+    var state = AppState{};
+    state.current_actor = .faber;
+    state.global_status = .waiting_on_tool;
+    state.agent_loop.status = .running_tool;
+    state.agent_loop.iteration = 2;
+    state.tasks.backend.invocation.status = .running;
+    state.tasks.backend.invocation.tool_loop = .{
+        .status = .requested,
+        .cycle_count = 1,
+        .last_request_summary = "requested 1 runtime tool\n- read_file src/runtime_core.zig",
+    };
+
+    try stateManager(&state).recordRuntimeToolResultStep(allocator, .faber, .backend, "read_file src/runtime_core.zig");
+
+    try testing.expectEqual(GlobalStatus.waiting_on_tool, state.global_status);
+    try testing.expectEqual(LoopStatus.running_tool, state.agent_loop.status);
+    try testing.expectEqual(LoopStepKind.result, state.agent_loop.last_step.kind);
+    try testing.expectEqualStrings("read_file src/runtime_core.zig", state.agent_loop.last_tool_result);
+    try testing.expectEqual(InvocationStatus.running, state.tasks.backend.invocation.status);
+    try testing.expectEqual(.result_available, state.tasks.backend.invocation.tool_loop.status);
+    try testing.expectEqual(@as(usize, 1), state.tasks.backend.invocation.tool_loop.cycle_count);
+    try testing.expectEqualStrings(
+        "requested 1 runtime tool\n- read_file src/runtime_core.zig",
+        state.tasks.backend.invocation.tool_loop.last_request_summary,
+    );
+    try testing.expectEqualStrings("read_file src/runtime_core.zig", state.tasks.backend.invocation.tool_loop.last_result_summary);
+}
+
 test "invocation loop transitions keep shared state and history aligned" {
     const testing = std.testing;
     const allocator = std.heap.page_allocator;
@@ -1201,9 +1232,17 @@ test "invocation loop transitions keep shared state and history aligned" {
     try testing.expectEqualStrings("IMPLEMENT_BACKEND", state.tasks.backend.invocation.action_name);
     try testing.expectEqualStrings("centralize state transitions", state.tasks.backend.invocation.memory.mission);
     try testing.expectEqualStrings("read_file src/main.zig", state.tasks.backend.invocation.memory.project);
+    try testing.expectEqual(.idle, state.tasks.backend.invocation.tool_loop.status);
     try testing.expectEqual(@as(usize, 1), state.tasks.backend.invocation.context.files.len);
     try testing.expectEqual(@as(usize, 1), state.agent_loop.history.len);
     try testing.expectEqualStrings("tool_call", state.agent_loop.history[0].type);
+
+    state.tasks.backend.invocation.tool_loop = .{
+        .status = .result_available,
+        .cycle_count = 1,
+        .last_request_summary = "requested 1 runtime tool\n- read_file src/main.zig",
+        .last_result_summary = "read_file src/main.zig",
+    };
 
     try stateManager(&state).finalizeInvocationWithHistory(allocator, .backend, .faber, .{
         .status = .complete,
@@ -1219,6 +1258,13 @@ test "invocation loop transitions keep shared state and history aligned" {
     try testing.expectEqual(RuntimeStatus.idle, state.runtime_session.status);
     try testing.expectEqual(TaskStatus.complete, state.tasks.backend.status);
     try testing.expectEqual(InvocationStatus.complete, state.tasks.backend.invocation.status);
+    try testing.expectEqual(.returned, state.tasks.backend.invocation.tool_loop.status);
+    try testing.expectEqual(@as(usize, 1), state.tasks.backend.invocation.tool_loop.cycle_count);
+    try testing.expectEqualStrings(
+        "requested 1 runtime tool\n- read_file src/main.zig",
+        state.tasks.backend.invocation.tool_loop.last_request_summary,
+    );
+    try testing.expectEqualStrings("read_file src/main.zig", state.tasks.backend.invocation.tool_loop.last_result_summary);
     try testing.expectEqualStrings("implemented state helpers", state.agent_loop.last_tool_result);
     try testing.expectEqual(@as(usize, 1), state.agent_loop.intermediate_results.len);
     try testing.expectEqual(@as(usize, 2), state.agent_loop.history.len);
@@ -1490,6 +1536,89 @@ test "buildDecanusUserPrompt foregrounds the latest operator turn ahead of backg
     try testing.expect(active_ask_index < architecture_index);
     try testing.expect(std.mem.indexOf(u8, prompt, "Latest operator reply:\nwhat gaps do you see?") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Session seed (initial prompt):\nwhat does this project do?") != null);
+}
+
+test "buildSpecialistUserPrompt surfaces the subordinate tool loop contract" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+    var state = AppState{};
+    state.mission.initial_prompt = "ship phase 2";
+    state.mission.current_goal = "formalize specialist subordinate execution";
+    state.agent_loop.last_tool_result = "read_file src/runtime_loop.zig";
+    state.tasks.backend.invocation = .{
+        .status = .running,
+        .requested_by = .decanus,
+        .target = .faber,
+        .lane = .backend,
+        .agent_call = "faber::IMPLEMENT_BACKEND",
+        .action_name = "IMPLEMENT_BACKEND",
+        .iteration = 3,
+        .objective = "make specialist tool execution explicit",
+        .completion_signal = "return a structured result to decanus",
+        .context = .{
+            .project = "Contubernium",
+            .files = &.{"src/runtime_loop.zig"},
+            .constraints = &.{"preserve commander-first control"},
+            .dependencies = &.{"src/runtime_core.zig"},
+        },
+        .scope = .{
+            .allowed_actions = &.{"execute_assigned_scope", "request_runtime_tools", "return_structured_result"},
+            .restricted_actions = &.{"chain_other_specialists", "expand_scope", "finalize_mission"},
+        },
+        .memory = .{
+            .mission = "formalize specialist subordinate execution",
+            .project = "read_file src/runtime_loop.zig",
+            .relevant = &.{"docs/invocation-protocol.md"},
+        },
+        .tool_loop = .{
+            .status = .result_available,
+            .cycle_count = 1,
+            .last_request_summary = "requested 1 runtime tool\n- read_file src/runtime_core.zig",
+            .last_result_summary = "read_file src/runtime_core.zig",
+        },
+        .return_to = .decanus,
+    };
+
+    const prompt = try buildSpecialistUserPrompt(allocator, AppConfig{}, &state, .{
+        .architecture = .{
+            .kind = "architecture",
+            .path = ".contubernium/ARCHITECTURE.md",
+            .content = "Architecture note.",
+            .source_chars = 18,
+        },
+        .plan = .{
+            .kind = "plan",
+            .path = ".contubernium/PLAN.md",
+            .content = "Plan note.",
+            .source_chars = 10,
+        },
+        .project_context = .{
+            .kind = "project_context",
+            .path = ".contubernium/PROJECT_CONTEXT.md",
+            .content = "Context note.",
+            .source_chars = 12,
+        },
+        .project = .{
+            .kind = "project",
+            .path = ".contubernium/project.md",
+            .content = "Project note.",
+            .source_chars = 12,
+        },
+        .global = .{
+            .kind = "global",
+            .path = ".contubernium/global.md",
+            .content = "Global note.",
+            .source_chars = 11,
+        },
+    }, "backend");
+
+    try testing.expect(std.mem.indexOf(u8, prompt, "Subordinate tool loop") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Status: result_available") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Completed cycles: 1") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Last request summary: requested 1 runtime tool") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Last result summary: read_file src/runtime_core.zig") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Return to: decanus") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Scope.restricted_actions: chain_other_specialists, expand_scope, finalize_mission") != null);
 }
 
 test "searchText includes hidden project context while pruning runtime noise" {

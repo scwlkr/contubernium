@@ -613,6 +613,14 @@ pub fn buildSpecialistUserPrompt(
         \\Memory.project: {s}
         \\Memory.relevant: {s}
         \\
+        \\Subordinate tool loop
+        \\---------------------
+        \\Status: {s}
+        \\Completed cycles: {d}
+        \\Last request summary: {s}
+        \\Last result summary: {s}
+        \\Return to: {s}
+        \\
         \\Last tool result:
         \\{s}
         \\
@@ -641,6 +649,11 @@ pub fn buildSpecialistUserPrompt(
             task.invocation.memory.mission,
             task.invocation.memory.project,
             relevant_memory,
+            @tagName(task.invocation.tool_loop.status),
+            task.invocation.tool_loop.cycle_count,
+            task.invocation.tool_loop.last_request_summary,
+            task.invocation.tool_loop.last_result_summary,
+            actorName(task.invocation.return_to),
             state.agent_loop.last_tool_result,
             history,
         },
