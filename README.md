@@ -231,6 +231,7 @@ plan.template.md
 project_context.template.md
 
 docs/
+README.md
 doctrine.md
 agent-contracts.md
 invocation-protocol.md

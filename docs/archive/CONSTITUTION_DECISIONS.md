@@ -1,5 +1,7 @@
 # Constitution Decisions
 
+> Archived decision record. The active interpretations should be reflected in the Constitution-adjacent core docs at the `docs/` root.
+
 ## Purpose
 
 This document records owner decisions that resolve constitutional ambiguities and unblock implementation work.

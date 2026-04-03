@@ -1,5 +1,7 @@
 # Context Engineering
 
+> Scratchpad note. This is exploratory background material, not a constitutional or operator-facing source of truth for Contubernium.
+
 Context engineering is the practice of giving an AI system the right information at the right time so it can do useful work without being overloaded.
 
 A model only sees what is inside its context window during a given step. That means performance depends not just on the model itself, but on how well its context is prepared, filtered, structured, and refreshed.

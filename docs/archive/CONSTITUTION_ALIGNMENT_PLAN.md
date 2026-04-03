@@ -1,11 +1,13 @@
 # Constitution Alignment Plan
 
+> Archived working document. Keep for implementation history; use the root `docs/` files for current canonical guidance.
+
 ## Purpose
 
 This document turns the gap analysis into concrete implementation work. It is ordered to reduce governance drift first, then runtime risk, then long-tail cleanup.
 
-Use this plan together with [docs/CONSTITUTION_GAP_ANALYSIS.md](./CONSTITUTION_GAP_ANALYSIS.md).
-Resolved owner decisions are recorded in [docs/CONSTITUTION_DECISIONS.md](./CONSTITUTION_DECISIONS.md).
+Use this plan together with [CONSTITUTION_GAP_ANALYSIS.md](./CONSTITUTION_GAP_ANALYSIS.md).
+Resolved owner decisions are recorded in [CONSTITUTION_DECISIONS.md](./CONSTITUTION_DECISIONS.md).
 
 ## Alignment Principles
 

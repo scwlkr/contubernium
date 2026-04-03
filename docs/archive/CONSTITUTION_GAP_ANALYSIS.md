@@ -1,8 +1,10 @@
 # Constitution Gap Analysis
 
+> Archived audit document. Useful for historical context, but not a canonical operating document.
+
 ## Purpose
 
-This document maps [docs/CONTUBERNIUM_CONSTITUTION.md](./CONTUBERNIUM_CONSTITUTION.md) against the current Contubernium repository. It identifies where the project is already aligned, where alignment is partial, and where implementation or governance changes are required.
+This document maps [CONTUBERNIUM_CONSTITUTION.md](../CONTUBERNIUM_CONSTITUTION.md) against the current Contubernium repository. It identifies where the project is already aligned, where alignment is partial, and where implementation or governance changes are required.
 
 This document does not amend the Constitution. It is an implementation audit.
 
@@ -79,7 +81,7 @@ The main drift is:
 
 ## Resolved Owner Decisions
 
-The following ambiguities are now resolved and recorded in [docs/CONSTITUTION_DECISIONS.md](./CONSTITUTION_DECISIONS.md):
+The following ambiguities are now resolved and recorded in [CONSTITUTION_DECISIONS.md](./CONSTITUTION_DECISIONS.md):
 
 1. The core 8 includes `decanus`.
 2. OpenRouter should be first-class, implemented via the standard OpenAI-compatible transport pattern.
@@ -93,4 +95,4 @@ One structural item still benefits from an explicit choice during implementation
 
 ## Recommended Next Document
 
-Use [docs/CONSTITUTION_ALIGNMENT_PLAN.md](./CONSTITUTION_ALIGNMENT_PLAN.md) as the implementation sequence for resolving the conflicts in this audit.
+Use [CONSTITUTION_ALIGNMENT_PLAN.md](./CONSTITUTION_ALIGNMENT_PLAN.md) as the implementation sequence for resolving the conflicts in this audit.
