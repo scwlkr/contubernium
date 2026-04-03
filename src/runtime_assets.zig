@@ -1192,10 +1192,9 @@ pub fn appendSelectedActionSections(
 }
 
 pub fn copyFileIfMissing(allocator: std.mem.Allocator, source_path: []const u8, target_path: []const u8) !void {
-    _ = allocator;
     std.fs.cwd().access(target_path, .{}) catch {
-        const content = try std.fs.cwd().readFileAlloc(std.heap.page_allocator, source_path, max_file_bytes);
-        defer std.heap.page_allocator.free(content);
+        const content = try std.fs.cwd().readFileAlloc(allocator, source_path, max_file_bytes);
+        defer allocator.free(content);
         if (std.fs.path.dirname(target_path)) |dir_name| {
             try std.fs.cwd().makePath(dir_name);
         }

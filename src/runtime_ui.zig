@@ -263,6 +263,7 @@ const OpenTuiBridge = struct {
             if (task.control.approval_pending) submitApprovalResponse(task.control, false);
             if (task.control.running.load(.seq_cst)) task.control.interrupt_requested.store(true, .seq_cst);
             if (task.thread) |thread| thread.join();
+            if (task.mission_prompt.len > 0) self.allocator.free(task.mission_prompt);
             self.allocator.destroy(task);
             self.worker = null;
         }
@@ -272,6 +273,7 @@ const OpenTuiBridge = struct {
         if (self.worker) |task| {
             if (!task.control.running.load(.seq_cst)) {
                 if (task.thread) |thread| thread.join();
+                if (task.mission_prompt.len > 0) self.allocator.free(task.mission_prompt);
                 self.allocator.destroy(task);
                 self.worker = null;
             }
@@ -1859,6 +1861,9 @@ fn startWorker(
 
 fn workerMain(task: *WorkerTask) void {
     defer task.control.running.store(false, .seq_cst);
+    var arena = std.heap.ArenaAllocator.init(task.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
 
     const hooks = RuntimeHooks{
         .context = task,
@@ -1869,55 +1874,55 @@ fn workerMain(task: *WorkerTask) void {
 
     switch (task.command) {
         .mission => {
-            runMissionInternal(task.allocator, task.mission_prompt, hooks) catch |err| {
-                emitLog(hooks, .danger, "", "Runtime Error", friendlyRuntimeError(task.allocator, err) catch @errorName(err), .plain);
+            runMissionInternal(scratch, task.mission_prompt, hooks) catch |err| {
+                emitLog(hooks, .danger, "", "Runtime Error", friendlyRuntimeError(scratch, err) catch @errorName(err), .plain);
             };
         },
         .resume_run => {
-            const config = loadProjectConfig(task.allocator) catch |err| {
-                emitLog(hooks, .danger, "", "Resume Failed", friendlyRuntimeError(task.allocator, err) catch @errorName(err), .plain);
+            const config = loadProjectConfig(scratch) catch |err| {
+                emitLog(hooks, .danger, "", "Resume Failed", friendlyRuntimeError(scratch, err) catch @errorName(err), .plain);
                 return;
             };
-            var state = loadState(task.allocator, config.paths.state_file) catch |err| {
-                emitLog(hooks, .danger, "", "Resume Failed", friendlyRuntimeError(task.allocator, err) catch @errorName(err), .plain);
+            var state = loadState(scratch, config.paths.state_file) catch |err| {
+                emitLog(hooks, .danger, "", "Resume Failed", friendlyRuntimeError(scratch, err) catch @errorName(err), .plain);
                 return;
             };
             if (state.mission.initial_prompt.len == 0) {
                 emitLog(hooks, .danger, "", "Resume Failed", "no active session is available to resume", .plain);
                 return;
             }
-            startRunFromState(task.allocator, config, &state, "resume", "active session resume requested", "", true, hooks) catch |err| {
-                emitLog(hooks, .danger, "", "Resume Failed", friendlyRuntimeError(task.allocator, err) catch @errorName(err), .plain);
+            startRunFromState(scratch, config, &state, "resume", "active session resume requested", "", true, hooks) catch |err| {
+                emitLog(hooks, .danger, "", "Resume Failed", friendlyRuntimeError(scratch, err) catch @errorName(err), .plain);
                 return;
             };
-            runLoop(task.allocator, config, &state, hooks) catch |err| {
-                emitLog(hooks, .danger, "", "Resume Failed", friendlyRuntimeError(task.allocator, err) catch @errorName(err), .plain);
+            runLoop(scratch, config, &state, hooks) catch |err| {
+                emitLog(hooks, .danger, "", "Resume Failed", friendlyRuntimeError(scratch, err) catch @errorName(err), .plain);
                 return;
             };
-            finishRunState(task.allocator, config, &state, "resume", hooks) catch {};
-            const summary = missionOutcomeSummary(task.allocator, state) catch "resume completed";
+            finishRunState(scratch, config, &state, "resume", hooks) catch {};
+            const summary = missionOutcomeSummary(scratch, state) catch "resume completed";
             emitLog(hooks, toneForOutcome(state), "", "Loop Status", summary, .plain);
         },
         .doctor => {
-            const report = runDoctorCheck(task.allocator) catch |err| {
-                emitLog(hooks, .danger, "", "Doctor Failed", friendlyRuntimeError(task.allocator, err) catch @errorName(err), .plain);
+            const report = runDoctorCheck(scratch) catch |err| {
+                emitLog(hooks, .danger, "", "Doctor Failed", friendlyRuntimeError(scratch, err) catch @errorName(err), .plain);
                 return;
             };
             emitLog(hooks, .success, "", "Doctor", report, .plain);
-            const config = loadProjectConfig(task.allocator) catch return;
-            const state = loadState(task.allocator, config.paths.state_file) catch return;
+            const config = loadProjectConfig(scratch) catch return;
+            const state = loadState(scratch, config.paths.state_file) catch return;
             emitStateSnapshot(hooks, config, state);
         },
         .models => {
-            const config = loadProjectConfig(task.allocator) catch |err| {
-                emitLog(hooks, .danger, "", "Model Query Failed", friendlyRuntimeError(task.allocator, err) catch @errorName(err), .plain);
+            const config = loadProjectConfig(scratch) catch |err| {
+                emitLog(hooks, .danger, "", "Model Query Failed", friendlyRuntimeError(scratch, err) catch @errorName(err), .plain);
                 return;
             };
-            const models = providerListModels(task.allocator, config.provider) catch |err| {
-                emitLog(hooks, .danger, "", "Model Query Failed", friendlyRuntimeError(task.allocator, err) catch @errorName(err), .plain);
+            const models = providerListModels(scratch, config.provider) catch |err| {
+                emitLog(hooks, .danger, "", "Model Query Failed", friendlyRuntimeError(scratch, err) catch @errorName(err), .plain);
                 return;
             };
-            const roster = formatModelRoster(task.allocator, models, config.provider.model) catch "unable to format models";
+            const roster = formatModelRoster(scratch, models, config.provider.model) catch "unable to format models";
             hooks.emit(.{
                 .kind = .model_roster,
                 .title = "models",
@@ -2094,10 +2099,12 @@ fn bridgeEmitLog(tone: ChatTone, actor: []const u8, title: []const u8, text: []c
 }
 
 fn bridgeRefreshSnapshot(bridge: *OpenTuiBridge) !void {
-    const config = try loadProjectConfig(bridge.allocator);
-    const state = try loadState(bridge.allocator, config.paths.state_file);
-    const cwd = try std.process.getCwdAlloc(bridge.allocator);
-    defer bridge.allocator.free(cwd);
+    var arena = std.heap.ArenaAllocator.init(bridge.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    const config = try loadProjectConfig(scratch);
+    const state = try loadState(scratch, config.paths.state_file);
+    const cwd = try std.process.getCwdAlloc(scratch);
 
     try setOwnedSnapshot(
         bridge.allocator,
@@ -2126,8 +2133,11 @@ fn bridgeFlushRuntimeEvents(bridge: *OpenTuiBridge) !void {
 }
 
 fn bridgeSetSessionApprovals(bridge: *OpenTuiBridge, enabled: bool) !void {
-    const config = try loadProjectConfig(bridge.allocator);
-    var state = try loadState(bridge.allocator, config.paths.state_file);
+    var arena = std.heap.ArenaAllocator.init(bridge.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    const config = try loadProjectConfig(scratch);
+    var state = try loadState(scratch, config.paths.state_file);
     if (state.mission.initial_prompt.len == 0 and state.runtime_session.session_id.len == 0) {
         try bridgeEmitLog(.warning, "runtime", "No Session", "start or resume a session before changing approval bypass", .plain);
         return;
@@ -2135,9 +2145,9 @@ fn bridgeSetSessionApprovals(bridge: *OpenTuiBridge, enabled: bool) !void {
 
     state.runtime_session.approval_bypass_enabled = enabled;
     state.runtime_session.approval_mode = resolvedApprovalMode(config.policy.approval_mode, enabled);
-    initializeRuntimeSession(bridge.allocator, &state, config);
-    try persistSessionMemory(bridge.allocator, config, &state, "sessions_approvals");
-    try saveState(bridge.allocator, config.paths.state_file, state);
+    initializeRuntimeSession(scratch, &state, config);
+    try persistSessionMemory(scratch, config, &state, "sessions_approvals");
+    try saveState(scratch, config.paths.state_file, state);
     try bridgeEmitLog(
         .success,
         "runtime",
@@ -2153,7 +2163,10 @@ fn bridgeStartWorker(bridge: *OpenTuiBridge, command: WorkerCommandKind, mission
 }
 
 fn bridgeHandleCommand(bridge: *OpenTuiBridge, line: []const u8) !bool {
-    const command = parseJson(OpenTuiBridgeCommand, bridge.allocator, line) catch {
+    var arena = std.heap.ArenaAllocator.init(bridge.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    const command = parseJson(OpenTuiBridgeCommand, scratch, line) catch {
         try bridgeEmitLog(.danger, "opentui", "Bridge Command Failed", "invalid OpenTUI bridge command JSON", .plain);
         return true;
     };
@@ -2203,8 +2216,8 @@ fn bridgeHandleCommand(bridge: *OpenTuiBridge, line: []const u8) !bool {
             try bridgeEmitLog(.warning, "models", "Usage", "set_model requires a model name", .plain);
             return true;
         }
-        const saved = saveSelectedModelByName(bridge.allocator, trimAscii(command.model)) catch |err| {
-            try bridgeEmitLog(.danger, "models", "Model Change Failed", try friendlyRuntimeError(bridge.allocator, err), .plain);
+        const saved = saveSelectedModelByName(scratch, trimAscii(command.model)) catch |err| {
+            try bridgeEmitLog(.danger, "models", "Model Change Failed", try friendlyRuntimeError(scratch, err), .plain);
             return true;
         };
         try bridgeEmitLog(.success, "models", "Model Changed", saved, .plain);
@@ -2241,7 +2254,7 @@ fn bridgeHandleCommand(bridge: *OpenTuiBridge, line: []const u8) !bool {
         return true;
     }
 
-    try bridgeEmitLog(.danger, "opentui", "Unknown Command", try std.fmt.allocPrint(bridge.allocator, "unknown bridge command: {s}", .{command.type}), .plain);
+    try bridgeEmitLog(.danger, "opentui", "Unknown Command", try std.fmt.allocPrint(scratch, "unknown bridge command: {s}", .{command.type}), .plain);
     return true;
 }
 

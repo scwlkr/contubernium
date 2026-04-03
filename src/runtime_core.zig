@@ -465,6 +465,11 @@ pub const ProviderResponse = struct {
     provider_name: []const u8,
     model_name: []const u8,
     latency_ms: i64,
+
+    pub fn deinit(self: ProviderResponse, allocator: std.mem.Allocator) void {
+        allocator.free(self.raw_text);
+        allocator.free(self.transport_text);
+    }
 };
 
 pub const CommandResult = struct {
@@ -533,6 +538,11 @@ pub const RuntimeMemorySnapshot = struct {
 pub const PromptBuildResult = struct {
     user_prompt: []const u8,
     memory: RuntimeMemorySnapshot,
+
+    pub fn deinit(self: PromptBuildResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.user_prompt);
+        self.memory.deinit(allocator);
+    }
 };
 
 pub const GlobalAssetLayout = struct {

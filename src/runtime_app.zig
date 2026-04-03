@@ -346,10 +346,18 @@ const structuredChatWithRepair = loop_mod.structuredChatWithRepair;
 const resolvedDecanusControlAction = loop_mod.resolvedDecanusControlAction;
 
 pub fn main() !void {
-    const allocator = std.heap.page_allocator;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
     const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
     runMain(allocator, args) catch |err| {
-        try stderrPrint("{s}\n", .{try friendlyRuntimeError(allocator, err)});
+        const message = friendlyRuntimeError(allocator, err) catch {
+            try stderrPrint("{s}\n", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        defer allocator.free(message);
+        try stderrPrint("{s}\n", .{message});
         std.process.exit(1);
     };
 }
@@ -368,26 +376,32 @@ fn runMain(allocator: std.mem.Allocator, args: []const []const u8) !void {
             try stderrPrint("{s}\n", .{text});
             return error.InvalidArguments;
         },
-        .action => |invocation| switch (invocation.action) {
-            .init => try cmdInit(allocator),
-            .doctor => try cmdDoctor(allocator),
-            .models_list => try cmdModelsList(allocator),
-            .mission_compose => try ui_mod.cmdMissionCompose(allocator),
-            .mission_start => try ui_mod.cmdMissionStart(allocator, invocation.args),
-            .mission_continue => try ui_mod.cmdMissionContinue(allocator),
-            .mission_step => try ui_mod.cmdMissionStep(allocator),
-            .sessions_list => try ui_mod.cmdSessionsList(allocator, invocation.args),
-            .sessions_show => try ui_mod.cmdSessionsShow(allocator, invocation.args),
-            .sessions_resume => try ui_mod.cmdSessionsResume(allocator, invocation.args),
-            .sessions_approvals => {
-                const enabled = invocation.args.len > 0 and (eql(trimAscii(invocation.args[0]), "on") or eql(trimAscii(invocation.args[0]), "true"));
-                if (!enabled and invocation.args.len > 0 and !eql(trimAscii(invocation.args[0]), "off") and !eql(trimAscii(invocation.args[0]), "false")) {
-                    return error.InvalidArguments;
-                }
-                try ui_mod.cmdSessionsApprovals(allocator, enabled);
-            },
-            .ui => try ui_mod.cmdUi(allocator),
-            .ui_bridge => try ui_mod.cmdUiBridge(allocator),
+        .action => |invocation| {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+            const scratch = arena.allocator();
+
+            switch (invocation.action) {
+                .init => try cmdInit(scratch),
+                .doctor => try cmdDoctor(scratch),
+                .models_list => try cmdModelsList(scratch),
+                .mission_compose => try ui_mod.cmdMissionCompose(scratch),
+                .mission_start => try ui_mod.cmdMissionStart(scratch, invocation.args),
+                .mission_continue => try ui_mod.cmdMissionContinue(scratch),
+                .mission_step => try ui_mod.cmdMissionStep(scratch),
+                .sessions_list => try ui_mod.cmdSessionsList(scratch, invocation.args),
+                .sessions_show => try ui_mod.cmdSessionsShow(scratch, invocation.args),
+                .sessions_resume => try ui_mod.cmdSessionsResume(scratch, invocation.args),
+                .sessions_approvals => {
+                    const enabled = invocation.args.len > 0 and (eql(trimAscii(invocation.args[0]), "on") or eql(trimAscii(invocation.args[0]), "true"));
+                    if (!enabled and invocation.args.len > 0 and !eql(trimAscii(invocation.args[0]), "off") and !eql(trimAscii(invocation.args[0]), "false")) {
+                        return error.InvalidArguments;
+                    }
+                    try ui_mod.cmdSessionsApprovals(scratch, enabled);
+                },
+                .ui => try ui_mod.cmdUi(scratch),
+                .ui_bridge => try ui_mod.cmdUiBridge(scratch),
+            }
         },
     }
 }
@@ -2240,6 +2254,47 @@ test "structuredChatWithRepair resolves llama.cpp registry route for smoke respo
     try testing.expectEqualStrings("llama.cpp", state.runtime_session.provider);
     try testing.expectEqualStrings("gemma-4-12b-it", state.runtime_session.model);
     try testing.expectEqualStrings("primary", state.runtime_session.last_model_role);
+}
+
+test "provider transport paths release owned buffers under a scoped allocator" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer {
+        const status = gpa.deinit();
+        testing.expect(status == .ok) catch @panic("gpa leaked");
+    }
+    const allocator = gpa.allocator();
+
+    const port = @as(u16, 19000 + @as(u16, @intCast(@mod(std.time.milliTimestamp(), 1000))));
+    var server = try startMockLlamaCppServer(allocator, port);
+    defer server.deinit();
+
+    const base_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{port});
+    defer allocator.free(base_url);
+
+    const provider = core.ProviderConfig{
+        .type = "llama.cpp",
+        .base_url = base_url,
+        .model = "gemma-4-12b-it",
+    };
+
+    const models = try providerListModels(allocator, provider);
+    defer freeOwnedStringSlice(allocator, models);
+    try testing.expect(containsString(models, "gemma-4-4b-it"));
+    try testing.expect(containsString(models, "gemma-4-12b-it"));
+
+    const response = try providerStructuredChat(
+        allocator,
+        provider,
+        "Return valid JSON only.",
+        "Return exactly {\"status\":\"ok\"}.",
+        "faber",
+        .{},
+    );
+    defer response.deinit(allocator);
+
+    try testing.expectEqualStrings("{\"status\":\"ok\"}", response.raw_text);
+    try testing.expect(std.mem.indexOf(u8, response.transport_text, "\"choices\"") != null);
 }
 
 test "initializeRuntimeRunLog stores model policy metadata" {
