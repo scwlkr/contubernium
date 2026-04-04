@@ -49,7 +49,7 @@ pub fn executeDecanusTurn(
 ) !core.StepOutcome {
     core.stateManager(state).beginCommanderThinking();
     core.emitStateSnapshot(hooks, config, state.*);
-    try assets_mod.logRuntimeEvent(allocator, config, state, .{
+    try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
         .actor = .decanus,
         .lane = .command,
         .action = "turn_started",
@@ -77,14 +77,14 @@ pub fn executeDecanusTurn(
     };
     defer prompt_build.deinit(allocator);
     const user_prompt = prompt_build.user_prompt;
-    try assets_mod.logRuntimeEvent(allocator, config, state, .{
+    try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
         .actor = .decanus,
         .lane = .command,
         .action = "memory_layers_loaded",
         .status = "success",
         .summary = try prompting_mod.summarizeRuntimeMemorySnapshot(allocator, prompt_build.memory),
     });
-    try assets_mod.logRuntimeEvent(allocator, config, state, .{
+    try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
         .actor = .decanus,
         .lane = .command,
         .action = "system_prompt",
@@ -92,7 +92,7 @@ pub fn executeDecanusTurn(
         .summary = "assembled decanus system prompt",
         .output = system_prompt,
     });
-    try assets_mod.logRuntimeEvent(allocator, config, state, .{
+    try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
         .actor = .decanus,
         .lane = .command,
         .action = "user_prompt",
@@ -114,7 +114,7 @@ pub fn executeDecanusTurn(
     ) catch |err| {
         if (err == error.Interrupted) {
             core.markInterrupted(state);
-            try assets_mod.logRuntimeEvent(allocator, config, state, .{
+            try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
                 .actor = .decanus,
                 .lane = .command,
                 .action = "turn_interrupted",
@@ -133,7 +133,7 @@ pub fn executeDecanusTurn(
         });
         core.recordRuntimeFailure(state, failure);
         core.stateManager(state).markBlocked(.decanus, .command, message);
-        try assets_mod.logRuntimeEvent(allocator, config, state, .{
+        try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
             .actor = .decanus,
             .lane = .command,
             .action = "turn_failed",
@@ -160,7 +160,7 @@ pub fn executeDecanusTurn(
             .{action_label},
         );
         defer allocator.free(repair_message);
-        try assets_mod.logRuntimeEvent(allocator, config, state, .{
+        try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
             .actor = .decanus,
             .lane = .command,
             .action = "semantic_repair",
@@ -198,7 +198,7 @@ pub fn executeDecanusTurn(
             });
             core.recordRuntimeFailure(state, failure);
             core.stateManager(state).markBlocked(.decanus, .command, message);
-            try assets_mod.logRuntimeEvent(allocator, config, state, .{
+            try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
                 .actor = .decanus,
                 .lane = .command,
                 .action = "turn_blocked",
@@ -219,7 +219,7 @@ pub fn executeDecanusTurn(
         normalized_action = resolvedDecanusControlAction(decision);
         repaired_decision = true;
     }
-    try assets_mod.logRuntimeEvent(allocator, config, state, .{
+    try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
         .actor = .decanus,
         .lane = .command,
         .action = "model_output",
@@ -228,7 +228,7 @@ pub fn executeDecanusTurn(
         .output = decision_raw_text,
     });
     const decision_summary = core.summarizeDecanusDecisionForUi(allocator, decision) catch prettyPrintJson(allocator, decision_raw_text) catch decision_raw_text;
-    try assets_mod.logRuntimeEvent(allocator, config, state, .{
+    try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
         .actor = .decanus,
         .lane = .command,
         .action = "parsed_output",
@@ -257,7 +257,7 @@ pub fn executeDecanusTurn(
         core.emitStreamFinalize(hooks, "decanus", "runtime tool", tool_result.summary, .summary);
         if (tool_result.blocked) {
             core.stateManager(state).markBlocked(.decanus, .command, tool_result.summary);
-            try assets_mod.logRuntimeEvent(allocator, config, state, .{
+            try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
                 .actor = .decanus,
                 .lane = .command,
                 .action = "turn_blocked",
@@ -270,7 +270,7 @@ pub fn executeDecanusTurn(
             core.emitStateSnapshot(hooks, config, state.*);
             return .blocked;
         }
-        try assets_mod.logRuntimeEvent(allocator, config, state, .{
+        try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
             .actor = .decanus,
             .lane = .command,
             .action = "turn_advanced",
@@ -291,7 +291,7 @@ pub fn executeDecanusTurn(
 
     if (core.eql(normalized_action, "finish")) {
         try core.stateManager(state).completeMissionWithHistory(allocator, .decanus, .command, decision.final_response);
-        try assets_mod.logRuntimeEvent(allocator, config, state, .{
+        try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
             .actor = .decanus,
             .lane = .command,
             .action = "run_completed",
@@ -314,7 +314,7 @@ pub fn executeDecanusTurn(
             });
             core.recordRuntimeFailure(state, failure);
             core.stateManager(state).markBlocked(.decanus, .command, message);
-            try assets_mod.logRuntimeEvent(allocator, config, state, .{
+            try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
                 .actor = .decanus,
                 .lane = .command,
                 .action = "turn_blocked",
@@ -338,7 +338,7 @@ pub fn executeDecanusTurn(
             invocation_resolution.agent_call,
             invocation_resolution.action_name,
         );
-        try assets_mod.logRuntimeEvent(allocator, config, state, .{
+        try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
             .actor = .decanus,
             .lane = .command,
             .action = "specialist_invoked",
@@ -375,7 +375,7 @@ pub fn executeDecanusTurn(
             .artifacts = &.{},
             .timestamp = try core.unixTimestampString(allocator),
         });
-        try assets_mod.logRuntimeEvent(allocator, config, state, .{
+        try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
             .actor = .decanus,
             .lane = .command,
             .action = "turn_blocked",
@@ -405,7 +405,7 @@ pub fn executeDecanusTurn(
     });
     core.recordRuntimeFailure(state, blocked_failure);
     core.stateManager(state).markBlocked(.decanus, .command, state.runtime_session.last_error);
-    try assets_mod.logRuntimeEvent(allocator, config, state, .{
+    try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
         .actor = .decanus,
         .lane = .command,
         .action = "turn_blocked",

@@ -20,7 +20,7 @@ pub fn executeSpecialistTurn(
     var task = core.taskForLane(state, lane);
     core.stateManager(state).beginSpecialistExecution(actor, lane, task.invocation.objective);
     core.emitStateSnapshot(hooks, config, state.*);
-    try assets_mod.logRuntimeEvent(allocator, config, state, .{
+    try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
         .actor = actor,
         .lane = lane,
         .action = "turn_started",
@@ -46,14 +46,14 @@ pub fn executeSpecialistTurn(
     };
     defer prompt_build.deinit(allocator);
     const user_prompt = prompt_build.user_prompt;
-    try assets_mod.logRuntimeEvent(allocator, config, state, .{
+    try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
         .actor = actor,
         .lane = lane,
         .action = "memory_layers_loaded",
         .status = "success",
         .summary = try prompting_mod.summarizeRuntimeMemorySnapshot(allocator, prompt_build.memory),
     });
-    try assets_mod.logRuntimeEvent(allocator, config, state, .{
+    try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
         .actor = actor,
         .lane = lane,
         .action = "system_prompt",
@@ -61,7 +61,7 @@ pub fn executeSpecialistTurn(
         .summary = "assembled specialist system prompt",
         .output = system_prompt,
     });
-    try assets_mod.logRuntimeEvent(allocator, config, state, .{
+    try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
         .actor = actor,
         .lane = lane,
         .action = "user_prompt",
@@ -84,7 +84,7 @@ pub fn executeSpecialistTurn(
         if (err == error.Interrupted) {
             core.markInterrupted(state);
             task.invocation.status = .blocked;
-            try assets_mod.logRuntimeEvent(allocator, config, state, .{
+            try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
                 .actor = actor,
                 .lane = lane,
                 .action = "turn_interrupted",
@@ -104,7 +104,7 @@ pub fn executeSpecialistTurn(
         task.invocation.status = .blocked;
         core.recordRuntimeFailure(state, failure);
         core.stateManager(state).markBlocked(actor, lane, message);
-        try assets_mod.logRuntimeEvent(allocator, config, state, .{
+        try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
             .actor = actor,
             .lane = lane,
             .action = "turn_failed",
@@ -119,7 +119,7 @@ pub fn executeSpecialistTurn(
     };
     defer allocator.free(response.raw_text);
     const result = response.value;
-    try assets_mod.logRuntimeEvent(allocator, config, state, .{
+    try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
         .actor = actor,
         .lane = lane,
         .action = "model_output",
@@ -128,7 +128,7 @@ pub fn executeSpecialistTurn(
         .output = response.raw_text,
     });
     const result_summary = core.summarizeSpecialistResultForUi(allocator, result) catch prettyPrintJson(allocator, response.raw_text) catch response.raw_text;
-    try assets_mod.logRuntimeEvent(allocator, config, state, .{
+    try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
         .actor = actor,
         .lane = lane,
         .action = "parsed_output",
@@ -143,7 +143,7 @@ pub fn executeSpecialistTurn(
         const tool_request_summary_owned = core.summarizeToolRequestsForUi(allocator, result.tool_requests) catch null;
         const tool_request_summary = tool_request_summary_owned orelse "specialist requested runtime tools";
         core.stateManager(state).beginSubordinateToolLoop(lane, tool_request_summary);
-        try assets_mod.logRuntimeEvent(allocator, config, state, .{
+        try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
             .actor = actor,
             .lane = lane,
             .action = "subordinate_tool_loop_requested",
@@ -167,7 +167,7 @@ pub fn executeSpecialistTurn(
             task.invocation.status = .blocked;
             core.stateManager(state).markSubordinateToolLoopBlocked(lane, tool_result.summary);
             core.stateManager(state).markBlocked(actor, lane, tool_result.summary);
-            try assets_mod.logRuntimeEvent(allocator, config, state, .{
+            try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
                 .actor = actor,
                 .lane = lane,
                 .action = "subordinate_tool_loop_blocked",
@@ -181,7 +181,7 @@ pub fn executeSpecialistTurn(
             return .blocked;
         }
         task.invocation.status = .running;
-        try assets_mod.logRuntimeEvent(allocator, config, state, .{
+        try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
             .actor = actor,
             .lane = lane,
             .action = "subordinate_tool_loop_result_available",
@@ -190,7 +190,7 @@ pub fn executeSpecialistTurn(
             .include_snapshot = true,
         });
         core.emitStateSnapshot(hooks, config, state.*);
-        try assets_mod.logRuntimeEvent(allocator, config, state, .{
+        try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
             .actor = actor,
             .lane = lane,
             .action = "turn_advanced",
@@ -216,7 +216,7 @@ pub fn executeSpecialistTurn(
             if (core.eql(result.status, "partial")) .partial else .complete,
         );
         try core.stateManager(state).finalizeInvocationWithHistory(allocator, lane, actor, invocation_result, result.description);
-        try assets_mod.logRuntimeEvent(allocator, config, state, .{
+        try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
             .actor = actor,
             .lane = lane,
             .action = "invocation_returned",
@@ -249,7 +249,7 @@ pub fn executeSpecialistTurn(
             .artifacts = &.{},
             .timestamp = try core.unixTimestampString(allocator),
         });
-        try assets_mod.logRuntimeEvent(allocator, config, state, .{
+        try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
             .actor = actor,
             .lane = lane,
             .action = "invocation_returned",
@@ -273,7 +273,7 @@ pub fn executeSpecialistTurn(
     core.emitStreamFinalize(hooks, core.actorName(actor), "result", invocation_result.summary, .summary);
     core.recordRuntimeFailure(state, blocked_failure);
     core.stateManager(state).markBlocked(actor, lane, state.runtime_session.last_error);
-    try assets_mod.logRuntimeEvent(allocator, config, state, .{
+    try assets_mod.logRuntimeEventWithUi(allocator, config, state, hooks, .{
         .actor = actor,
         .lane = lane,
         .action = "invocation_returned",

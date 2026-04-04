@@ -1285,6 +1285,7 @@ pub const WorkerCommandKind = enum {
 
 pub const RuntimeUiEventKind = enum {
     log,
+    run_log_event,
     stream_start,
     thinking_chunk,
     stream_chunk,
@@ -1301,6 +1302,7 @@ pub const RuntimeUiEvent = struct {
     title: []const u8 = "",
     text: []const u8 = "",
     highlight: HighlightKind = .plain,
+    log_timestamp: []const u8 = "",
     project_name: []const u8 = "",
     provider_type: []const u8 = "",
     model: []const u8 = "",
@@ -1375,6 +1377,7 @@ pub fn cloneRuntimeUiEvent(allocator: std.mem.Allocator, event: RuntimeUiEvent) 
         .title = try allocator.dupe(u8, event.title),
         .text = try allocator.dupe(u8, event.text),
         .highlight = event.highlight,
+        .log_timestamp = try allocator.dupe(u8, event.log_timestamp),
         .project_name = try allocator.dupe(u8, event.project_name),
         .provider_type = try allocator.dupe(u8, event.provider_type),
         .model = try allocator.dupe(u8, event.model),
@@ -1410,6 +1413,7 @@ pub fn freeRuntimeUiEvent(allocator: std.mem.Allocator, event: RuntimeUiEvent) v
     allocator.free(event.actor);
     allocator.free(event.title);
     allocator.free(event.text);
+    allocator.free(event.log_timestamp);
     allocator.free(event.project_name);
     allocator.free(event.provider_type);
     allocator.free(event.model);
@@ -2386,6 +2390,60 @@ pub fn emitLog(hooks: RuntimeHooks, tone: ChatTone, actor: []const u8, title: []
         .title = title,
         .text = text,
         .highlight = highlight,
+    });
+}
+
+fn runtimeLogUiTone(status: []const u8) ChatTone {
+    if (eql(status, "blocked") or eql(status, "error")) return .danger;
+    if (eql(status, "success") or eql(status, "complete")) return .success;
+    if (eql(status, "requested") or eql(status, "captured")) return .tool;
+    if (eql(status, "warning")) return .warning;
+    return .info;
+}
+
+fn runtimeLogUiTitle(allocator: std.mem.Allocator, event: RuntimeLogEvent) ![]u8 {
+    const action = if (event.action.len > 0) event.action else "event";
+    if (event.lane.len == 0) return try allocator.dupe(u8, action);
+    return try std.fmt.allocPrint(allocator, "{s} • {s}", .{ action, event.lane });
+}
+
+fn runtimeLogUiBody(allocator: std.mem.Allocator, event: RuntimeLogEvent) ![]u8 {
+    var sections: std.ArrayList([]const u8) = .empty;
+    defer sections.deinit(allocator);
+
+    if (event.summary.len > 0) try sections.append(allocator, event.summary);
+    if (event.tool.len > 0) try sections.append(allocator, try std.fmt.allocPrint(allocator, "tool: {s}", .{event.tool}));
+    if (event.error_text.len > 0) try sections.append(allocator, try std.fmt.allocPrint(allocator, "error: {s}", .{event.error_text}));
+
+    defer {
+        var index: usize = 0;
+        while (index < sections.items.len) : (index += 1) {
+            const section = sections.items[index];
+            if (section.ptr == event.summary.ptr and section.len == event.summary.len) continue;
+            allocator.free(section);
+        }
+    }
+
+    if (sections.items.len == 0) return try allocator.dupe(u8, "");
+    return try joinStrings(allocator, sections.items, "\n");
+}
+
+pub fn emitRunLogEvent(hooks: RuntimeHooks, allocator: std.mem.Allocator, event: RuntimeLogEvent, log_path: []const u8) void {
+    const title = runtimeLogUiTitle(allocator, event) catch return;
+    defer allocator.free(title);
+    const text = runtimeLogUiBody(allocator, event) catch return;
+    defer allocator.free(text);
+
+    hooks.emit(.{
+        .kind = .run_log_event,
+        .tone = runtimeLogUiTone(event.status),
+        .actor = if (event.actor.len > 0) event.actor else "runtime",
+        .title = title,
+        .text = text,
+        .highlight = .plain,
+        .log_timestamp = event.timestamp,
+        .last_log_path = log_path,
+        .iteration = event.iteration,
     });
 }
 

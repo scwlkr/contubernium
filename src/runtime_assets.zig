@@ -161,6 +161,7 @@ const clearRuntimeFailure = core.clearRuntimeFailure;
 const currentLaneForState = core.currentLaneForState;
 const toneForOutcome = core.toneForOutcome;
 const emitLog = core.emitLog;
+const emitRunLogEvent = core.emitRunLogEvent;
 const emitStreamStart = core.emitStreamStart;
 const emitStreamChunk = core.emitStreamChunk;
 const emitStreamFinalize = core.emitStreamFinalize;
@@ -1392,14 +1393,12 @@ pub fn appendRuntimeRunLogEvent(allocator: std.mem.Allocator, path: []const u8, 
     try saveRuntimeRunLog(scratch, path, log);
 }
 
-pub fn logRuntimeEvent(
+fn buildRuntimeLogEvent(
     allocator: std.mem.Allocator,
     config: AppConfig,
     state: *const AppState,
     spec: RuntimeLogEventSpec,
-) !void {
-    if (state.runtime_session.active_log_path.len == 0) return;
-
+) !RuntimeLogEvent {
     const project_name = if (!eql(state.project_name, "UNASSIGNED")) state.project_name else "";
     const resolved_provider = if (spec.provider.len > 0) spec.provider else state.runtime_session.provider;
     const resolved_model = if (spec.model.len > 0) spec.model else state.runtime_session.model;
@@ -1410,7 +1409,7 @@ pub fn logRuntimeEvent(
     else
         null;
 
-    try appendRuntimeRunLogEvent(allocator, state.runtime_session.active_log_path, .{
+    return .{
         .timestamp = try unixTimestampString(allocator),
         .iteration = state.agent_loop.iteration,
         .turn_id = state.runtime_session.current_turn_id,
@@ -1429,5 +1428,29 @@ pub fn logRuntimeEvent(
         .error_text = spec.error_text,
         .failure = spec.failure,
         .snapshot = snapshot,
-    });
+    };
+}
+
+pub fn logRuntimeEvent(
+    allocator: std.mem.Allocator,
+    config: AppConfig,
+    state: *const AppState,
+    spec: RuntimeLogEventSpec,
+) !void {
+    if (state.runtime_session.active_log_path.len == 0) return;
+    const event = try buildRuntimeLogEvent(allocator, config, state, spec);
+    try appendRuntimeRunLogEvent(allocator, state.runtime_session.active_log_path, event);
+}
+
+pub fn logRuntimeEventWithUi(
+    allocator: std.mem.Allocator,
+    config: AppConfig,
+    state: *const AppState,
+    hooks: RuntimeHooks,
+    spec: RuntimeLogEventSpec,
+) !void {
+    if (state.runtime_session.active_log_path.len == 0) return;
+    const event = try buildRuntimeLogEvent(allocator, config, state, spec);
+    try appendRuntimeRunLogEvent(allocator, state.runtime_session.active_log_path, event);
+    emitRunLogEvent(hooks, allocator, event, state.runtime_session.active_log_path);
 }

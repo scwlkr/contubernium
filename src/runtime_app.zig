@@ -274,7 +274,7 @@ const sessionRecordPath = assets_mod.sessionRecordPath;
 const resolveGlobalSessionIndexPath = assets_mod.resolveGlobalSessionIndexPath;
 const initializeRuntimeRunLog = assets_mod.initializeRuntimeRunLog;
 const appendRuntimeRunLogEvent = assets_mod.appendRuntimeRunLogEvent;
-const logRuntimeEvent = assets_mod.logRuntimeEvent;
+const logRuntimeEventWithUi = assets_mod.logRuntimeEventWithUi;
 
 extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern fn unsetenv(name: [*:0]const u8) c_int;
@@ -2085,6 +2085,69 @@ test "runtime run log stores structured events" {
     try testing.expectEqualStrings("turn_started", loaded.events[0].action);
     try testing.expectEqualStrings("running", loaded.events[0].status);
     try testing.expectEqualStrings("phase 1 logging", loaded.events[0].summary);
+}
+
+test "logRuntimeEventWithUi emits incremental run log bridge events" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const root = try tmp.dir.realpathAlloc(scratch, ".");
+    const path = try std.fs.path.join(scratch, &.{ root, "run-log-ui.json" });
+
+    var state = AppState{
+        .project_name = "Contubernium",
+        .mission = .{ .initial_prompt = "phase 8" },
+        .runtime_session = .{
+            .active_log_path = path,
+            .current_turn_id = "turn-1",
+        },
+    };
+
+    try saveRuntimeRunLog(scratch, path, .{
+        .run_id = "run-1",
+        .command = "mission",
+        .created_at = "1",
+        .updated_at = "1",
+        .project_name = "Contubernium",
+        .provider = "ollama-native",
+        .model = "qwen2.5-coder:7b",
+        .approval_mode = "guarded",
+        .mission_prompt = "phase 8",
+        .events = &.{},
+    });
+
+    var queue = RuntimeEventQueue{ .allocator = testing.allocator };
+    defer queue.deinit();
+    const hooks = RuntimeHooks{
+        .context = &queue,
+        .emit_fn = testQueueEmit,
+    };
+
+    try logRuntimeEventWithUi(scratch, AppConfig{}, &state, hooks, .{
+        .actor = .decanus,
+        .lane = .command,
+        .action = "turn_started",
+        .status = "running",
+        .summary = "phase 8 live logs",
+    });
+
+    const ui_events = try queue.drain(testing.allocator);
+    defer freeRuntimeUiEvents(testing.allocator, ui_events);
+    try testing.expectEqual(@as(usize, 1), ui_events.len);
+    try testing.expectEqual(RuntimeUiEventKind.run_log_event, ui_events[0].kind);
+    try testing.expectEqualStrings("turn_started • command", ui_events[0].title);
+    try testing.expectEqualStrings("phase 8 live logs", ui_events[0].text);
+    try testing.expect(ui_events[0].log_timestamp.len > 0);
+    try testing.expectEqualStrings(path, ui_events[0].last_log_path);
+
+    const loaded = try loadRuntimeRunLog(scratch, path);
+    try testing.expectEqual(@as(usize, 1), loaded.events.len);
+    try testing.expectEqualStrings("turn_started", loaded.events[0].action);
+    try testing.expectEqualStrings("phase 8 live logs", loaded.events[0].summary);
 }
 
 test "loadConfig mirrors model_policy routes into legacy provider fields" {

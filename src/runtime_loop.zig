@@ -252,7 +252,7 @@ const makeRunId = assets_mod.makeRunId;
 const logPathForRun = assets_mod.logPathForRun;
 const initializeRuntimeRunLog = assets_mod.initializeRuntimeRunLog;
 const appendRuntimeRunLogEvent = assets_mod.appendRuntimeRunLogEvent;
-const logRuntimeEvent = assets_mod.logRuntimeEvent;
+const logRuntimeEventWithUi = assets_mod.logRuntimeEventWithUi;
 const runtimeMemoryStatusLabel = prompting_mod.runtimeMemoryStatusLabel;
 const runtimeMemoryPromptText = prompting_mod.runtimeMemoryPromptText;
 const summarizeRuntimeMemorySnapshot = prompting_mod.summarizeRuntimeMemorySnapshot;
@@ -321,7 +321,7 @@ pub fn runLoop(allocator: std.mem.Allocator, config: AppConfig, state: *AppState
     while (state.agent_loop.iteration < state.agent_loop.max_iterations) {
         if (hooks.isInterrupted()) {
             markInterrupted(state);
-            try logRuntimeEvent(allocator, config, state, .{
+            try logRuntimeEventWithUi(allocator, config, state, hooks, .{
                 .actor = state.current_actor,
                 .lane = laneForActor(state.current_actor),
                 .action = "run_interrupted",
@@ -370,7 +370,7 @@ pub fn runLoop(allocator: std.mem.Allocator, config: AppConfig, state: *AppState
         .artifacts = &.{},
         .timestamp = try unixTimestampString(allocator),
     });
-    try logRuntimeEvent(allocator, config, state, .{
+    try logRuntimeEventWithUi(allocator, config, state, hooks, .{
         .actor = state.current_actor,
         .lane = laneForActor(state.current_actor),
         .action = "loop_limit_reached",
@@ -393,7 +393,7 @@ pub fn executeStep(allocator: std.mem.Allocator, config: AppConfig, state: *AppS
 
     if (hooks.isInterrupted()) {
         markInterrupted(state);
-        try logRuntimeEvent(allocator, config, state, .{
+        try logRuntimeEventWithUi(allocator, config, state, hooks, .{
             .actor = state.current_actor,
             .lane = laneForActor(state.current_actor),
             .action = "run_interrupted",

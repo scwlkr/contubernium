@@ -65,7 +65,7 @@ const resolveProjectIdentity = assets_mod.resolveProjectIdentity;
 const sessionIdIsSafe = assets_mod.sessionIdIsSafe;
 const sessionRecordPath = assets_mod.sessionRecordPath;
 const initializeRuntimeRunLog = assets_mod.initializeRuntimeRunLog;
-const logRuntimeEvent = assets_mod.logRuntimeEvent;
+const logRuntimeEventWithUi = assets_mod.logRuntimeEventWithUi;
 
 const providerListModels = provider_mod.providerListModels;
 
@@ -1560,7 +1560,7 @@ fn applyInlineUserReply(
     hooks: RuntimeHooks,
 ) !void {
     try resumeAfterOperatorReply(allocator, state, reply);
-    try logRuntimeEvent(allocator, config, state, .{
+    try logRuntimeEventWithUi(allocator, config, state, hooks, .{
         .actor = .decanus,
         .lane = .command,
         .action = "operator_reply",
@@ -1655,7 +1655,7 @@ fn startRunFromState(
     initializeRuntimeSession(allocator, state, config);
     try initializeRuntimeRunLog(allocator, config, state, command_label);
     try persistSessionMemory(allocator, config, state, command_label);
-    try logRuntimeEvent(allocator, config, state, .{
+    try logRuntimeEventWithUi(allocator, config, state, hooks, .{
         .actor = .decanus,
         .lane = .command,
         .action = "run_started",
@@ -2057,6 +2057,7 @@ fn writeBridgeRuntimeEvent(event: RuntimeUiEvent) !void {
         .title = event.title,
         .text = event.text,
         .highlight = @tagName(event.highlight),
+        .log_timestamp = event.log_timestamp,
         .project_name = event.project_name,
         .provider_type = event.provider_type,
         .model = event.model,

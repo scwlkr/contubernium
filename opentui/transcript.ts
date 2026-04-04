@@ -7,6 +7,7 @@ export type TranscriptEntry = {
   text: string
   highlight: string
   streaming?: boolean
+  sourcePath?: string
 }
 
 export type TranscriptEvent = {

@@ -8,9 +8,17 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import path from "node:path"
 import { requestOpenTuiExit } from "./exit"
 import { applyTimelineEvent, formatTranscriptEntryLines } from "./transcript"
+import {
+  mergeTranscriptEntries,
+  runtimeLogEntriesFromFile,
+  runtimeLogEntryFromBridgeEvent,
+  type RuntimeLogBridgeEvent,
+  type RuntimeLogFile,
+} from "./runtime-log"
 
 type BridgeKind =
   | "log"
+  | "run_log_event"
   | "stream_start"
   | "thinking_chunk"
   | "stream_chunk"
@@ -26,6 +34,7 @@ type BridgeEvent = {
   title: string
   text: string
   highlight: string
+  log_timestamp: string
   project_name: string
   provider_type: string
   model: string
@@ -56,7 +65,7 @@ type BridgeEvent = {
   condensed_history_events: number
 }
 
-type Snapshot = Omit<BridgeEvent, "kind" | "tone" | "actor" | "title" | "text" | "highlight">
+type Snapshot = Omit<BridgeEvent, "kind" | "tone" | "actor" | "title" | "text" | "highlight" | "log_timestamp">
 
 type TimelineEntry = {
   id: string
@@ -72,21 +81,6 @@ type TimelineEntry = {
 type PendingApproval = {
   toolName: string
   detail: string
-}
-
-type RuntimeLog = {
-  events?: RuntimeLogEvent[]
-}
-
-type RuntimeLogEvent = {
-  timestamp?: string
-  actor?: string
-  lane?: string
-  action?: string
-  status?: string
-  tool?: string
-  summary?: string
-  error_text?: string
 }
 
 const palette = {
@@ -199,21 +193,8 @@ async function loadRuntimeLog(logPath: string): Promise<TimelineEntry[]> {
 
   try {
     const raw = await readFile(resolveLogPath(logPath), "utf8")
-    const parsed = JSON.parse(raw) as RuntimeLog
-    return (parsed.events ?? []).map((event, index) => {
-      const body = [event.summary, event.tool ? `tool: ${event.tool}` : "", event.error_text ? `error: ${event.error_text}` : ""]
-        .filter(Boolean)
-        .join("\n")
-      return {
-        id: `log-${index}-${event.timestamp ?? index}`,
-        kind: "log",
-        tone: event.status === "blocked" ? "danger" : event.status === "complete" ? "success" : "info",
-        actor: event.actor ?? "",
-        title: `${event.action ?? "event"}${event.lane ? ` • ${event.lane}` : ""}`,
-        text: body,
-        highlight: "plain",
-      }
-    })
+    const parsed = JSON.parse(raw) as RuntimeLogFile
+    return runtimeLogEntriesFromFile(parsed, logPath)
   } catch (error) {
     return [
       {
@@ -334,9 +315,11 @@ function App() {
     const handleEvent = async (event: BridgeEvent) => {
       if (event.kind === "state_snapshot") {
         setSnapshot((current) => snapshotFromEvent(event, current))
-        if (event.last_log_path) {
-          setLogEntries(await loadRuntimeLog(event.last_log_path))
-        }
+        return
+      }
+
+      if (event.kind === "run_log_event") {
+        setLogEntries((current) => mergeTranscriptEntries(current, [runtimeLogEntryFromBridgeEvent(event as RuntimeLogBridgeEvent)]))
         return
       }
 
@@ -382,11 +365,25 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (!snapshot.last_log_path) return
-    const interval = setInterval(() => {
-      void loadRuntimeLog(snapshot.last_log_path).then(setLogEntries)
-    }, 1000)
-    return () => clearInterval(interval)
+    if (!snapshot.last_log_path) {
+      setLogEntries([])
+      return
+    }
+
+    let canceled = false
+    const activeLogPath = snapshot.last_log_path
+    setLogEntries((current) => current.filter((entry) => entry.sourcePath === activeLogPath))
+    void loadRuntimeLog(snapshot.last_log_path).then((loaded) => {
+      if (canceled) return
+      setLogEntries((current) => {
+        const samePath = current.filter((entry) => entry.sourcePath === activeLogPath)
+        return mergeTranscriptEntries(loaded, samePath)
+      })
+    })
+
+    return () => {
+      canceled = true
+    }
   }, [snapshot.last_log_path])
 
   useKeyboard((key) => {

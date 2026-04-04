@@ -205,7 +205,7 @@ const freeOwnedSpecialistResult = core.freeOwnedSpecialistResult;
 const stdoutPrint = core.stdoutPrint;
 const stderrPrint = core.stderrPrint;
 const providerUsesOpenAICompatibleTransport = core.providerUsesOpenAICompatibleTransport;
-const logRuntimeEvent = assets_mod.logRuntimeEvent;
+const logRuntimeEventWithUi = assets_mod.logRuntimeEventWithUi;
 
 const ProviderRequestHeaders = struct {
     authorization: ?[]u8 = null,
@@ -882,6 +882,7 @@ fn logModelRouteDecision(
     allocator: std.mem.Allocator,
     config: AppConfig,
     state: *AppState,
+    hooks: RuntimeHooks,
     actor: Actor,
     lane: Lane,
     route: ActiveModelRoute,
@@ -893,7 +894,7 @@ fn logModelRouteDecision(
     );
     defer allocator.free(summary);
 
-    try logRuntimeEvent(allocator, config, state, .{
+    try logRuntimeEventWithUi(allocator, config, state, hooks, .{
         .actor = actor,
         .lane = lane,
         .action = "model_policy",
@@ -934,7 +935,7 @@ pub fn structuredChatWithRepair(
         if (hooks.isInterrupted()) return error.Interrupted;
         if (!logged_route) {
             stateManager(state).setActiveModelRoute(active_route);
-            try logModelRouteDecision(allocator, config, state, resolved_actor, resolved_lane, active_route);
+            try logModelRouteDecision(allocator, config, state, hooks, resolved_actor, resolved_lane, active_route);
             if (!eql(active_route.role, "primary")) {
                 const label = try std.fmt.allocPrint(
                     allocator,
@@ -948,7 +949,7 @@ pub fn structuredChatWithRepair(
         }
         emitStreamStart(hooks, actor);
         const response = providerStructuredChat(allocator, active_route.provider, system_prompt, repair_user_prompt, actor, hooks) catch |err| {
-            try logRuntimeEvent(allocator, config, state, .{
+            try logRuntimeEventWithUi(allocator, config, state, hooks, .{
                 .actor = resolved_actor,
                 .lane = resolved_lane,
                 .action = "model_route_failed",
@@ -972,7 +973,7 @@ pub fn structuredChatWithRepair(
             }
             return err;
         };
-        try logRuntimeEvent(allocator, config, state, .{
+        try logRuntimeEventWithUi(allocator, config, state, hooks, .{
             .actor = resolved_actor,
             .lane = resolved_lane,
             .action = "provider_transport",
@@ -996,7 +997,7 @@ pub fn structuredChatWithRepair(
                 },
             );
             recordRuntimeFailure(state, failure);
-            try logRuntimeEvent(allocator, config, state, .{
+            try logRuntimeEventWithUi(allocator, config, state, hooks, .{
                 .actor = resolved_actor,
                 .lane = resolved_lane,
                 .action = "invalid_model_output",
@@ -1069,7 +1070,7 @@ pub fn structuredChatWithRepair(
                 .{user_prompt},
             );
             repair_user_prompt = owned_repair_prompt.?;
-            try logRuntimeEvent(allocator, config, state, .{
+            try logRuntimeEventWithUi(allocator, config, state, hooks, .{
                 .actor = resolved_actor,
                 .lane = resolved_lane,
                 .action = "repair_retry",

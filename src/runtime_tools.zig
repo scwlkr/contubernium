@@ -243,7 +243,7 @@ const makeRunId = assets_mod.makeRunId;
 const logPathForRun = assets_mod.logPathForRun;
 const initializeRuntimeRunLog = assets_mod.initializeRuntimeRunLog;
 const appendRuntimeRunLogEvent = assets_mod.appendRuntimeRunLogEvent;
-const logRuntimeEvent = assets_mod.logRuntimeEvent;
+const logRuntimeEventWithUi = assets_mod.logRuntimeEventWithUi;
 
 pub fn executeToolRequests(
     allocator: std.mem.Allocator,
@@ -273,7 +273,7 @@ pub fn executeToolRequests(
         defer if (request_summary_owned) |owned| allocator.free(owned);
 
         emitLog(hooks, .tool, actorName(actor), tool_name, request_summary, .plain);
-        try logRuntimeEvent(allocator, config, state, .{
+        try logRuntimeEventWithUi(allocator, config, state, hooks, .{
             .actor = actor,
             .lane = lane,
             .action = "tool_request",
@@ -288,7 +288,7 @@ pub fn executeToolRequests(
             .blocked => |failure| {
                 const blocked_summary = try std.fmt.allocPrint(allocator, "blocked: {s}", .{failure.cause});
                 try summaries.append(allocator, blocked_summary);
-                try logRuntimeEvent(allocator, config, state, .{
+                try logRuntimeEventWithUi(allocator, config, state, hooks, .{
                     .actor = actor,
                     .lane = lane,
                     .action = "tool_result",
@@ -312,7 +312,7 @@ pub fn executeToolRequests(
             const failure = try buildToolExecutionFailure(allocator, config, state, actor, lane, validated, err);
             const blocked_summary = try std.fmt.allocPrint(allocator, "blocked: {s}", .{failure.cause});
             try summaries.append(allocator, blocked_summary);
-            try logRuntimeEvent(allocator, config, state, .{
+            try logRuntimeEventWithUi(allocator, config, state, hooks, .{
                 .actor = actor,
                 .lane = lane,
                 .action = "tool_result",
@@ -335,7 +335,7 @@ pub fn executeToolRequests(
 
         if (execution.blocked) {
             const failure = execution.failure.?;
-            try logRuntimeEvent(allocator, config, state, .{
+            try logRuntimeEventWithUi(allocator, config, state, hooks, .{
                 .actor = actor,
                 .lane = lane,
                 .action = "tool_result",
@@ -354,7 +354,7 @@ pub fn executeToolRequests(
             };
         }
 
-        try logRuntimeEvent(allocator, config, state, .{
+        try logRuntimeEventWithUi(allocator, config, state, hooks, .{
             .actor = actor,
             .lane = lane,
             .action = "tool_result",
@@ -1165,7 +1165,7 @@ pub fn confirmTool(
 ) !bool {
     beginApprovalRequest(state, actor, lane, approval_kind, tool_name, detail, detail, target);
     emitStateSnapshot(hooks, config, state.*);
-    try logRuntimeEvent(allocator, config, state, .{
+    try logRuntimeEventWithUi(allocator, config, state, hooks, .{
         .actor = actor,
         .lane = lane,
         .action = "approval_requested",
@@ -1178,7 +1178,7 @@ pub fn confirmTool(
     if (hooks.requestApproval(tool_name, detail)) |decision| {
         resolveApprovalRequest(state, decision);
         emitStateSnapshot(hooks, config, state.*);
-        try logRuntimeEvent(allocator, config, state, .{
+        try logRuntimeEventWithUi(allocator, config, state, hooks, .{
             .actor = actor,
             .lane = lane,
             .action = "approval_resolved",
@@ -1194,7 +1194,7 @@ pub fn confirmTool(
     const approved = input != null and (eql(trimAscii(input.?), "y") or eql(trimAscii(input.?), "yes"));
     resolveApprovalRequest(state, approved);
     emitStateSnapshot(hooks, config, state.*);
-    try logRuntimeEvent(allocator, config, state, .{
+    try logRuntimeEventWithUi(allocator, config, state, hooks, .{
         .actor = actor,
         .lane = lane,
         .action = "approval_resolved",

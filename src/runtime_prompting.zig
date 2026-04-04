@@ -242,7 +242,7 @@ const makeRunId = assets_mod.makeRunId;
 const logPathForRun = assets_mod.logPathForRun;
 const initializeRuntimeRunLog = assets_mod.initializeRuntimeRunLog;
 const appendRuntimeRunLogEvent = assets_mod.appendRuntimeRunLogEvent;
-const logRuntimeEvent = assets_mod.logRuntimeEvent;
+const logRuntimeEventWithUi = assets_mod.logRuntimeEventWithUi;
 
 pub const PromptCache = struct {
     system_prompt: ?[]const u8 = null,
@@ -1282,7 +1282,7 @@ pub fn blockForMemoryLoadFailure(
         .artifacts = &.{spec.path},
         .timestamp = try unixTimestampString(allocator),
     });
-    try logRuntimeEvent(allocator, config, state, .{
+    try logRuntimeEventWithUi(allocator, config, state, hooks, .{
         .actor = state.current_actor,
         .lane = laneForActor(state.current_actor),
         .action = "memory_load_failed",
@@ -1409,7 +1409,7 @@ pub fn blockForContextLimit(
         .artifacts = &.{},
         .timestamp = try unixTimestampString(allocator),
     });
-    try logRuntimeEvent(allocator, config, state, .{
+    try logRuntimeEventWithUi(allocator, config, state, hooks, .{
         .actor = state.current_actor,
         .lane = laneForActor(state.current_actor),
         .action = "context_budget_blocked",
@@ -1509,7 +1509,7 @@ pub fn buildPromptWithContextBudget(
             ),
             .plain,
         );
-        try logRuntimeEvent(allocator, config, state, .{
+        try logRuntimeEventWithUi(allocator, config, state, hooks, .{
             .actor = state.current_actor,
             .lane = laneForActor(state.current_actor),
             .action = "context_condensed",
