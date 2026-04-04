@@ -246,6 +246,9 @@ const processOllamaPendingLines = provider.processOllamaPendingLines;
 const processOllamaPendingLine = provider.processOllamaPendingLine;
 const writeJsonAtomic = persistence.writeJsonAtomic;
 
+extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern fn unsetenv(name: [*:0]const u8) c_int;
+
 const global_memory_version_prefix = "<!-- contubernium:global-memory format_version=";
 const global_memory_version_suffix = " -->";
 const global_memory_version_header = std.fmt.comptimePrint(
@@ -1453,4 +1456,628 @@ pub fn logRuntimeEventWithUi(
     const event = try buildRuntimeLogEvent(allocator, config, state, spec);
     try appendRuntimeRunLogEvent(allocator, state.runtime_session.active_log_path, event);
     emitRunLogEvent(hooks, allocator, event, state.runtime_session.active_log_path);
+}
+
+test "scaffoldProject creates canonical runtime and context assets" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    defer original_cwd.close();
+    try tmp.dir.setAsCwd();
+    defer original_cwd.setAsCwd() catch {};
+
+    try scaffoldProject(testing.allocator);
+
+    try testing.expect(pathExists(".contubernium/state.json"));
+    try testing.expect(pathExists(".contubernium/config.json"));
+    try testing.expect(pathExists(".contubernium/ARCHITECTURE.md"));
+    try testing.expect(pathExists(".contubernium/PLAN.md"));
+    try testing.expect(pathExists(".contubernium/PROJECT_CONTEXT.md"));
+    try testing.expect(pathExists(".contubernium/project.md"));
+    try testing.expect(pathExists(".contubernium/global.md"));
+    try testing.expect(pathExists(".contubernium/sessions/index.json"));
+    try testing.expect(!pathExists(".contubernium/prompts"));
+    try testing.expect(!pathExists(".agents"));
+
+    const global_memory = try std.fs.cwd().readFileAlloc(scratch, ".contubernium/global.md", max_file_bytes);
+    try testing.expect(std.mem.indexOf(u8, global_memory, "format_version=1") != null);
+
+    const session_index = try loadSessionIndex(scratch, ".contubernium/sessions/index.json");
+    try testing.expectEqual(@as(usize, session_index_format_version), session_index.format_version);
+}
+
+test "init.sh fallback scaffold creates session index and versioned global memory" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const repo_root = try std.fs.cwd().realpathAlloc(scratch, ".");
+    const tmp_root = try tmp.dir.realpathAlloc(scratch, ".");
+    const script_path = try std.fs.path.join(scratch, &.{ repo_root, "init.sh" });
+    const project_path = try std.fs.path.join(scratch, &.{ tmp_root, "project" });
+    const fake_home = try std.fs.path.join(scratch, &.{ tmp_root, "missing-home" });
+
+    var env_map = try std.process.getEnvMap(scratch);
+    try env_map.put("CONTUBERNIUM_HOME", fake_home);
+
+    const result = try std.process.Child.run(.{
+        .allocator = scratch,
+        .argv = &.{ "bash", script_path, project_path },
+        .cwd = repo_root,
+        .env_map = &env_map,
+    });
+    try testing.expectEqual(@as(i32, 0), exitCode(result.term));
+
+    const session_index_path = try std.fs.path.join(scratch, &.{ project_path, ".contubernium", "sessions", "index.json" });
+    const global_memory_path = try std.fs.path.join(scratch, &.{ project_path, ".contubernium", "global.md" });
+
+    try testing.expect(pathExists(session_index_path));
+    try testing.expect(pathExists(global_memory_path));
+
+    const session_index = try loadSessionIndex(scratch, session_index_path);
+    try testing.expectEqual(@as(usize, session_index_format_version), session_index.format_version);
+
+    const global_memory = try std.fs.cwd().readFileAlloc(scratch, global_memory_path, max_file_bytes);
+    try testing.expect(std.mem.indexOf(u8, global_memory, "format_version=1") != null);
+}
+
+test "runtime run log stores structured events" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const root = try tmp.dir.realpathAlloc(scratch, ".");
+    const path = try std.fs.path.join(scratch, &.{ root, "run-log.json" });
+
+    try saveRuntimeRunLog(scratch, path, .{
+        .run_id = "run-1",
+        .command = "mission",
+        .created_at = "1",
+        .updated_at = "1",
+        .project_name = "Contubernium",
+        .provider = "ollama-native",
+        .model = "qwen2.5-coder:7b",
+        .approval_mode = "guarded",
+        .mission_prompt = "implement phase 1 logging",
+        .events = &.{},
+    });
+
+    try appendRuntimeRunLogEvent(scratch, path, .{
+        .timestamp = "2",
+        .iteration = 1,
+        .turn_id = "turn-1",
+        .actor = "decanus",
+        .lane = "command",
+        .action = "turn_started",
+        .status = "running",
+        .summary = "phase 1 logging",
+    });
+
+    const loaded = try loadRuntimeRunLog(scratch, path);
+    try testing.expectEqualStrings("run-1", loaded.run_id);
+    try testing.expectEqual(@as(usize, 1), loaded.events.len);
+    try testing.expectEqualStrings("turn_started", loaded.events[0].action);
+    try testing.expectEqualStrings("running", loaded.events[0].status);
+    try testing.expectEqualStrings("phase 1 logging", loaded.events[0].summary);
+}
+
+test "appendRuntimeRunLogEvent retains earlier events across repeated growth" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const root = try tmp.dir.realpathAlloc(scratch, ".");
+    const path = try std.fs.path.join(scratch, &.{ root, "run-log-growth.json" });
+
+    try saveRuntimeRunLog(scratch, path, .{
+        .run_id = "run-growth",
+        .command = "mission",
+        .created_at = "1",
+        .updated_at = "1",
+        .project_name = "Contubernium",
+        .provider = "ollama-native",
+        .model = "qwen2.5-coder:7b",
+        .approval_mode = "guarded",
+        .mission_prompt = "phase 8",
+        .events = &.{},
+    });
+
+    var index: usize = 0;
+    while (index < 12) : (index += 1) {
+        const timestamp = try std.fmt.allocPrint(scratch, "{d}", .{index + 2});
+        const turn_id = try std.fmt.allocPrint(scratch, "turn-{d}", .{index + 1});
+        const summary = try std.fmt.allocPrint(scratch, "event {d}", .{index + 1});
+        try appendRuntimeRunLogEvent(scratch, path, .{
+            .timestamp = timestamp,
+            .iteration = index + 1,
+            .turn_id = turn_id,
+            .actor = "decanus",
+            .lane = "command",
+            .action = "tool_result",
+            .status = "success",
+            .summary = summary,
+        });
+    }
+
+    const loaded = try loadRuntimeRunLog(scratch, path);
+    try testing.expectEqual(@as(usize, 12), loaded.events.len);
+    try testing.expectEqualStrings("event 1", loaded.events[0].summary);
+    try testing.expectEqualStrings("event 12", loaded.events[11].summary);
+    try testing.expectEqualStrings("13", loaded.updated_at);
+}
+
+test "logRuntimeEventWithUi emits incremental run log bridge events" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const root = try tmp.dir.realpathAlloc(scratch, ".");
+    const path = try std.fs.path.join(scratch, &.{ root, "run-log-ui.json" });
+
+    var state = AppState{
+        .project_name = "Contubernium",
+        .mission = .{ .initial_prompt = "phase 8" },
+        .runtime_session = .{
+            .active_log_path = path,
+            .current_turn_id = "turn-1",
+        },
+    };
+
+    try saveRuntimeRunLog(scratch, path, .{
+        .run_id = "run-1",
+        .command = "mission",
+        .created_at = "1",
+        .updated_at = "1",
+        .project_name = "Contubernium",
+        .provider = "ollama-native",
+        .model = "qwen2.5-coder:7b",
+        .approval_mode = "guarded",
+        .mission_prompt = "phase 8",
+        .events = &.{},
+    });
+
+    var queue = RuntimeEventQueue{ .allocator = testing.allocator };
+    defer queue.deinit();
+    const hooks = RuntimeHooks{
+        .context = &queue,
+        .emit_fn = testQueueEmit,
+    };
+
+    try logRuntimeEventWithUi(scratch, AppConfig{}, &state, hooks, .{
+        .actor = .decanus,
+        .lane = .command,
+        .action = "turn_started",
+        .status = "running",
+        .summary = "phase 8 live logs",
+    });
+
+    const ui_events = try queue.drain(testing.allocator);
+    defer freeRuntimeUiEvents(testing.allocator, ui_events);
+    try testing.expectEqual(@as(usize, 1), ui_events.len);
+    try testing.expectEqual(RuntimeUiEventKind.run_log_event, ui_events[0].kind);
+    try testing.expectEqualStrings("turn_started • command", ui_events[0].title);
+    try testing.expectEqualStrings("phase 8 live logs", ui_events[0].text);
+    try testing.expect(ui_events[0].log_timestamp.len > 0);
+    try testing.expectEqualStrings(path, ui_events[0].last_log_path);
+
+    const loaded = try loadRuntimeRunLog(scratch, path);
+    try testing.expectEqual(@as(usize, 1), loaded.events.len);
+    try testing.expectEqualStrings("turn_started", loaded.events[0].action);
+    try testing.expectEqualStrings("phase 8 live logs", loaded.events[0].summary);
+}
+
+test "loadConfig mirrors model_policy routes into legacy provider fields" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const config_json =
+        \\{
+        \\  "runtime_version": 1,
+        \\  "model_policy": {
+        \\    "enabled": true,
+        \\    "strategy": "smallest-capable",
+        \\    "primary": {
+        \\      "enabled": true,
+        \\      "type": "ollama-native",
+        \\      "base_url": "http://127.0.0.1:11434",
+        \\      "model": "qwen2.5-coder:7b",
+        \\      "timeout_ms": 120000,
+        \\      "max_retries": 2,
+        \\      "structured_output": "json"
+        \\    },
+        \\    "fallback": {
+        \\      "enabled": true,
+        \\      "type": "openrouter",
+        \\      "base_url": "https://openrouter.ai/api",
+        \\      "model": "openai/gpt-5.2-mini",
+        \\      "timeout_ms": 120000,
+        \\      "max_retries": 1,
+        \\      "structured_output": "json",
+        \\      "api_key_env": "OPENROUTER_API_KEY",
+        \\      "app_name": "Contubernium"
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    var file = try tmp.dir.createFile("config.json", .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(config_json);
+
+    const root = try tmp.dir.realpathAlloc(scratch, ".");
+    const path = try std.fs.path.join(scratch, &.{ root, "config.json" });
+
+    const loaded = try loadConfig(scratch, path);
+    try testing.expectEqualStrings("ollama-native", loaded.provider.type);
+    try testing.expectEqualStrings("qwen2.5-coder:7b", loaded.provider.model);
+    try testing.expectEqualStrings("openrouter", loaded.fallback_provider.type);
+    try testing.expectEqualStrings("openai/gpt-5.2-mini", loaded.fallback_provider.model);
+}
+
+test "initializeRuntimeRunLog stores model policy metadata" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    defer original_cwd.close();
+    try tmp.dir.setAsCwd();
+    defer original_cwd.setAsCwd() catch {};
+
+    var state = AppState{};
+    state.project_name = "Contubernium";
+    state.mission.initial_prompt = "implement phase 3";
+
+    const config = AppConfig{
+        .model_policy = .{
+            .enabled = true,
+            .strategy = "smallest-capable",
+            .primary = .{
+                .type = "ollama-native",
+                .base_url = "http://127.0.0.1:11434",
+                .model = "qwen2.5-coder:7b",
+            },
+            .escalation = .{
+                .enabled = true,
+                .provider = .{
+                    .enabled = true,
+                    .type = "ollama-native",
+                    .base_url = "http://127.0.0.1:11434",
+                    .model = "qwen2.5-coder:14b",
+                    .max_retries = 1,
+                },
+            },
+            .fallback = .{
+                .enabled = true,
+                .type = "openrouter",
+                .base_url = "https://openrouter.ai/api",
+                .model = "openai/gpt-5.2-mini",
+                .max_retries = 1,
+                .api_key_env = "OPENROUTER_API_KEY",
+                .app_name = "Contubernium",
+            },
+        },
+        .paths = .{
+            .logs_dir = "logs",
+        },
+    };
+
+    try initializeRuntimeRunLog(scratch, config, &state, "mission");
+
+    const loaded = try loadRuntimeRunLog(scratch, state.runtime_session.active_log_path);
+    try testing.expectEqualStrings("ollama-native", loaded.provider);
+    try testing.expectEqualStrings("qwen2.5-coder:7b", loaded.model);
+    try testing.expectEqualStrings("smallest-capable", loaded.model_policy.strategy);
+    try testing.expectEqualStrings("qwen2.5-coder:14b", loaded.model_policy.escalation_model);
+    try testing.expectEqualStrings("openrouter", loaded.model_policy.fallback_provider);
+    try testing.expectEqualStrings("openai/gpt-5.2-mini", loaded.model_policy.fallback_model);
+}
+
+test "normalizeLegacyStateJson migrates legacy failure envelope keys" {
+    const testing = std.testing;
+    const normalized = try normalizeLegacyStateJson(testing.allocator,
+        \\{
+        \\  "agent_loop": {
+        \\    "active_tool": "",
+        \\    "history": []
+        \\  },
+        \\  "tasks": {
+        \\    "backend": {
+        \\      "invocation": {
+        \\        "result": {
+        \\          "next_recommended_agent": ""
+        \\        }
+        \\      }
+        \\    }
+        \\  },
+        \\  "runtime_session": {
+        \\    "last_failure": {
+        \\      "error_code": "TOOL_TIMEOUT",
+        \\      "message": "timed out"
+        \\    }
+        \\  }
+        \\}
+    );
+    defer testing.allocator.free(normalized);
+
+    try testing.expect(std.mem.indexOf(u8, normalized, "\"code\": \"TOOL_TIMEOUT\"") != null);
+    try testing.expect(std.mem.indexOf(u8, normalized, "\"cause\": \"timed out\"") != null);
+    try testing.expect(std.mem.indexOf(u8, normalized, "\"active_tool\": null") != null);
+    try testing.expect(std.mem.indexOf(u8, normalized, "\"next_recommended_agent\": null") != null);
+}
+
+test "loadRuntimeRunLog normalizes legacy failure envelope keys" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const root = try tmp.dir.realpathAlloc(scratch, ".");
+    const path = try std.fs.path.join(scratch, &.{ root, "legacy-run-log.json" });
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "legacy-run-log.json",
+        .data =
+        \\{
+        \\  "format_version": 1,
+        \\  "run_id": "run-legacy",
+        \\  "command": "mission",
+        \\  "created_at": "1",
+        \\  "updated_at": "1",
+        \\  "project_name": "Contubernium",
+        \\  "provider": "ollama-native",
+        \\  "model": "qwen2.5-coder:7b",
+        \\  "approval_mode": "guarded",
+        \\  "mission_prompt": "resume session",
+        \\  "events": [
+        \\    {
+        \\      "timestamp": "2",
+        \\      "iteration": 1,
+        \\      "turn_id": "turn-1",
+        \\      "actor": "decanus",
+        \\      "lane": "command",
+        \\      "action": "tool_result",
+        \\      "status": "blocked",
+        \\      "summary": "timed out",
+        \\      "failure": {
+        \\        "error_code": "TOOL_TIMEOUT",
+        \\        "message": "timed out",
+        \\        "context": {
+        \\          "tool": "read_file"
+        \\        }
+        \\      }
+        \\    }
+        \\  ]
+        \\}
+        ,
+    });
+
+    const loaded = try loadRuntimeRunLog(scratch, path);
+    const failure = loaded.events[0].failure.?;
+    try testing.expectEqualStrings("TOOL_TIMEOUT", failure.code);
+    try testing.expectEqualStrings("timed out", failure.cause);
+    try testing.expectEqualStrings("read_file", failure.context.tool);
+}
+
+test "loadSessionIndex migrates legacy unversioned format to the current version" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const root = try tmp.dir.realpathAlloc(scratch, ".");
+    const path = try std.fs.path.join(scratch, &.{ root, "sessions-index.json" });
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "sessions-index.json",
+        .data =
+        \\{
+        \\  "current_session_id": "session-legacy",
+        \\  "sessions": []
+        \\}
+        ,
+    });
+
+    const index = try loadSessionIndex(scratch, path);
+    try testing.expectEqual(@as(usize, session_index_format_version), index.format_version);
+    try testing.expectEqualStrings("session-legacy", index.current_session_id);
+}
+
+test "loadSessionRecord migrates legacy unversioned format to the current version" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const root = try tmp.dir.realpathAlloc(scratch, ".");
+    const path = try std.fs.path.join(scratch, &.{ root, "session-record.json" });
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "session-record.json",
+        .data =
+        \\{
+        \\  "session_id": "session-legacy",
+        \\  "mission_prompt": "resume mission",
+        \\  "state_snapshot": {}
+        \\}
+        ,
+    });
+
+    const record = try loadSessionRecord(scratch, path);
+    try testing.expectEqual(@as(usize, session_record_format_version), record.format_version);
+    try testing.expectEqualStrings("session-legacy", record.session_id);
+    try testing.expectEqualStrings("resume mission", record.mission_prompt);
+}
+
+test "loadGlobalSessionIndex rejects unsupported future format versions" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const root = try tmp.dir.realpathAlloc(scratch, ".");
+    const path = try std.fs.path.join(scratch, &.{ root, "global-session-index.json" });
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "global-session-index.json",
+        .data =
+        \\{
+        \\  "format_version": 99,
+        \\  "sessions": []
+        \\}
+        ,
+    });
+
+    _ = loadGlobalSessionIndex(scratch, path) catch |err| {
+        try testing.expectEqual(error.UnsupportedMemoryFormatVersion, err);
+        return;
+    };
+    return error.TestUnexpectedResult;
+}
+
+test "normalizeGlobalMemoryMarkdown adds a version marker and strips it for prompt use" {
+    const testing = std.testing;
+    const normalized = try normalizeGlobalMemoryMarkdown(testing.allocator,
+        \\# Global Memory
+        \\
+        \\Keep the rules concise.
+    );
+    defer testing.allocator.free(normalized);
+
+    try testing.expect(std.mem.indexOf(u8, normalized, "format_version=1") != null);
+    try testing.expectEqual(@as(usize, global_memory_format_version), 1);
+    try testing.expectEqualStrings(
+        "# Global Memory\n\nKeep the rules concise.",
+        stripGlobalMemoryVersionHeader(normalized),
+    );
+}
+
+test "resolveContuberniumHome falls back to USERPROFILE when HOME is unavailable" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    const userprofile_path = try tmp.dir.realpathAlloc(scratch, ".");
+    const original_contubernium_home = std.posix.getenv("CONTUBERNIUM_HOME");
+    const original_home = std.posix.getenv("HOME");
+    const original_userprofile = std.posix.getenv("USERPROFILE");
+
+    const contubernium_home_name = try scratch.dupeZ(u8, "CONTUBERNIUM_HOME");
+    const home_name = try scratch.dupeZ(u8, "HOME");
+    const userprofile_name = try scratch.dupeZ(u8, "USERPROFILE");
+    const userprofile_value = try scratch.dupeZ(u8, userprofile_path);
+
+    defer {
+        if (original_contubernium_home) |value| {
+            _ = setenv(contubernium_home_name.ptr, value, 1);
+        } else {
+            _ = unsetenv(contubernium_home_name.ptr);
+        }
+        if (original_home) |value| {
+            _ = setenv(home_name.ptr, value, 1);
+        } else {
+            _ = unsetenv(home_name.ptr);
+        }
+        if (original_userprofile) |value| {
+            _ = setenv(userprofile_name.ptr, value, 1);
+        } else {
+            _ = unsetenv(userprofile_name.ptr);
+        }
+    }
+
+    _ = unsetenv(contubernium_home_name.ptr);
+    _ = unsetenv(home_name.ptr);
+    try testing.expectEqual(@as(c_int, 0), setenv(userprofile_name.ptr, userprofile_value.ptr, 1));
+
+    const resolved = try resolveContuberniumHome(scratch);
+    const expected = try std.fs.path.join(scratch, &.{ userprofile_path, ".contubernium" });
+    try testing.expectEqualStrings(expected, resolved);
+}
+
+test "persistSessionMemory writes durable local and global session indexes" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+
+    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    defer original_cwd.close();
+    try tmp.dir.setAsCwd();
+    defer original_cwd.setAsCwd() catch {};
+
+    try tmp.dir.makePath("home");
+    const home_path = try tmp.dir.realpathAlloc(scratch, "home");
+    const home_z = try scratch.dupeZ(u8, home_path);
+    const env_name = try scratch.dupeZ(u8, "CONTUBERNIUM_HOME");
+    try testing.expectEqual(@as(c_int, 0), setenv(env_name.ptr, home_z.ptr, 1));
+    defer _ = unsetenv(env_name.ptr);
+
+    try scaffoldProject(scratch);
+    const config = try loadProjectConfig(scratch);
+    var state = try loadState(scratch, config.paths.state_file);
+    resetStateForMission(&state, "resume phase 4");
+    initializeRuntimeSession(scratch, &state, config);
+    state.runtime_session.status = .blocked;
+    state.runtime_session.active_log_path = ".contubernium/logs/run-1.json";
+    state.runtime_session.approval_bypass_enabled = true;
+    state.runtime_session.approval_mode = "session-bypass";
+
+    try persistSessionMemory(scratch, config, &state, "mission");
+
+    const index = try loadSessionIndex(scratch, config.paths.session_index_file);
+    try testing.expectEqual(@as(usize, 1), index.sessions.len);
+    try testing.expect(index.current_session_id.len > 0);
+    try testing.expectEqualStrings(index.current_session_id, state.runtime_session.session_id);
+    try testing.expectEqualStrings("session-bypass", index.sessions[0].approval_mode);
+    try testing.expect(index.sessions[0].approval_bypass_enabled);
+
+    const record_path = try sessionRecordPath(scratch, config.paths.sessions_dir, index.current_session_id);
+    const record = try loadSessionRecord(scratch, record_path);
+    try testing.expectEqualStrings("resume phase 4", record.mission_prompt);
+    try testing.expectEqualStrings(".contubernium/logs/run-1.json", record.last_log_path);
+    try testing.expectEqual(@as(usize, 1), record.run_log_paths.len);
+    try testing.expect(record.project_id.len > 0);
+    try testing.expectEqualStrings("session-bypass", record.approval_mode);
+    try testing.expect(record.approval_bypass_enabled);
+
+    const global_index_path = try resolveGlobalSessionIndexPath(scratch);
+    const global_index = try loadGlobalSessionIndex(scratch, global_index_path);
+    try testing.expectEqual(@as(usize, 1), global_index.sessions.len);
+    try testing.expectEqualStrings(record.session_id, global_index.sessions[0].session_id);
 }

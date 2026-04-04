@@ -99,3 +99,29 @@ test "writeJsonAtomic renders indented JSON" {
     try std.testing.expect(std.mem.indexOf(u8, saved, "\n  \"enabled\": true") != null);
     try std.testing.expect(std.mem.indexOf(u8, saved, "\n  \"name\": \"phase-4\"") != null);
 }
+
+test "writeTextAtomic preserves the previous file when replacement fails" {
+    if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    defer original_cwd.close();
+    try tmp.dir.setAsCwd();
+    defer original_cwd.setAsCwd() catch {};
+
+    try writeTextAtomic("state.json", "first");
+
+    try tmp.dir.chmod(0o555);
+    defer tmp.dir.chmod(0o755) catch {};
+
+    if (writeTextAtomic("state.json", "second")) |_| {
+        return error.TestUnexpectedResult;
+    } else |_| {}
+
+    const saved = try std.fs.cwd().readFileAlloc(std.testing.allocator, "state.json", 128);
+    defer std.testing.allocator.free(saved);
+
+    try std.testing.expectEqualStrings("first", saved);
+}

@@ -1526,3 +1526,449 @@ pub fn buildPromptWithContextBudget(
         attempt += 1;
     }
 }
+
+test "loadRuntimeMemoryLayer truncates oversized external memory content" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    defer original_cwd.close();
+    try tmp.dir.setAsCwd();
+    defer original_cwd.setAsCwd() catch {};
+
+    var file = try tmp.dir.createFile("project.md", .{ .truncate = true });
+    defer file.close();
+    try file.writeAll("Architecture:\n0123456789012345678901234567890123456789");
+
+    const layer = try loadRuntimeMemoryLayer(testing.allocator, .{
+        .kind = "project",
+        .path = "project.md",
+        .max_chars = 24,
+    });
+    defer layer.deinit(testing.allocator);
+
+    try testing.expectEqualStrings("project", layer.kind);
+    try testing.expect(layer.truncated);
+    try testing.expect(layer.source_chars > 24);
+    try testing.expect(std.mem.indexOf(u8, layer.content, "...[truncated]...") != null);
+}
+
+test "buildDecanusUserPrompt includes project context and memory layers" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+    var state = AppState{};
+    state.mission.initial_prompt = "complete phase 7";
+    state.mission.current_goal = "hook memory layers into the runtime";
+
+    const prompt = try buildDecanusUserPrompt(allocator, AppConfig{}, &state, .{
+        .architecture = .{
+            .kind = "architecture",
+            .path = ".contubernium/ARCHITECTURE.md",
+            .content = "System structure lives here.",
+            .source_chars = 26,
+        },
+        .plan = .{
+            .kind = "plan",
+            .path = ".contubernium/PLAN.md",
+            .content = "Current execution order lives here.",
+            .source_chars = 35,
+        },
+        .project_context = .{
+            .kind = "project_context",
+            .path = ".contubernium/PROJECT_CONTEXT.md",
+            .content = "Goals and constraints live here.",
+            .source_chars = 32,
+        },
+        .project = .{
+            .kind = "project",
+            .path = ".contubernium/project.md",
+            .content = "Architecture decisions live here.",
+            .source_chars = 32,
+        },
+        .global = .{
+            .kind = "global",
+            .path = ".contubernium/global.md",
+            .content = "Reusable strategies live here.",
+            .source_chars = 30,
+        },
+    });
+
+    try testing.expect(std.mem.indexOf(u8, prompt, "Memory ledger") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "- architecture: path=.contubernium/ARCHITECTURE.md") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "System structure lives here.") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "- project: path=.contubernium/project.md") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Architecture decisions live here.") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "- global: path=.contubernium/global.md") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Reusable strategies live here.") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Current execution order lives here.") == null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "selected=no") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Core specialists (lane-default routing):") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "faber -> lane=backend") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Helper specialists (explicit invocation only):") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "praeco -> lane=media") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Valid fallback lane values: backend, frontend, systems, qa, research, brand, docs") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Helper specialists are explicit-only.") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Active ask:") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Session seed (initial prompt):") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Selected evidence excerpts") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Assigned specialist tasks") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "none assigned") != null);
+}
+
+test "buildDecanusUserPrompt foregrounds the latest operator turn ahead of background evidence" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+    var state = AppState{};
+    state.mission.initial_prompt = "what does this project do?";
+    state.mission.current_goal = "what gaps do you see?";
+    state.agent_loop.history = &.{
+        .{
+            .iteration = 2,
+            .type = "operator_reply",
+            .actor = "operator",
+            .lane = "",
+            .summary = "what gaps do you see?",
+            .artifacts = &.{},
+            .timestamp = "2",
+        },
+    };
+
+    const prompt = try buildDecanusUserPrompt(allocator, AppConfig{}, &state, .{
+        .architecture = .{
+            .kind = "architecture",
+            .path = ".contubernium/ARCHITECTURE.md",
+            .content = "System structure lives here.",
+            .source_chars = 26,
+        },
+        .plan = .{
+            .kind = "plan",
+            .path = ".contubernium/PLAN.md",
+            .content = "Current execution order lives here.",
+            .source_chars = 35,
+        },
+        .project_context = .{
+            .kind = "project_context",
+            .path = ".contubernium/PROJECT_CONTEXT.md",
+            .content = "Goals and constraints live here.",
+            .source_chars = 32,
+        },
+        .project = .{
+            .kind = "project",
+            .path = ".contubernium/project.md",
+            .content = "Architecture decisions live here.",
+            .source_chars = 32,
+        },
+        .global = .{
+            .kind = "global",
+            .path = ".contubernium/global.md",
+            .content = "Reusable strategies live here.",
+            .source_chars = 30,
+        },
+    });
+
+    const active_ask_index = std.mem.indexOf(u8, prompt, "Active ask:\nwhat gaps do you see?") orelse return error.TestUnexpectedResult;
+    const architecture_index = std.mem.indexOf(u8, prompt, "- architecture: path=.contubernium/ARCHITECTURE.md") orelse return error.TestUnexpectedResult;
+    try testing.expect(active_ask_index < architecture_index);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Latest operator reply:\nwhat gaps do you see?") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Session seed (initial prompt):\nwhat does this project do?") != null);
+}
+
+test "buildSpecialistUserPrompt surfaces the subordinate tool loop contract" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+    var state = AppState{};
+    state.mission.initial_prompt = "ship phase 2";
+    state.mission.current_goal = "formalize specialist subordinate execution";
+    state.agent_loop.last_tool_result = "read_file src/runtime_loop.zig";
+    state.tasks.backend.invocation = .{
+        .status = .running,
+        .requested_by = .decanus,
+        .target = .faber,
+        .lane = .backend,
+        .agent_call = "faber::IMPLEMENT_BACKEND",
+        .action_name = "IMPLEMENT_BACKEND",
+        .iteration = 3,
+        .objective = "make specialist tool execution explicit",
+        .completion_signal = "return a structured result to decanus",
+        .context = .{
+            .project = "Contubernium",
+            .files = &.{"src/runtime_loop.zig"},
+            .constraints = &.{"preserve commander-first control"},
+            .dependencies = &.{"src/runtime_core.zig"},
+        },
+        .scope = .{
+            .allowed_actions = &.{ "execute_assigned_scope", "request_runtime_tools", "return_structured_result" },
+            .restricted_actions = &.{ "chain_other_specialists", "expand_scope", "finalize_mission" },
+        },
+        .memory = .{
+            .mission = "formalize specialist subordinate execution",
+            .project = "read_file src/runtime_loop.zig",
+            .relevant = &.{"docs/invocation-protocol.md"},
+        },
+        .tool_loop = .{
+            .status = .result_available,
+            .cycle_count = 1,
+            .last_request_summary = "requested 1 runtime tool\n- read_file src/runtime_core.zig",
+            .last_result_summary = "read_file src/runtime_core.zig",
+        },
+        .return_to = .decanus,
+    };
+
+    const prompt = try buildSpecialistUserPrompt(allocator, AppConfig{}, &state, .{
+        .architecture = .{
+            .kind = "architecture",
+            .path = ".contubernium/ARCHITECTURE.md",
+            .content = "Architecture note.",
+            .source_chars = 18,
+        },
+        .plan = .{
+            .kind = "plan",
+            .path = ".contubernium/PLAN.md",
+            .content = "Plan note.",
+            .source_chars = 10,
+        },
+        .project_context = .{
+            .kind = "project_context",
+            .path = ".contubernium/PROJECT_CONTEXT.md",
+            .content = "Context note.",
+            .source_chars = 12,
+        },
+        .project = .{
+            .kind = "project",
+            .path = ".contubernium/project.md",
+            .content = "Project note.",
+            .source_chars = 12,
+        },
+        .global = .{
+            .kind = "global",
+            .path = ".contubernium/global.md",
+            .content = "Global note.",
+            .source_chars = 11,
+        },
+    }, "backend");
+
+    try testing.expect(std.mem.indexOf(u8, prompt, "Project Evidence") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Memory ledger") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Architecture note.") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Plan note.") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Context note.") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Project note.") == null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Global note.") == null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Subordinate tool loop") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Status: result_available") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Completed cycles: 1") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Last request summary: requested 1 runtime tool") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Last result summary: read_file src/runtime_core.zig") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Return to: decanus") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Scope.restricted_actions: chain_other_specialists, expand_scope, finalize_mission") != null);
+}
+
+test "buildDecanusUserPrompt keeps prompt weight on selected evidence only" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+    var state = AppState{};
+    state.mission.initial_prompt = "summarize the project";
+    state.mission.current_goal = "reduce prompt weight";
+
+    const architecture_text =
+        "ARCHITECTURE:\nThis architecture excerpt should stay visible because decanus needs structural evidence.";
+    const plan_text =
+        "PLAN:\nThis plan excerpt should stay out of the selected evidence block for the default decanus profile.";
+    const project_context_text =
+        "PROJECT_CONTEXT:\nThis project context excerpt should stay visible because it defines the active mission frame.";
+    const project_text =
+        "PROJECT:\nThis project memory excerpt should stay visible because it holds durable project knowledge.";
+    const global_text =
+        "GLOBAL:\nThis global memory excerpt should stay visible because it carries constitutional operating guidance.";
+
+    const prompt = try buildDecanusUserPrompt(allocator, AppConfig{}, &state, .{
+        .architecture = .{
+            .kind = "architecture",
+            .path = ".contubernium/ARCHITECTURE.md",
+            .content = architecture_text,
+            .source_chars = architecture_text.len,
+        },
+        .plan = .{
+            .kind = "plan",
+            .path = ".contubernium/PLAN.md",
+            .content = plan_text,
+            .source_chars = plan_text.len,
+        },
+        .project_context = .{
+            .kind = "project_context",
+            .path = ".contubernium/PROJECT_CONTEXT.md",
+            .content = project_context_text,
+            .source_chars = project_context_text.len,
+        },
+        .project = .{
+            .kind = "project",
+            .path = ".contubernium/project.md",
+            .content = project_text,
+            .source_chars = project_text.len,
+        },
+        .global = .{
+            .kind = "global",
+            .path = ".contubernium/global.md",
+            .content = global_text,
+            .source_chars = global_text.len,
+        },
+    });
+
+    try testing.expect(std.mem.indexOf(u8, prompt, project_context_text) != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, project_text) != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, architecture_text) != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, global_text) != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, plan_text) == null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "- plan: path=.contubernium/PLAN.md") != null);
+}
+
+test "buildDecanusUserPrompt keeps greeting-only mission intake in follow-up mode" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+    var state = AppState{};
+    state.mission.initial_prompt = "hello";
+    state.mission.current_goal = "open the mission conversation";
+    state.agent_loop.history = &.{
+        .{
+            .iteration = 1,
+            .type = "operator_reply",
+            .actor = "operator",
+            .lane = "",
+            .summary = "you decide what to inspect",
+            .artifacts = &.{},
+            .timestamp = "1",
+        },
+    };
+
+    const prompt = try buildDecanusUserPrompt(allocator, AppConfig{}, &state, .{
+        .architecture = .{
+            .kind = "architecture",
+            .path = ".contubernium/ARCHITECTURE.md",
+            .content = "System structure lives here.",
+            .source_chars = 26,
+        },
+        .plan = .{
+            .kind = "plan",
+            .path = ".contubernium/PLAN.md",
+            .content = "Current execution order lives here.",
+            .source_chars = 35,
+        },
+        .project_context = .{
+            .kind = "project_context",
+            .path = ".contubernium/PROJECT_CONTEXT.md",
+            .content = "Goals and constraints live here.",
+            .source_chars = 32,
+        },
+        .project = .{
+            .kind = "project",
+            .path = ".contubernium/project.md",
+            .content = "Architecture decisions live here.",
+            .source_chars = 32,
+        },
+        .global = .{
+            .kind = "global",
+            .path = ".contubernium/global.md",
+            .content = "Reusable strategies live here.",
+            .source_chars = 30,
+        },
+    });
+
+    try testing.expect(std.mem.indexOf(u8, prompt, "Latest operator reply:") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "you decide what to inspect") != null);
+}
+
+test "buildPromptWithContextBudget blocks when a required memory layer is missing" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    defer original_cwd.close();
+    try tmp.dir.setAsCwd();
+    defer original_cwd.setAsCwd() catch {};
+
+    var architecture_file = try tmp.dir.createFile("ARCHITECTURE.md", .{ .truncate = true });
+    defer architecture_file.close();
+    try architecture_file.writeAll("Architecture");
+
+    var plan_file = try tmp.dir.createFile("PLAN.md", .{ .truncate = true });
+    defer plan_file.close();
+    try plan_file.writeAll("Plan");
+
+    var project_context_file = try tmp.dir.createFile("PROJECT_CONTEXT.md", .{ .truncate = true });
+    defer project_context_file.close();
+    try project_context_file.writeAll("Project context");
+
+    var project_file = try tmp.dir.createFile("project.md", .{ .truncate = true });
+    defer project_file.close();
+    try project_file.writeAll("Project memory");
+
+    var state = AppState{};
+    state.current_actor = .decanus;
+    state.mission.initial_prompt = "complete phase 7";
+    state.mission.current_goal = "hook memory";
+
+    const config = AppConfig{
+        .paths = .{
+            .architecture_file = "ARCHITECTURE.md",
+            .plan_file = "PLAN.md",
+            .project_context_file = "PROJECT_CONTEXT.md",
+            .project_memory_file = "project.md",
+            .global_memory_file = "global.md",
+        },
+    };
+
+    try testing.expectError(
+        error.MemoryLoadBlocked,
+        buildPromptWithContextBudget(allocator, config, &state, .{}, "system prompt", .decanus, "", null),
+    );
+    try testing.expectEqualStrings("MEMORY_LAYER_MISSING", state.runtime_session.last_failure.code);
+    try testing.expectEqualStrings("global.md", state.runtime_session.last_failure.context.target);
+    try testing.expectEqual(@as(usize, 1), state.agent_loop.history.len);
+    try testing.expectEqualStrings("memory_load_blocked", state.agent_loop.history[0].type);
+}
+
+test "estimatePromptBudget reserves response headroom" {
+    const testing = std.testing;
+    const config = ContextConfig{
+        .estimated_context_window_tokens = 1200,
+        .response_reserve_tokens = 200,
+    };
+
+    const estimate = estimatePromptBudget(config, "system prompt", "user prompt");
+    try testing.expectEqual(@as(usize, 1000), estimate.usable_prompt_tokens);
+    try testing.expect(estimate.prompt_tokens > 0);
+    try testing.expect(estimate.remaining_tokens < estimate.usable_prompt_tokens);
+}
+
+test "condenseHistoryForContext replaces older entries with a retained digest" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+    var state = AppState{};
+    var index: usize = 0;
+    while (index < 6) : (index += 1) {
+        try appendHistory(allocator, &state, .{
+            .iteration = index + 1,
+            .type = "tool_result",
+            .actor = "artifex",
+            .lane = "frontend",
+            .summary = try std.fmt.allocPrint(allocator, "completed slice {d}", .{index + 1}),
+            .artifacts = &.{},
+            .timestamp = "1",
+        });
+    }
+
+    const condensed = try condenseHistoryForContext(allocator, ContextConfig{
+        .condensed_keep_recent_events = 2,
+        .max_condensed_summary_chars = 600,
+    }, &state);
+
+    try testing.expect(condensed);
+    try testing.expectEqual(@as(usize, 3), state.agent_loop.history.len);
+    try testing.expectEqualStrings("condensed_context", state.agent_loop.history[0].type);
+    try testing.expect(std.mem.indexOf(u8, state.agent_loop.history[0].summary, "milestones:") != null);
+    try testing.expectEqual(@as(usize, 1), state.runtime_session.context_budget.condensation_count);
+    try testing.expectEqual(@as(usize, 4), state.runtime_session.context_budget.condensed_history_events);
+}

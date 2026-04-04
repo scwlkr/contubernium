@@ -3278,3 +3278,437 @@ pub fn stdoutPrint(comptime fmt: []const u8, args: anytype) !void {
 pub fn stderrPrint(comptime fmt: []const u8, args: anytype) !void {
     try std.fs.File.stderr().deprecatedWriter().print(fmt, args);
 }
+
+test "resetStateForMission resets canonical phase 3 state surfaces" {
+    const testing = std.testing;
+    var state = AppState{};
+    state.current_actor = .artifex;
+    state.global_status = .waiting_on_tool;
+    state.mission.current_goal = "stale follow-up";
+    state.mission.final_response = "stale response";
+    state.agent_loop.iteration = 9;
+    state.agent_loop.last_tool_result = "stale";
+    state.agent_loop.history = &.{
+        .{
+            .iteration = 7,
+            .type = "operator_reply",
+            .actor = "operator",
+            .lane = "",
+            .summary = "stale reply",
+            .artifacts = &.{},
+            .timestamp = "7",
+        },
+    };
+    state.agent_loop.intermediate_results = &.{
+        .{
+            .iteration = 1,
+            .actor = .decanus,
+            .lane = .command,
+            .kind = "runtime_tool_result",
+            .summary = "stale intermediate result",
+        },
+    };
+    state.runtime_session.status = .blocked;
+    state.tasks.backend.status = .complete;
+
+    resetStateForMission(&state, "implement phase 3");
+
+    try testing.expectEqual(GlobalStatus.planning, state.global_status);
+    try testing.expectEqual(Actor.decanus, state.current_actor);
+    try testing.expectEqualStrings("implement phase 3", state.mission.initial_prompt);
+    try testing.expectEqualStrings("implement phase 3", state.mission.current_goal);
+    try testing.expectEqualStrings("", state.mission.final_response);
+    try testing.expectEqual(LoopStatus.awaiting_initial_prompt, state.agent_loop.status);
+    try testing.expectEqual(@as(usize, 0), state.agent_loop.iteration);
+    try testing.expectEqual(@as(usize, 0), state.agent_loop.history.len);
+    try testing.expectEqual(@as(usize, 0), state.agent_loop.intermediate_results.len);
+    try testing.expectEqual(RuntimeStatus.idle, state.runtime_session.status);
+    try testing.expectEqual(TaskStatus.pending, state.tasks.backend.status);
+}
+
+test "approval transitions update canonical state ownership" {
+    const testing = std.testing;
+    var state = AppState{};
+
+    beginApprovalRequest(&state, .decanus, .command, .shell, "run_command", "zig build test", "zig build test", "zig build test");
+    try testing.expectEqual(RuntimeStatus.awaiting_approval, state.runtime_session.status);
+    try testing.expectEqual(ApprovalStatus.pending, state.runtime_session.active_approval.status);
+    try testing.expectEqual(ApprovalKind.shell, state.runtime_session.active_approval.kind);
+    try testing.expectEqual(LoopStepKind.wait_for_approval, state.agent_loop.last_step.kind);
+
+    resolveApprovalRequest(&state, true);
+    try testing.expectEqual(ApprovalStatus.approved, state.runtime_session.active_approval.status);
+    try testing.expectEqual(RuntimeStatus.running, state.runtime_session.status);
+}
+
+test "blocked transition keeps loop and runtime state aligned" {
+    const testing = std.testing;
+    var state = AppState{};
+    state.current_actor = .decanus;
+
+    stateManager(&state).markBlocked(.decanus, .command, "waiting on operator");
+
+    try testing.expectEqual(GlobalStatus.waiting_on_tool, state.global_status);
+    try testing.expectEqual(LoopStatus.blocked, state.agent_loop.status);
+    try testing.expectEqual(RuntimeStatus.blocked, state.runtime_session.status);
+    try testing.expectEqual(LoopStepKind.blocked, state.agent_loop.last_step.kind);
+    try testing.expectEqualStrings("waiting on operator", state.agent_loop.last_step.summary);
+}
+
+test "resumeAfterOperatorReply clears the blocked state and records operator history" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+    var state = AppState{};
+    state.current_actor = .faber;
+    state.global_status = .waiting_on_tool;
+    state.agent_loop.status = .blocked;
+    state.agent_loop.active_tool = .faber;
+    state.agent_loop.iteration = 2;
+    state.runtime_session.status = .blocked;
+    state.runtime_session.last_error = "Need clarification";
+    state.runtime_session.last_failure = .{
+        .code = "USER_INPUT_REQUIRED",
+        .cause = "Need clarification",
+    };
+
+    try resumeAfterOperatorReply(allocator, &state, "keep this conversational");
+
+    try testing.expectEqual(Actor.decanus, state.current_actor);
+    try testing.expectEqual(GlobalStatus.planning, state.global_status);
+    try testing.expectEqual(LoopStatus.thinking, state.agent_loop.status);
+    try testing.expectEqual(RuntimeStatus.ready, state.runtime_session.status);
+    try testing.expect(state.agent_loop.active_tool == null);
+    try testing.expectEqualStrings("", state.runtime_session.last_error);
+    try testing.expectEqualStrings("", state.runtime_session.last_failure.code);
+    try testing.expectEqualStrings("keep this conversational", state.mission.current_goal);
+    try testing.expectEqual(@as(usize, 1), state.agent_loop.history.len);
+    try testing.expectEqualStrings("operator_reply", state.agent_loop.history[0].type);
+    try testing.expectEqualStrings("operator", state.agent_loop.history[0].actor);
+    try testing.expectEqualStrings("backend", state.agent_loop.history[0].lane);
+    try testing.expectEqualStrings("keep this conversational", state.agent_loop.history[0].summary);
+}
+
+test "resumeAfterOperatorReply clears stale completion state" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+    var state = AppState{};
+    state.current_actor = .decanus;
+    state.global_status = .complete;
+    state.agent_loop.status = .complete;
+    state.runtime_session.status = .complete;
+    state.mission.final_response = "previous answer";
+
+    try resumeAfterOperatorReply(allocator, &state, "what else does it do?");
+
+    try testing.expectEqual(GlobalStatus.planning, state.global_status);
+    try testing.expectEqual(LoopStatus.thinking, state.agent_loop.status);
+    try testing.expectEqual(RuntimeStatus.ready, state.runtime_session.status);
+    try testing.expectEqualStrings("what else does it do?", state.mission.current_goal);
+    try testing.expectEqualStrings("", state.mission.final_response);
+    try testing.expectEqual(@as(usize, 1), state.agent_loop.history.len);
+    try testing.expectEqualStrings("operator_reply", state.agent_loop.history[0].type);
+    try testing.expectEqualStrings("what else does it do?", state.agent_loop.history[0].summary);
+}
+
+test "resumeAfterOperatorReply clears stale intermediate summaries for the next ask" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+    var state = AppState{};
+    state.global_status = .complete;
+    state.mission.final_response = "previous answer";
+    state.agent_loop.intermediate_results = try allocator.dupe(IntermediateResult, &.{
+        .{
+            .iteration = 2,
+            .actor = .decanus,
+            .lane = .command,
+            .kind = "decision_summary",
+            .summary = "action: tool_request",
+        },
+        .{
+            .iteration = 2,
+            .actor = .faber,
+            .lane = .backend,
+            .kind = "specialist_summary",
+            .summary = "action: complete",
+        },
+    });
+
+    try resumeAfterOperatorReply(allocator, &state, "what should happen next?");
+
+    try testing.expectEqual(@as(usize, 0), state.agent_loop.intermediate_results.len);
+    try testing.expectEqualStrings("what should happen next?", state.mission.current_goal);
+}
+
+test "resumeAfterOperatorReply ignores empty replies" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+    var state = AppState{};
+    state.global_status = .complete;
+    state.mission.initial_prompt = "what does this project do?";
+    state.mission.current_goal = "what gaps do you see?";
+    state.mission.final_response = "previous answer";
+    state.runtime_session.status = .complete;
+    state.agent_loop.status = .complete;
+
+    try resumeAfterOperatorReply(allocator, &state, "   \n\t ");
+
+    try testing.expectEqual(GlobalStatus.complete, state.global_status);
+    try testing.expectEqual(LoopStatus.complete, state.agent_loop.status);
+    try testing.expectEqual(RuntimeStatus.complete, state.runtime_session.status);
+    try testing.expectEqualStrings("what gaps do you see?", state.mission.current_goal);
+    try testing.expectEqualStrings("previous answer", state.mission.final_response);
+    try testing.expectEqual(@as(usize, 0), state.agent_loop.history.len);
+}
+
+test "runtime tool result records an explicit loop result step" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+    var state = AppState{};
+    state.current_actor = .decanus;
+    state.global_status = .planning;
+    state.agent_loop.status = .thinking;
+    state.agent_loop.iteration = 2;
+
+    try stateManager(&state).recordRuntimeToolResultStep(allocator, .decanus, .command, "read_file docs/FEATURES.md");
+
+    try testing.expectEqual(GlobalStatus.planning, state.global_status);
+    try testing.expectEqual(LoopStatus.thinking, state.agent_loop.status);
+    try testing.expectEqual(LoopStepKind.result, state.agent_loop.last_step.kind);
+    try testing.expectEqualStrings("read_file docs/FEATURES.md", state.agent_loop.last_step.summary);
+    try testing.expectEqualStrings("read_file docs/FEATURES.md", state.agent_loop.last_tool_result);
+    try testing.expectEqual(@as(usize, 1), state.agent_loop.intermediate_results.len);
+    try testing.expectEqual(@as(usize, 1), state.agent_loop.history.len);
+    try testing.expectEqualStrings("runtime_tool_result", state.agent_loop.history[0].type);
+}
+
+test "specialist runtime tool results keep subordinate loop state explicit" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+    var state = AppState{};
+    state.current_actor = .faber;
+    state.global_status = .waiting_on_tool;
+    state.agent_loop.status = .running_tool;
+    state.agent_loop.iteration = 2;
+    state.tasks.backend.invocation.status = .running;
+    state.tasks.backend.invocation.tool_loop = .{
+        .status = .requested,
+        .cycle_count = 1,
+        .last_request_summary = "requested 1 runtime tool\n- read_file src/runtime_core.zig",
+    };
+
+    try stateManager(&state).recordRuntimeToolResultStep(allocator, .faber, .backend, "read_file src/runtime_core.zig");
+
+    try testing.expectEqual(GlobalStatus.waiting_on_tool, state.global_status);
+    try testing.expectEqual(LoopStatus.running_tool, state.agent_loop.status);
+    try testing.expectEqual(LoopStepKind.result, state.agent_loop.last_step.kind);
+    try testing.expectEqualStrings("read_file src/runtime_core.zig", state.agent_loop.last_tool_result);
+    try testing.expectEqual(InvocationStatus.running, state.tasks.backend.invocation.status);
+    try testing.expectEqual(.result_available, state.tasks.backend.invocation.tool_loop.status);
+    try testing.expectEqual(@as(usize, 1), state.tasks.backend.invocation.tool_loop.cycle_count);
+    try testing.expectEqualStrings(
+        "requested 1 runtime tool\n- read_file src/runtime_core.zig",
+        state.tasks.backend.invocation.tool_loop.last_request_summary,
+    );
+    try testing.expectEqualStrings("read_file src/runtime_core.zig", state.tasks.backend.invocation.tool_loop.last_result_summary);
+}
+
+test "invocation loop transitions keep shared state and history aligned" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+    var state = AppState{};
+    state.project_name = "Contubernium";
+    state.agent_loop.iteration = 3;
+    state.mission.initial_prompt = "ship phase 3";
+    state.mission.current_goal = "centralize state transitions";
+    state.mission.constraints = &.{"keep compatibility"};
+    state.agent_loop.last_tool_result = "read_file src/main.zig";
+
+    try stateManager(&state).prepareInvocationWithHistory(
+        allocator,
+        .backend,
+        .faber,
+        "implement state helpers",
+        "return structured result",
+        &.{"src/main.zig"},
+        "faber::IMPLEMENT_BACKEND",
+        "IMPLEMENT_BACKEND",
+    );
+
+    try testing.expectEqual(Actor.faber, state.current_actor);
+    try testing.expectEqual(GlobalStatus.waiting_on_tool, state.global_status);
+    try testing.expectEqual(LoopStatus.running_tool, state.agent_loop.status);
+    try testing.expectEqual(LoopStepKind.invoke, state.agent_loop.last_step.kind);
+    try testing.expectEqual(Actor.faber, state.agent_loop.active_tool.?);
+    try testing.expectEqual(TaskStatus.in_progress, state.tasks.backend.status);
+    try testing.expectEqual(InvocationStatus.ready, state.tasks.backend.invocation.status);
+    try testing.expectEqualStrings("faber::IMPLEMENT_BACKEND", state.tasks.backend.invocation.agent_call);
+    try testing.expectEqualStrings("IMPLEMENT_BACKEND", state.tasks.backend.invocation.action_name);
+    try testing.expectEqualStrings("centralize state transitions", state.tasks.backend.invocation.memory.mission);
+    try testing.expectEqualStrings("read_file src/main.zig", state.tasks.backend.invocation.memory.project);
+    try testing.expectEqual(.idle, state.tasks.backend.invocation.tool_loop.status);
+    try testing.expectEqual(@as(usize, 1), state.tasks.backend.invocation.context.files.len);
+    try testing.expectEqual(@as(usize, 1), state.agent_loop.history.len);
+    try testing.expectEqualStrings("tool_call", state.agent_loop.history[0].type);
+
+    state.tasks.backend.invocation.tool_loop = .{
+        .status = .result_available,
+        .cycle_count = 1,
+        .last_request_summary = "requested 1 runtime tool\n- read_file src/main.zig",
+        .last_result_summary = "read_file src/main.zig",
+    };
+
+    try stateManager(&state).finalizeInvocationWithHistory(allocator, .backend, .faber, .{
+        .status = .complete,
+        .summary = "implemented state helpers",
+        .changes = &.{"src/main.zig"},
+    }, "");
+
+    try testing.expectEqual(Actor.decanus, state.current_actor);
+    try testing.expectEqual(GlobalStatus.planning, state.global_status);
+    try testing.expectEqual(LoopStatus.thinking, state.agent_loop.status);
+    try testing.expectEqual(LoopStepKind.result, state.agent_loop.last_step.kind);
+    try testing.expect(state.agent_loop.active_tool == null);
+    try testing.expectEqual(RuntimeStatus.idle, state.runtime_session.status);
+    try testing.expectEqual(TaskStatus.complete, state.tasks.backend.status);
+    try testing.expectEqual(InvocationStatus.complete, state.tasks.backend.invocation.status);
+    try testing.expectEqual(.returned, state.tasks.backend.invocation.tool_loop.status);
+    try testing.expectEqual(@as(usize, 1), state.tasks.backend.invocation.tool_loop.cycle_count);
+    try testing.expectEqualStrings(
+        "requested 1 runtime tool\n- read_file src/main.zig",
+        state.tasks.backend.invocation.tool_loop.last_request_summary,
+    );
+    try testing.expectEqualStrings("read_file src/main.zig", state.tasks.backend.invocation.tool_loop.last_result_summary);
+    try testing.expectEqualStrings("implemented state helpers", state.agent_loop.last_tool_result);
+    try testing.expectEqual(@as(usize, 1), state.agent_loop.intermediate_results.len);
+    try testing.expectEqual(@as(usize, 2), state.agent_loop.history.len);
+    try testing.expectEqualStrings("tool_result", state.agent_loop.history[1].type);
+}
+
+test "mission completion records the finish step and history" {
+    const testing = std.testing;
+    const allocator = std.heap.page_allocator;
+    var state = AppState{};
+    state.current_actor = .decanus;
+    state.agent_loop.iteration = 5;
+
+    try stateManager(&state).completeMissionWithHistory(allocator, .decanus, .command, "phase 4 complete");
+
+    try testing.expectEqual(GlobalStatus.complete, state.global_status);
+    try testing.expectEqual(LoopStatus.complete, state.agent_loop.status);
+    try testing.expectEqual(RuntimeStatus.complete, state.runtime_session.status);
+    try testing.expectEqual(LoopStepKind.finish, state.agent_loop.last_step.kind);
+    try testing.expectEqualStrings("phase 4 complete", state.mission.final_response);
+    try testing.expectEqual(@as(usize, 1), state.agent_loop.history.len);
+    try testing.expectEqualStrings("finish", state.agent_loop.history[0].type);
+}
+
+test "intermediate results are recorded canonically in state" {
+    const testing = std.testing;
+    var state = AppState{};
+    state.agent_loop.iteration = 4;
+    defer if (state.agent_loop.intermediate_results.len > 0) testing.allocator.free(state.agent_loop.intermediate_results);
+
+    try stateManager(&state).appendIntermediateResult(testing.allocator, "runtime_tool_result", .decanus, .command, "read_file docs/FEATURES.md");
+    try stateManager(&state).appendIntermediateResult(testing.allocator, "invocation_result", .faber, .backend, "state manager complete");
+
+    try testing.expectEqual(@as(usize, 2), state.agent_loop.intermediate_results.len);
+    try testing.expectEqualStrings("runtime_tool_result", state.agent_loop.intermediate_results[0].kind);
+    try testing.expectEqualStrings("read_file docs/FEATURES.md", state.agent_loop.intermediate_results[0].summary);
+    try testing.expectEqual(Actor.faber, state.agent_loop.intermediate_results[1].actor);
+    try testing.expectEqual(Lane.backend, state.agent_loop.intermediate_results[1].lane);
+    try testing.expectEqualStrings("state manager complete", state.agent_loop.intermediate_results[1].summary);
+}
+
+test "recordRuntimeFailure preserves structured and legacy error surfaces" {
+    const testing = std.testing;
+    var state = AppState{};
+    state.runtime_session.provider = "ollama-native";
+    state.runtime_session.model = "qwen2.5-coder:7b";
+    state.runtime_session.current_turn_id = "turn-42";
+    state.agent_loop.iteration = 4;
+
+    const failure = buildRuntimeFailure(&state, .decanus, .command, "TOOL_TIMEOUT", "Tool execution exceeded 5s", .{
+        .tool = "read_file",
+        .detail = "timeout while reading README.md",
+    });
+    recordRuntimeFailure(&state, failure);
+
+    try testing.expectEqualStrings("Tool execution exceeded 5s", state.runtime_session.last_error);
+    try testing.expectEqualStrings("TOOL_TIMEOUT", state.runtime_session.last_failure.code);
+    try testing.expectEqualStrings("Tool execution exceeded 5s", state.runtime_session.last_failure.cause);
+    try testing.expectEqualStrings("decanus", state.runtime_session.last_failure.context.actor);
+    try testing.expectEqualStrings("command", state.runtime_session.last_failure.context.lane);
+    try testing.expectEqualStrings("read_file", state.runtime_session.last_failure.context.tool);
+    try testing.expectEqualStrings("turn-42", state.runtime_session.last_failure.context.turn_id);
+    try testing.expectEqual(@as(usize, 4), state.runtime_session.last_failure.context.iteration);
+}
+
+test "snapshotFromState prefers the active routed provider over the primary config" {
+    const testing = std.testing;
+    const config = AppConfig{
+        .model_policy = .{
+            .enabled = true,
+            .primary = .{
+                .type = "ollama-native",
+                .model = "qwen2.5-coder:7b",
+            },
+            .fallback = .{
+                .enabled = true,
+                .type = "openrouter",
+                .base_url = "https://openrouter.ai/api",
+                .model = "openai/gpt-5.2-mini",
+                .api_key_env = "OPENROUTER_API_KEY",
+                .app_name = "Contubernium",
+            },
+        },
+    };
+
+    var state = AppState{};
+    state.runtime_session.provider = "openrouter";
+    state.runtime_session.model = "openai/gpt-5.2-mini";
+
+    const snapshot = snapshotFromState(config, state, "Contubernium");
+    try testing.expectEqualStrings("openrouter", snapshot.provider_type);
+    try testing.expectEqualStrings("openai/gpt-5.2-mini", snapshot.model);
+}
+
+test "snapshotFromState uses config and loop state" {
+    const testing = std.testing;
+    const config = AppConfig{};
+    var state = AppState{};
+    state.current_actor = .artifex;
+    state.agent_loop.active_tool = .artifex;
+    state.agent_loop.iteration = 4;
+    state.agent_loop.max_iterations = 24;
+    state.agent_loop.last_tool_result = "read_file README.md";
+    state.runtime_session.status = .running;
+    state.runtime_session.model = "custom-model";
+    state.runtime_session.context_budget = .{
+        .estimated_prompt_chars = 1200,
+        .estimated_prompt_tokens = 300,
+        .context_window_tokens = 32768,
+        .response_reserve_tokens = 4096,
+        .remaining_tokens = 28372,
+        .used_percent = 10,
+        .condensation_count = 1,
+        .condensed_history_events = 5,
+        .last_condensed_iteration = 3,
+    };
+
+    const snapshot = snapshotFromState(config, state, "Contubernium");
+    try testing.expectEqualStrings("Contubernium", snapshot.project_name);
+    try testing.expectEqualStrings("custom-model", snapshot.model);
+    try testing.expectEqualStrings("frontend", snapshot.active_lane);
+    try testing.expectEqualStrings("read_file README.md", snapshot.last_tool_result);
+    try testing.expectEqual(@as(usize, 4), snapshot.iteration);
+    try testing.expectEqual(@as(usize, 24), snapshot.max_iterations);
+    try testing.expectEqual(@as(usize, 300), snapshot.estimated_prompt_tokens);
+    try testing.expectEqual(@as(usize, 28372), snapshot.remaining_context_tokens);
+}
+
+test "toneForOutcome treats interrupted runs as danger" {
+    const testing = std.testing;
+    var state = AppState{};
+    state.runtime_session.status = .interrupted;
+    try testing.expectEqual(ChatTone.danger, toneForOutcome(state));
+}

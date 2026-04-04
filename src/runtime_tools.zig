@@ -1205,3 +1205,267 @@ pub fn confirmTool(
     });
     return approved;
 }
+
+test "runtime tool contracts publish permission class schemas and timeout behavior" {
+    const testing = std.testing;
+    const contracts = runtimeToolContracts();
+
+    try testing.expectEqual(@as(usize, 6), contracts.len);
+
+    const run_command = runtimeToolSpec("run_command").?;
+    try testing.expectEqual(RuntimePermissionClass.execute, run_command.permission_class);
+    try testing.expectEqual(ApprovalKind.shell, run_command.approval_kind);
+    try testing.expectEqual(ToolConfirmationMode.policy_guarded, run_command.confirmation_mode);
+    try testing.expectEqual(RuntimeToolTimeoutBehavior.policy_default, run_command.timeout_behavior);
+    try testing.expect(run_command.input_schema.len > 0);
+    try testing.expect(run_command.output_schema.len > 0);
+
+    const ask_user = runtimeToolSpec("ask_user").?;
+    try testing.expectEqual(RuntimePermissionClass.execute, ask_user.permission_class);
+    try testing.expectEqual(ToolConfirmationMode.none, ask_user.confirmation_mode);
+    try testing.expectEqual(RuntimeToolTimeoutBehavior.none, ask_user.timeout_behavior);
+}
+
+test "toolRequestDisplay prefers command and path fields" {
+    const testing = std.testing;
+    const command_text = try toolRequestDisplay(testing.allocator, .{ .tool = "run_command", .command = "zig build" });
+    defer testing.allocator.free(command_text);
+    try testing.expectEqualStrings("run_command zig build", command_text);
+
+    const path_text = try toolRequestDisplay(testing.allocator, .{ .tool = "read_file", .path = "src/main.zig" });
+    defer testing.allocator.free(path_text);
+    try testing.expectEqualStrings("read_file src/main.zig", path_text);
+
+    const list_text = try toolRequestDisplay(testing.allocator, .{ .tool = "list_files" });
+    defer testing.allocator.free(list_text);
+    try testing.expectEqualStrings("list_files .", list_text);
+}
+
+test "listWorkspaceFiles defaults empty path and skips noisy roots" {
+    const testing = std.testing;
+    const result = try listWorkspaceFiles(testing.allocator, "");
+    defer freeCommandResult(testing.allocator, result);
+
+    try testing.expect(result.exit_code == 0);
+    try testing.expect(std.mem.indexOf(u8, result.stdout, "README.md") != null);
+    try testing.expect(std.mem.indexOf(u8, result.stdout, ".git/") == null);
+}
+
+test "executeToolRequests mediates valid list_files execution through the runtime tool layer" {
+    const testing = std.testing;
+    var state = AppState{};
+
+    const outcome = try executeToolRequests(testing.allocator, AppConfig{}, &state, .decanus, .command, &.{
+        .{ .tool = "list_files" },
+    }, .{});
+    defer testing.allocator.free(outcome.summary);
+
+    try testing.expect(!outcome.blocked);
+    try testing.expect(std.mem.indexOf(u8, outcome.summary, "list_files (exit 0)") != null);
+}
+
+test "executeToolRequests blocks policy-denied commands with structured failure state" {
+    const testing = std.testing;
+    var state = AppState{};
+
+    const outcome = try executeToolRequests(testing.allocator, AppConfig{}, &state, .decanus, .command, &.{
+        .{ .tool = "run_command", .command = "git reset --hard" },
+    }, .{});
+    defer testing.allocator.free(outcome.summary);
+
+    try testing.expect(outcome.blocked);
+    try testing.expectEqualStrings("TOOL_POLICY_BLOCKED", state.runtime_session.last_failure.code);
+    try testing.expectEqualStrings("run_command", state.runtime_session.last_failure.context.tool);
+    try testing.expect(std.mem.indexOf(u8, outcome.summary, "blocked: run_command blocked by policy") != null);
+}
+
+test "commandIsBlocked matches blocked commands at shell segment boundaries" {
+    const testing = std.testing;
+    const patterns = [_][]const u8{
+        "rm -rf",
+        "git reset --hard",
+    };
+
+    try testing.expect(try commandIsBlocked(testing.allocator, patterns[0..], "git reset --hard"));
+    try testing.expect(try commandIsBlocked(testing.allocator, patterns[0..], "echo ready && git reset --hard HEAD~1"));
+    try testing.expect(try commandIsBlocked(testing.allocator, patterns[0..], "FOO=1 sudo git reset --hard"));
+    try testing.expect(!try commandIsBlocked(testing.allocator, patterns[0..], "echo \"git reset --hard\""));
+    try testing.expect(!try commandIsBlocked(testing.allocator, patterns[0..], "printf '%s' 'rm -rf'"));
+}
+
+test "executeToolRequests converts malformed read_file requests into structured failures" {
+    const testing = std.testing;
+    var state = AppState{};
+
+    const outcome = try executeToolRequests(testing.allocator, AppConfig{}, &state, .decanus, .command, &.{
+        .{ .tool = "read_file" },
+    }, .{});
+    defer testing.allocator.free(outcome.summary);
+
+    try testing.expect(outcome.blocked);
+    try testing.expectEqualStrings("MISSING_PATH", state.runtime_session.last_failure.code);
+    try testing.expectEqualStrings("read_file", state.runtime_session.last_failure.context.tool);
+    try testing.expect(std.mem.indexOf(u8, outcome.summary, "blocked: read_file requires a path") != null);
+}
+
+test "executeToolRequests records approval denials through the mediated write_file path" {
+    const testing = std.testing;
+    var state = AppState{};
+    const hooks = RuntimeHooks{
+        .approval_fn = testDenyApproval,
+    };
+
+    const outcome = try executeToolRequests(testing.allocator, AppConfig{}, &state, .decanus, .command, &.{
+        .{ .tool = "write_file", .path = "phase5-test.txt", .content = "salve" },
+    }, hooks);
+    defer testing.allocator.free(outcome.summary);
+
+    try testing.expect(outcome.blocked);
+    try testing.expectEqualStrings("TOOL_DENIED", state.runtime_session.last_failure.code);
+    try testing.expectEqualStrings("write_file", state.runtime_session.last_failure.context.tool);
+    try testing.expectEqual(ApprovalStatus.denied, state.runtime_session.active_approval.status);
+}
+
+test "searchText includes hidden project context while pruning runtime noise" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    defer original_cwd.close();
+    try tmp.dir.setAsCwd();
+    defer original_cwd.setAsCwd() catch {};
+
+    try tmp.dir.makePath(".contubernium/logs");
+
+    var project_context = try tmp.dir.createFile(".contubernium/PROJECT_CONTEXT.md", .{ .truncate = true });
+    defer project_context.close();
+    try project_context.writeAll("Business domain: commander-first execution system.\n");
+
+    var noisy_log = try tmp.dir.createFile(".contubernium/logs/run.log", .{ .truncate = true });
+    defer noisy_log.close();
+    try noisy_log.writeAll("Business domain: log noise.\n");
+
+    const output = try searchText(testing.allocator, "Business domain", ".", 20, 5000);
+    defer testing.allocator.free(output);
+
+    try testing.expect(std.mem.indexOf(u8, output, ".contubernium/PROJECT_CONTEXT.md") != null);
+    try testing.expect(std.mem.indexOf(u8, output, ".contubernium/logs/run.log") == null);
+}
+
+test "searchText truncates root-search hits to the configured limit" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    defer original_cwd.close();
+    try tmp.dir.setAsCwd();
+    defer original_cwd.setAsCwd() catch {};
+
+    var first = try tmp.dir.createFile("first.md", .{ .truncate = true });
+    defer first.close();
+    try first.writeAll("goal one\n");
+
+    var second = try tmp.dir.createFile("second.md", .{ .truncate = true });
+    defer second.close();
+    try second.writeAll("goal two\n");
+
+    var third = try tmp.dir.createFile("third.md", .{ .truncate = true });
+    defer third.close();
+    try third.writeAll("goal three\n");
+
+    const output = try searchText(testing.allocator, "goal", ".", 2, 5000);
+    defer testing.allocator.free(output);
+
+    try testing.expect(std.mem.indexOf(u8, output, "first.md") != null or std.mem.indexOf(u8, output, "second.md") != null or std.mem.indexOf(u8, output, "third.md") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "...[truncated]...") != null);
+}
+
+test "searchText treats leading dash patterns as literal data" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    defer original_cwd.close();
+    try tmp.dir.setAsCwd();
+    defer original_cwd.setAsCwd() catch {};
+
+    var file = try tmp.dir.createFile("flags.md", .{ .truncate = true });
+    defer file.close();
+    try file.writeAll("-n means literal data here\n");
+
+    const output = try searchText(testing.allocator, "-n", ".", 20, 5000);
+    defer testing.allocator.free(output);
+
+    try testing.expect(std.mem.indexOf(u8, output, "flags.md") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "-n means literal data here") != null);
+}
+
+test "executeToolRequests blocks symlink escapes for guarded workspace tools" {
+    const testing = std.testing;
+    var workspace = std.testing.tmpDir(.{});
+    defer workspace.cleanup();
+    var external = std.testing.tmpDir(.{});
+    defer external.cleanup();
+
+    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    defer original_cwd.close();
+    try workspace.dir.setAsCwd();
+    defer original_cwd.setAsCwd() catch {};
+
+    try external.dir.writeFile(.{
+        .sub_path = "secret.txt",
+        .data = "classified\n",
+    });
+
+    const external_root = try external.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(external_root);
+    try workspace.dir.symLink(external_root, "escape", .{ .is_directory = true });
+
+    const requests = [_]ToolRequest{
+        .{ .tool = "list_files", .path = "escape" },
+        .{ .tool = "read_file", .path = "escape/secret.txt" },
+        .{ .tool = "search_text", .pattern = "classified", .path = "escape" },
+        .{ .tool = "write_file", .path = "escape/new.txt", .content = "blocked" },
+    };
+
+    for (requests) |request| {
+        var state = AppState{};
+        const outcome = try executeToolRequests(testing.allocator, AppConfig{}, &state, .decanus, .command, &.{request}, .{});
+        defer testing.allocator.free(outcome.summary);
+
+        try testing.expect(outcome.blocked);
+        try testing.expectEqualStrings("TOOL_PATH_UNSAFE", state.runtime_session.last_failure.code);
+        try testing.expectEqualStrings(request.tool, state.runtime_session.last_failure.context.tool);
+    }
+}
+
+test "executeToolRequests honors session approval bypass for guarded tools" {
+    const testing = std.testing;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var original_cwd = try std.fs.cwd().openDir(".", .{});
+    defer original_cwd.close();
+    try tmp.dir.setAsCwd();
+    defer original_cwd.setAsCwd() catch {};
+
+    var state = AppState{};
+    state.runtime_session.approval_bypass_enabled = true;
+    state.runtime_session.approval_mode = "session-bypass";
+
+    const outcome = try executeToolRequests(testing.allocator, AppConfig{}, &state, .decanus, .command, &.{
+        .{
+            .tool = "write_file",
+            .path = "notes.txt",
+            .content = "phase 4 durable session test",
+        },
+    }, .{ .approval_fn = testDenyApproval });
+    defer testing.allocator.free(outcome.summary);
+
+    try testing.expect(!outcome.blocked);
+    try testing.expect(pathExists("notes.txt"));
+    try testing.expectEqual(ApprovalStatus.idle, state.runtime_session.active_approval.status);
+}
