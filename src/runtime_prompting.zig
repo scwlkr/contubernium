@@ -244,6 +244,64 @@ const initializeRuntimeRunLog = assets_mod.initializeRuntimeRunLog;
 const appendRuntimeRunLogEvent = assets_mod.appendRuntimeRunLogEvent;
 const logRuntimeEvent = assets_mod.logRuntimeEvent;
 
+pub const PromptCache = struct {
+    system_prompt: ?[]const u8 = null,
+    cached_actor: ?Actor = null,
+    cached_action_name: []const u8 = "",
+    asset_layout: ?GlobalAssetLayout = null,
+    routing_guide: ?[]const u8 = null,
+
+    pub fn deinit(self: *PromptCache, allocator: std.mem.Allocator) void {
+        if (self.system_prompt) |sp| allocator.free(sp);
+        if (self.routing_guide) |rg| allocator.free(rg);
+        if (self.asset_layout) |layout| deinitGlobalAssetLayout(allocator, layout);
+        self.* = .{};
+    }
+};
+
+fn currentActionNameForActor(state: *const AppState, actor: Actor) []const u8 {
+    if (actor == .decanus) return "";
+    const lane = laneForActor(actor);
+    const task = taskForLaneConst(state, lane);
+    return task.invocation.action_name;
+}
+
+pub fn resolveOrCacheAssetLayout(allocator: std.mem.Allocator, cache: *PromptCache) !GlobalAssetLayout {
+    if (cache.asset_layout) |layout| return layout;
+    const layout = try resolveGlobalAssetLayout(allocator);
+    cache.asset_layout = layout;
+    return layout;
+}
+
+pub fn assembleOrCacheSystemPrompt(
+    allocator: std.mem.Allocator,
+    layout: GlobalAssetLayout,
+    state: *const AppState,
+    actor: Actor,
+    cache: *PromptCache,
+) ![]const u8 {
+    const current_action = currentActionNameForActor(state, actor);
+    if (cache.system_prompt) |sp| {
+        if (cache.cached_actor == actor and eql(cache.cached_action_name, current_action)) {
+            return try allocator.dupe(u8, sp);
+        }
+        allocator.free(sp);
+        cache.system_prompt = null;
+    }
+    const sp = try assembleSystemPrompt(allocator, layout, state, actor);
+    cache.system_prompt = try allocator.dupe(u8, sp);
+    cache.cached_actor = actor;
+    cache.cached_action_name = current_action;
+    return sp;
+}
+
+pub fn resolveOrCacheRoutingGuide(allocator: std.mem.Allocator, cache: *PromptCache) ![]const u8 {
+    if (cache.routing_guide) |rg| return try allocator.dupe(u8, rg);
+    const rg = try specialistRoutingGuideText(allocator);
+    cache.routing_guide = try allocator.dupe(u8, rg);
+    return rg;
+}
+
 pub fn runtimeMemoryStatusLabel(layer: RuntimeMemoryLayer) []const u8 {
     if (layer.content.len == 0) return "empty";
     if (layer.truncated) return "loaded_truncated";
@@ -717,6 +775,7 @@ fn buildDecanusPromptStaticFragments(
     config: AppConfig,
     state: *const AppState,
     memory: RuntimeMemorySnapshot,
+    cached_routing_guide: ?[]const u8,
 ) !DecanusPromptStaticFragments {
     const profile = promptEvidenceProfile(.decanus, .command);
     const selection = selectedMemoryKinds(memory, profile);
@@ -726,7 +785,7 @@ fn buildDecanusPromptStaticFragments(
         .constraints = try joinStrings(allocator, state.mission.constraints, ", "),
         .success_criteria = try joinStrings(allocator, state.mission.success_criteria, ", "),
         .task_summary = try taskSummaryText(allocator, state.tasks),
-        .routing = try specialistRoutingGuideText(allocator),
+        .routing = if (cached_routing_guide) |rg| try allocator.dupe(u8, rg) else try specialistRoutingGuideText(allocator),
         .memory_ledger = try buildMemoryLedger(allocator, memory, selection),
         .selected_memory = try buildSelectedMemoryExcerpts(allocator, memory, selection, profile.excerpt_chars),
         .last_decision = try compactPromptField(allocator, state.agent_loop.last_decision, 4, 320, "none"),
@@ -795,10 +854,6 @@ fn buildDecanusUserPromptFromFragments(
         \\Success criteria:
         \\{s}
         \\
-        \\Mission handling rules
-        \\----------------------
-        \\{s}
-        \\
         \\Memory ledger
         \\-------------
         \\{s}
@@ -838,7 +893,6 @@ fn buildDecanusUserPromptFromFragments(
             state.mission.initial_prompt,
             fragments.constraints,
             fragments.success_criteria,
-            decanusMissionHandlingGuidanceText(),
             fragments.memory_ledger,
             fragments.selected_memory,
             fragments.routing,
@@ -966,7 +1020,7 @@ pub fn buildDecanusUserPrompt(
     state: *const AppState,
     memory: RuntimeMemorySnapshot,
 ) ![]const u8 {
-    const fragments = try buildDecanusPromptStaticFragments(allocator, config, state, memory);
+    const fragments = try buildDecanusPromptStaticFragments(allocator, config, state, memory, null);
     defer fragments.deinit(allocator);
     return try buildDecanusUserPromptFromFragments(allocator, config, state, fragments);
 }
@@ -1016,6 +1070,7 @@ pub fn assembleSystemPrompt(
                 "- The JSON `action` field must be one of: `finish`, `invoke_specialist`, `tool_request`, `ask_user`, or `blocked`.\n" ++
                 "- Do not use action file names such as `EVALUATE_LOOP`, `INVOKE_SPECIALIST`, or `FINISH_MISSION` as the JSON `action` value.\n",
         );
+        try writer.print("\nMission handling rules\n----------------------\n{s}\n", .{decanusMissionHandlingGuidanceText()});
     }
     try writer.print("\nResponse schema reference:\n{s}\n", .{schema});
     return try buffer.toOwnedSlice(allocator);
@@ -1376,6 +1431,7 @@ pub fn buildPromptWithContextBudget(
     system_prompt: []const u8,
     mode: PromptMode,
     lane: []const u8,
+    cached_routing_guide: ?[]const u8,
 ) !PromptBuildResult {
     const memory = try loadPromptMemorySnapshot(allocator, config, state, hooks);
     errdefer memory.deinit(allocator);
@@ -1398,7 +1454,7 @@ pub fn buildPromptWithContextBudget(
 
     var static_fragments = switch (mode) {
         .decanus => PromptStaticFragments{
-            .decanus = try buildDecanusPromptStaticFragments(allocator, config, state, memory),
+            .decanus = try buildDecanusPromptStaticFragments(allocator, config, state, memory, cached_routing_guide),
         },
         .specialist => PromptStaticFragments{
             .specialist = try buildSpecialistPromptStaticFragments(allocator, config, state, memory, lane),

@@ -3,6 +3,7 @@ const core = @import("runtime_core.zig");
 const model_json = @import("runtime_model_json.zig");
 const assets_mod = @import("runtime_assets.zig");
 const provider_mod = @import("runtime_provider.zig");
+const prompting_mod = @import("runtime_prompting.zig");
 const loop_mod = @import("runtime_loop.zig");
 
 const ProviderConfig = core.ProviderConfig;
@@ -349,7 +350,7 @@ pub fn cmdMissionStep(allocator: std.mem.Allocator) !void {
     var spinner = try CliSpinner.init(allocator);
     defer spinner.deinit();
     try startRunFromState(allocator, config, &state, "mission_step", "single-step execution requested", "", true, spinner.hooks());
-    _ = try executeStep(allocator, config, &state, spinner.hooks());
+    _ = try executeStep(allocator, config, &state, spinner.hooks(), null);
     try finishRunState(allocator, config, &state, "mission_step", spinner.hooks());
     try stdoutPrint("{s}\n", .{try renderCliMissionOutcome(allocator, state)});
 }
@@ -1580,6 +1581,8 @@ fn runLoopWithInlineUserReplies(
     command_label: []const u8,
     hooks: RuntimeHooks,
 ) !void {
+    var prompt_cache = prompting_mod.PromptCache{};
+    defer prompt_cache.deinit(allocator);
     while (true) {
         const pending_question = pendingUserReplyQuestion(state.*);
         if (pending_question.len > 0) {
@@ -1594,7 +1597,7 @@ fn runLoopWithInlineUserReplies(
             }
         }
 
-        try runLoop(allocator, config, state, hooks);
+        try runLoop(allocator, config, state, hooks, &prompt_cache);
         if (pendingUserReplyQuestion(state.*).len == 0) return;
     }
 }
@@ -1895,7 +1898,7 @@ fn workerMain(task: *WorkerTask) void {
                 emitLog(hooks, .danger, "", "Resume Failed", friendlyRuntimeError(scratch, err) catch @errorName(err), .plain);
                 return;
             };
-            runLoop(scratch, config, &state, hooks) catch |err| {
+            runLoop(scratch, config, &state, hooks, null) catch |err| {
                 emitLog(hooks, .danger, "", "Resume Failed", friendlyRuntimeError(scratch, err) catch @errorName(err), .plain);
                 return;
             };

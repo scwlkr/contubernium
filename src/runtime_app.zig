@@ -640,6 +640,10 @@ test "assembleSystemPrompt distinguishes decanus action files from JSON action v
 
     try testing.expect(std.mem.indexOf(u8, prompt, "The JSON `action` field must be one of: `finish`, `invoke_specialist`, `tool_request`, `ask_user`, or `blocked`.") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Do not use action file names such as `EVALUATE_LOOP`, `INVOKE_SPECIALIST`, or `FINISH_MISSION`") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Mission handling rules") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Treat the latest non-empty operator reply as the active ask by default.") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "If the prompt is only a greeting, presence check, or other conversational opener") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "prefer markdown-lite operator output") != null);
 }
 
 test "taskSummaryText hides unassigned default lanes" {
@@ -1496,17 +1500,7 @@ test "buildDecanusUserPrompt includes project context and memory layers" {
     try testing.expect(std.mem.indexOf(u8, prompt, "Helper specialists are explicit-only.") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Active ask:") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Session seed (initial prompt):") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "Mission handling rules") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Selected evidence excerpts") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "Treat the latest non-empty operator reply as the active ask by default.") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "If the prompt is only a greeting, presence check, or other conversational opener") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "If the operator asks what the project does, what problem it solves, or requests a plain-language summary") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "If the operator explicitly asks to brainstorm, ideate, or explore what could take the project further") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "technical, philosophical, product, UX, operational, advertising, distribution, or messaging gaps") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "Do not bounce open-ended creative exploration back to the operator just because the scope is broad.") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "prefer markdown-lite operator output") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "Use fenced code blocks for commands, snippets, or exact terminal text when verbatim formatting helps.") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "Keep trivial one-line replies short.") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Assigned specialist tasks") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "none assigned") != null);
 }
@@ -1885,15 +1879,8 @@ test "buildDecanusUserPrompt keeps greeting-only mission intake in follow-up mod
         },
     });
 
-    try testing.expect(std.mem.indexOf(u8, prompt, "return `action: \"ask_user\"`") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "keep the mission alive by leaving `final_response` empty") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "`Hello! What can I help with?`") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Latest operator reply:") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "you decide what to inspect") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "Treat the initial prompt as session origin and durable provenance") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "Treat the latest non-empty operator reply as the active ask by default.") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "If the operator asks for a read-only exploratory assessment or explicitly says to choose the scope yourself") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "Exploratory answers still keep commander-first control") != null);
 }
 
 test "buildPromptWithContextBudget blocks when a required memory layer is missing" {
@@ -1940,7 +1927,7 @@ test "buildPromptWithContextBudget blocks when a required memory layer is missin
 
     try testing.expectError(
         error.MemoryLoadBlocked,
-        buildPromptWithContextBudget(allocator, config, &state, .{}, "system prompt", .decanus, ""),
+        buildPromptWithContextBudget(allocator, config, &state, .{}, "system prompt", .decanus, "", null),
     );
     try testing.expectEqualStrings("MEMORY_LAYER_MISSING", state.runtime_session.last_failure.code);
     try testing.expectEqualStrings("global.md", state.runtime_session.last_failure.context.target);

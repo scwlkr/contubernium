@@ -13,6 +13,7 @@ pub fn executeSpecialistTurn(
     config: core.AppConfig,
     state: *core.AppState,
     hooks: core.RuntimeHooks,
+    cache: ?*prompting_mod.PromptCache,
 ) !core.StepOutcome {
     const actor = state.current_actor;
     const lane = core.laneForActor(actor);
@@ -28,11 +29,18 @@ pub fn executeSpecialistTurn(
         .include_snapshot = true,
     });
 
-    const asset_layout = try assets_mod.resolveGlobalAssetLayout(allocator);
-    defer assets_mod.deinitGlobalAssetLayout(allocator, asset_layout);
-    const system_prompt = try prompting_mod.assembleSystemPrompt(allocator, asset_layout, state, actor);
+    const layout_cached = cache != null;
+    const asset_layout = if (cache) |c|
+        try prompting_mod.resolveOrCacheAssetLayout(allocator, c)
+    else
+        try assets_mod.resolveGlobalAssetLayout(allocator);
+    defer if (!layout_cached) assets_mod.deinitGlobalAssetLayout(allocator, asset_layout);
+    const system_prompt = if (cache) |c|
+        try prompting_mod.assembleOrCacheSystemPrompt(allocator, asset_layout, state, actor, c)
+    else
+        try prompting_mod.assembleSystemPrompt(allocator, asset_layout, state, actor);
     defer allocator.free(system_prompt);
-    const prompt_build = prompting_mod.buildPromptWithContextBudget(allocator, config, state, hooks, system_prompt, .specialist, core.laneName(lane)) catch |err| {
+    const prompt_build = prompting_mod.buildPromptWithContextBudget(allocator, config, state, hooks, system_prompt, .specialist, core.laneName(lane), null) catch |err| {
         if (err == error.ContextBudgetExceeded or err == error.MemoryLoadBlocked) return .blocked;
         return err;
     };

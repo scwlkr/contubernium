@@ -313,7 +313,10 @@ const executeValidatedToolRequest = tools_mod.executeValidatedToolRequest;
 const toolRequestDisplay = tools_mod.toolRequestDisplay;
 const confirmTool = tools_mod.confirmTool;
 
-pub fn runLoop(allocator: std.mem.Allocator, config: AppConfig, state: *AppState, hooks: RuntimeHooks) !void {
+pub fn runLoop(allocator: std.mem.Allocator, config: AppConfig, state: *AppState, hooks: RuntimeHooks, ext_cache: ?*prompting_mod.PromptCache) !void {
+    var local_cache = prompting_mod.PromptCache{};
+    const cache: *prompting_mod.PromptCache = ext_cache orelse &local_cache;
+    defer if (ext_cache == null) local_cache.deinit(allocator);
     ensureLoopBudget(state);
     while (state.agent_loop.iteration < state.agent_loop.max_iterations) {
         if (hooks.isInterrupted()) {
@@ -332,7 +335,7 @@ pub fn runLoop(allocator: std.mem.Allocator, config: AppConfig, state: *AppState
             return;
         }
 
-        const outcome = try executeStep(allocator, config, state, hooks);
+        const outcome = try executeStep(allocator, config, state, hooks, cache);
         try saveState(allocator, config.paths.state_file, state.*);
         emitStateSnapshot(hooks, config, state.*);
         switch (outcome) {
@@ -382,7 +385,7 @@ pub fn runLoop(allocator: std.mem.Allocator, config: AppConfig, state: *AppState
     emitStateSnapshot(hooks, config, state.*);
 }
 
-pub fn executeStep(allocator: std.mem.Allocator, config: AppConfig, state: *AppState, hooks: RuntimeHooks) !StepOutcome {
+pub fn executeStep(allocator: std.mem.Allocator, config: AppConfig, state: *AppState, hooks: RuntimeHooks, cache: ?*prompting_mod.PromptCache) !StepOutcome {
     if (state.mission.initial_prompt.len == 0) {
         try stderrPrint("mission prompt is empty; use `contubernium mission start`\n", .{});
         return error.MissionNotInitialized;
@@ -408,9 +411,9 @@ pub fn executeStep(allocator: std.mem.Allocator, config: AppConfig, state: *AppS
     emitStateSnapshot(hooks, config, state.*);
 
     if (state.current_actor != .decanus) {
-        return try executeSpecialistTurn(allocator, config, state, hooks);
+        return try executeSpecialistTurn(allocator, config, state, hooks, cache);
     }
-    return try executeDecanusTurn(allocator, config, state, hooks);
+    return try executeDecanusTurn(allocator, config, state, hooks, cache);
 }
 
 pub const executeDecanusTurn = commander_mod.executeDecanusTurn;

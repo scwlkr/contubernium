@@ -45,6 +45,7 @@ pub fn executeDecanusTurn(
     config: core.AppConfig,
     state: *core.AppState,
     hooks: core.RuntimeHooks,
+    cache: ?*prompting_mod.PromptCache,
 ) !core.StepOutcome {
     core.stateManager(state).beginCommanderThinking();
     core.emitStateSnapshot(hooks, config, state.*);
@@ -57,11 +58,20 @@ pub fn executeDecanusTurn(
         .include_snapshot = true,
     });
 
-    const asset_layout = try assets_mod.resolveGlobalAssetLayout(allocator);
-    defer assets_mod.deinitGlobalAssetLayout(allocator, asset_layout);
-    const system_prompt = try prompting_mod.assembleSystemPrompt(allocator, asset_layout, state, .decanus);
+    const layout_cached = cache != null;
+    const asset_layout = if (cache) |c|
+        try prompting_mod.resolveOrCacheAssetLayout(allocator, c)
+    else
+        try assets_mod.resolveGlobalAssetLayout(allocator);
+    defer if (!layout_cached) assets_mod.deinitGlobalAssetLayout(allocator, asset_layout);
+    const system_prompt = if (cache) |c|
+        try prompting_mod.assembleOrCacheSystemPrompt(allocator, asset_layout, state, .decanus, c)
+    else
+        try prompting_mod.assembleSystemPrompt(allocator, asset_layout, state, .decanus);
     defer allocator.free(system_prompt);
-    const prompt_build = prompting_mod.buildPromptWithContextBudget(allocator, config, state, hooks, system_prompt, .decanus, "") catch |err| {
+    const routing_guide_resolved = if (cache) |c| try prompting_mod.resolveOrCacheRoutingGuide(allocator, c) else null;
+    defer if (routing_guide_resolved) |rg| allocator.free(rg);
+    const prompt_build = prompting_mod.buildPromptWithContextBudget(allocator, config, state, hooks, system_prompt, .decanus, "", routing_guide_resolved) catch |err| {
         if (err == error.ContextBudgetExceeded or err == error.MemoryLoadBlocked) return .blocked;
         return err;
     };
